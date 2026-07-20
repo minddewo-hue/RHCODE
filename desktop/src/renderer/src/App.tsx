@@ -1,7 +1,5 @@
 import {
   Activity,
-  Archive,
-  ArchiveRestore,
   Bot,
   Check,
   ChevronDown,
@@ -12,7 +10,6 @@ import {
   File,
   FolderOpen,
   GitBranch,
-  History,
   Image as ImageIcon,
   KeyRound,
   Network,
@@ -32,7 +29,6 @@ import {
   Smartphone,
   Settings,
   Square,
-  TerminalSquare,
   Trash2,
   X,
 } from "lucide-react";
@@ -58,13 +54,9 @@ import type {
   RpcNotification,
   SandboxMode,
   SyncStatus,
-  TerminalStatus,
   UpdateStatus,
 } from "../../shared/desktop-api";
-import { FitAddon } from "@xterm/addon-fit";
-import { Terminal as XtermTerminal } from "@xterm/xterm";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type MouseEvent as ReactMouseEvent } from "react";
-import "@xterm/xterm/css/xterm.css";
 
 interface ChatMessage extends ConversationMessage {
   streaming?: boolean;
@@ -137,7 +129,6 @@ export function App() {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [threadSearch, setThreadSearch] = useState("");
-  const [showArchived, setShowArchived] = useState(false);
   const [threadActionsId, setThreadActionsId] = useState<string | null>(null);
   const [threadMenuPosition, setThreadMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
@@ -161,14 +152,12 @@ export function App() {
   const [activeThreadIds, setActiveThreadIds] = useState<Set<string>>(() => new Set());
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [rightView, setRightView] = useState<"activity" | "settings">("activity");
-  const [primaryView, setPrimaryView] = useState<"workspace" | "terminal">("workspace");
   const projectPickerRef = useRef<HTMLButtonElement | null>(null);
   const threadActionsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const conversationRef = useRef<HTMLElement | null>(null);
   const selectedProjectPathRef = useRef(projectPath);
   const selectedThreadIdRef = useRef<string | null>(null);
   const navigationRevisionRef = useRef(0);
-  const showArchivedRef = useRef(showArchived);
   const threadSearchRef = useRef(threadSearch);
   const followConversationRef = useRef(true);
   const lastPrompt = useRef("");
@@ -182,10 +171,6 @@ export function App() {
     selectedThreadIdRef.current = threadId;
     if (projectPath && threadId) storeLastThread(projectPath, threadId);
   }, [projectPath, threadId]);
-
-  useEffect(() => {
-    showArchivedRef.current = showArchived;
-  }, [showArchived]);
 
   useEffect(() => {
     threadSearchRef.current = threadSearch;
@@ -224,7 +209,7 @@ export function App() {
       });
     }, 220);
     return () => window.clearTimeout(timeout);
-  }, [agentStatus.state, projectPath, threadSearch, showArchived]);
+  }, [agentStatus.state, projectPath, threadSearch]);
 
   useEffect(() => {
     if (!followConversationRef.current) return;
@@ -437,7 +422,6 @@ export function App() {
     const availableThreads = await window.rhzycode.listThreads({
       ...(requestedProject ? { cwd: requestedProject } : {}),
       ...(threadSearch.trim() ? { searchTerm: threadSearch.trim() } : {}),
-      archived: showArchived,
     });
     if (requestedProject === selectedProjectPathRef.current) setThreads(availableThreads);
   }
@@ -457,7 +441,7 @@ export function App() {
     resetConversation();
     followConversationRef.current = true;
     try {
-      const availableThreads = await window.rhzycode.listThreads({ cwd: path, archived: showArchived });
+      const availableThreads = await window.rhzycode.listThreads({ cwd: path });
       if (revision !== navigationRevisionRef.current) return;
       setThreads(availableThreads);
       const preferredThreadId = storedLastThread(path);
@@ -540,19 +524,6 @@ export function App() {
     const failure = saved.find((result): result is PromiseRejectedResult => result.status === "rejected");
     if (failure) {
       upsertActivity(`attachment-error-${Date.now()}`, "Clipboard image unavailable", getErrorMessage(failure.reason), "error");
-    }
-  }
-
-  async function toggleArchive(selectedThreadId: string) {
-    if (activeThreadIds.has(selectedThreadId) || openingThreadId === selectedThreadId) return;
-    try {
-      if (showArchived) await window.rhzycode.unarchiveThread(selectedThreadId);
-      else await window.rhzycode.archiveThread(selectedThreadId);
-      closeThreadActions();
-      if (selectedThreadId === threadId) startNewTask();
-      await loadThreads();
-    } catch (error) {
-      upsertActivity(`archive-error-${Date.now()}`, "Thread update failed", getErrorMessage(error), "error");
     }
   }
 
@@ -685,7 +656,7 @@ export function App() {
           status: "running",
           updatedAt: new Date().toISOString(),
         };
-        if (selectedProjectPathRef.current === submissionProject && !showArchivedRef.current) {
+        if (selectedProjectPathRef.current === submissionProject) {
           setThreads((current) => [
             createdThread,
             ...current.filter((thread) => thread.id !== activeThreadId),
@@ -990,8 +961,7 @@ export function App() {
       markThreadActive(event.thread.id, active);
       if (event.thread.id === selectedThreadIdRef.current) setRunning(active);
       const searchTerm = threadSearchRef.current.trim().toLowerCase();
-      const belongsInCurrentList = !showArchivedRef.current
-        && event.thread.projectPath === selectedProjectPathRef.current
+      const belongsInCurrentList = event.thread.projectPath === selectedProjectPathRef.current
         && (!searchTerm || event.thread.title.toLowerCase().includes(searchTerm));
       setThreads((current) => {
         const existingIndex = current.findIndex((thread) => thread.id === event.thread.id);
@@ -1085,15 +1055,6 @@ export function App() {
 
   return (
     <div className={`app-shell ${rightPanelOpen ? "with-panel" : ""}`}>
-      <nav className="rail" aria-label="Primary navigation">
-        <div className="brand-mark" title="RHZYCODE">R</div>
-        <button className={`rail-button ${primaryView === "workspace" && !showArchived ? "active" : ""}`} title="Workspace" aria-label="Workspace" aria-current={primaryView === "workspace" && !showArchived ? "page" : undefined} onClick={() => { setPrimaryView("workspace"); setShowArchived(false); }}><Bot size={19} /></button>
-        <button className={`rail-button ${showArchived ? "active" : ""}`} title="Archived threads" aria-label="Archived threads" aria-current={showArchived ? "page" : undefined} onClick={() => { setPrimaryView("workspace"); setShowArchived(true); }}><History size={19} /></button>
-        <button className={`rail-button ${primaryView === "terminal" ? "active" : ""}`} title="Terminal" aria-label="Terminal" aria-current={primaryView === "terminal" ? "page" : undefined} onClick={() => setPrimaryView("terminal")}><TerminalSquare size={19} /></button>
-        <div className="rail-spacer" />
-        <button className={`rail-button ${rightView === "settings" && rightPanelOpen ? "active" : ""}`} title="Settings" aria-label="Settings" aria-pressed={rightView === "settings" && rightPanelOpen} onClick={() => { setRightView("settings"); setRightPanelOpen(true); }}><Settings size={19} /></button>
-      </nav>
-
       <aside className="sidebar">
         <div className="sidebar-header">
           <div><span className="product-name">RHZYCODE</span><span className="product-channel">DESKTOP</span></div>
@@ -1134,7 +1095,7 @@ export function App() {
         </div>
 
         <div className="section-heading">
-          <span>{showArchived ? "Archived" : "Tasks"} ({threads.length})</span>
+          <span>Tasks ({threads.length})</span>
           <button className="icon-button compact" title="New task" aria-label="New task" onClick={startNewTask}><Plus size={15} /></button>
         </div>
         <label className="thread-search">
@@ -1174,19 +1135,15 @@ export function App() {
               {threadActionsId === thread.id && threadMenuPosition && (
                 <div className="thread-actions-menu" role="menu" style={threadMenuPosition}>
                   <button role="menuitem" onClick={() => beginRename(thread)}><Pencil size={13} /> Rename task</button>
-                  <button role="menuitem" disabled={activeThreadIds.has(thread.id)} onClick={() => void toggleArchive(thread.id)}>{showArchived ? <ArchiveRestore size={13} /> : <Archive size={13} />} {showArchived ? "Restore task" : "Archive task"}</button>
                   <button role="menuitem" className="danger" onClick={() => void permanentlyDeleteThread(thread.id)}><Trash2 size={13} /> Delete task permanently</button>
                 </div>
               )}
             </div>
-          )) : <div className="sidebar-empty">{threadSearch ? "No matching threads" : showArchived ? "No archived threads" : "No tasks in this project"}</div>}
+          )) : <div className="sidebar-empty">{threadSearch ? "No matching threads" : "No tasks in this project"}</div>}
         </div>
 
       </aside>
 
-      {primaryView === "terminal" ? (
-        <TerminalWorkspace cwd={projectPath} onChooseProject={chooseProject} />
-      ) : (
       <main className="workspace">
         <header className="workspace-header">
           <div className="workspace-title">
@@ -1324,7 +1281,6 @@ export function App() {
           </div>
         </div>
       </main>
-      )}
 
       {rightPanelOpen && (
         <aside className="activity-panel">
@@ -1408,165 +1364,6 @@ function userMessageFromNotification(id: string, item: Record<string, unknown>):
     return [{ path: imagePath, name: imagePath.split(/[\\/]/).at(-1) || "image" }];
   });
   return { id, role: "user", content, ...(images.length ? { images } : {}) };
-}
-
-function TerminalWorkspace({
-  cwd,
-  onChooseProject,
-}: {
-  cwd: string;
-  onChooseProject: () => Promise<string | null>;
-}) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const terminalRef = useRef<XtermTerminal | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
-  const statusRef = useRef<TerminalStatus | null>(null);
-  const [status, setStatus] = useState<TerminalStatus | null>(null);
-  const [starting, setStarting] = useState(false);
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-    const terminal = new XtermTerminal({
-      cursorBlink: true,
-      fontFamily: '"Cascadia Code", "SFMono-Regular", Consolas, monospace',
-      fontSize: 12,
-      letterSpacing: 0,
-      lineHeight: 1.2,
-      scrollback: 5_000,
-      theme: {
-        background: "#171b18",
-        foreground: "#e8ece7",
-        cursor: "#9fbaa7",
-        selectionBackground: "#53665a88",
-        black: "#242925",
-        red: "#e37b70",
-        green: "#83bc91",
-        yellow: "#d8b66b",
-        blue: "#80a9cf",
-        magenta: "#b89bd1",
-        cyan: "#77b9b5",
-        white: "#e8ece7",
-      },
-    });
-    const fit = new FitAddon();
-    terminal.loadAddon(fit);
-    terminal.open(containerRef.current);
-    terminalRef.current = terminal;
-    fitRef.current = fit;
-
-    const fitTerminal = () => {
-      try {
-        fit.fit();
-        const current = statusRef.current;
-        if (current?.running) {
-          void window.rhzycode.resizeTerminal(current.processId, terminal.cols, terminal.rows);
-        }
-      } catch {
-        return;
-      }
-    };
-    const resizeObserver = new ResizeObserver(fitTerminal);
-    resizeObserver.observe(containerRef.current);
-    requestAnimationFrame(fitTerminal);
-
-    const dataDisposable = terminal.onData((data) => {
-      const current = statusRef.current;
-      if (current?.running) {
-        void window.rhzycode.writeTerminal(current.processId, data).catch((error: unknown) => {
-          terminal.writeln(`\r\n[write failed: ${getErrorMessage(error)}]`);
-        });
-      }
-    });
-    const unsubscribeStatus = window.rhzycode.onTerminalStatus((value) => {
-      const previous = statusRef.current;
-      statusRef.current = value;
-      setStatus(value);
-      if (previous?.running && value && !value.running) {
-        terminal.writeln(`\r\n[process exited${value.exitCode == null ? "" : `: ${value.exitCode}`}]`);
-      }
-    });
-    const unsubscribeOutput = window.rhzycode.onTerminalOutput((value) => {
-      if (!statusRef.current || value.processId === statusRef.current.processId) {
-        terminal.write(value.delta);
-      }
-    });
-    void window.rhzycode.getTerminalStatus().then((value) => {
-      statusRef.current = value;
-      setStatus(value);
-      if (value?.output) terminal.write(value.output);
-    });
-
-    return () => {
-      resizeObserver.disconnect();
-      dataDisposable.dispose();
-      unsubscribeStatus();
-      unsubscribeOutput();
-      terminal.dispose();
-      terminalRef.current = null;
-      fitRef.current = null;
-    };
-  }, []);
-
-  async function start() {
-    const selectedCwd = cwd || await onChooseProject();
-    if (!selectedCwd || !terminalRef.current) return;
-    setStarting(true);
-    try {
-      terminalRef.current.reset();
-      fitRef.current?.fit();
-      const next = await window.rhzycode.startTerminal({
-        cwd: selectedCwd,
-        cols: terminalRef.current.cols,
-        rows: terminalRef.current.rows,
-      });
-      statusRef.current = next;
-      setStatus(next);
-      terminalRef.current.focus();
-    } catch (error) {
-      terminalRef.current.writeln(`[start failed: ${getErrorMessage(error)}]`);
-    } finally {
-      setStarting(false);
-    }
-  }
-
-  async function stop() {
-    if (!status?.running) return;
-    try {
-      await window.rhzycode.stopTerminal(status.processId);
-    } catch (error) {
-      terminalRef.current?.writeln(`\r\n[stop failed: ${getErrorMessage(error)}]`);
-    }
-  }
-
-  return (
-    <main className="terminal-workspace">
-      <header className="workspace-header terminal-header">
-        <div className="workspace-title">
-          <TerminalSquare size={16} />
-          <span>Terminal</span>
-          <span className="branch-name">{status?.cwd || cwd || "No project"}</span>
-        </div>
-        <div className="terminal-actions">
-          {status?.running ? (
-            <button className="icon-button" title="Stop terminal" onClick={() => void stop()}><Square size={15} /></button>
-          ) : status ? (
-            <button className="icon-button" title="Start terminal" disabled={starting} onClick={() => void start()}>
-              {starting ? <RefreshCw size={15} /> : <Play size={15} />}
-            </button>
-          ) : null}
-        </div>
-      </header>
-      <section className="terminal-surface">
-        <div className="terminal-container" ref={containerRef} role="application" aria-label="Terminal session" />
-        {!status && !starting && (
-          <button className="terminal-start" onClick={() => void start()}>
-            <Play size={16} /> {cwd ? "Start terminal" : "Select project"}
-          </button>
-        )}
-        {status?.error && <div className="terminal-error" role="alert">{status.error}</div>}
-      </section>
-    </main>
-  );
 }
 
 function ActivityView({

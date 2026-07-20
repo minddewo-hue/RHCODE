@@ -79,10 +79,9 @@ test.afterAll(async () => {
 });
 
 test("supports core desktop workflows at the minimum window size", async () => {
-  const rail = page.getByRole("navigation", { name: "Primary navigation" });
   await assertVisibleControlsHaveNames(page);
   await assertMinimumWindowLayout(page);
-  await expect(rail.getByRole("button", { name: "Credentials" })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Primary navigation" })).toHaveCount(0);
   const modelSelect = page.getByRole("combobox", { name: "Model for next turn" });
   await modelSelect.selectOption("ui/second");
   await expect(modelSelect).toHaveValue("ui/second");
@@ -102,7 +101,6 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(closePanel).toBeHidden();
 
   await panelToggle.click();
-  await expect(rail.getByRole("button", { name: "Internal gateway" })).toHaveCount(0);
   await assertSidePanelDoesNotCoverWorkspace(page);
   await expect(page).toHaveScreenshot("desktop-minimum-panel-open.png", {
     animations: "disabled",
@@ -271,16 +269,6 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await page.getByRole("button", { name: "Save name" }).click();
   await expect(getThreadRow(page, "Renamed UI thread")).toBeVisible();
 
-  await openThreadActions(page, "Renamed UI thread");
-  await page.getByRole("menuitem", { name: "Archive task" }).click();
-  await expect(getThreadRow(page, "Renamed UI thread")).toBeHidden();
-  await rail.getByRole("button", { name: "Archived threads" }).click();
-  await expect(getThreadRow(page, "Renamed UI thread")).toBeVisible();
-  await openThreadActions(page, "Renamed UI thread");
-  await page.getByRole("menuitem", { name: "Restore task" }).click();
-  await expect(getThreadRow(page, "Renamed UI thread")).toBeHidden();
-  await rail.getByRole("button", { name: "Workspace" }).click();
-  await expect(getThreadRow(page, "Renamed UI thread")).toBeVisible();
   await sendSyncEvent(electronApp, {
     type: "thread.updated",
     sequence: 3,
@@ -410,7 +398,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await skipCard.getByRole("button", { name: "Skip" }).click();
   await expect(skipCard).toBeHidden();
 
-  await rail.getByRole("button", { name: "Settings" }).focus();
+  await page.getByRole("tab", { name: "Settings" }).focus();
   await page.keyboard.press("Enter");
   await expect(page.getByText("Mobile connection", { exact: true })).toBeVisible();
   await expect(page.getByText("Local state protection", { exact: true })).toHaveCount(0);
@@ -489,25 +477,6 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect.poll(() => ipcCalls(electronApp, "updates:install").then((calls) => calls.length)).toBeGreaterThan(0);
   await page.getByRole("button", { name: "Close side panel" }).click();
 
-  await rail.getByRole("button", { name: "Terminal" }).focus();
-  await page.keyboard.press("Enter");
-  await expect(page.getByRole("application", { name: "Terminal session" })).toBeVisible();
-  const terminalActions = page.locator(".terminal-actions");
-  await expect(terminalActions.getByRole("button", { name: "Start terminal" })).toHaveCount(0);
-  await page.locator(".terminal-start").click();
-  await expect(terminalActions.getByRole("button", { name: "Stop terminal" })).toBeVisible();
-  await page.getByRole("application", { name: "Terminal session" }).click();
-  await page.keyboard.type("echo ui");
-  await page.keyboard.press("Enter");
-  await expect.poll(() => ipcCalls(electronApp, "terminal:write").then((calls) => calls.length)).toBeGreaterThan(0);
-  await terminalActions.getByRole("button", { name: "Stop terminal" }).click();
-  await expect(terminalActions.getByRole("button", { name: "Start terminal" })).toBeVisible();
-  await terminalActions.getByRole("button", { name: "Start terminal" }).click();
-  await terminalActions.getByRole("button", { name: "Stop terminal" }).click();
-  await expect.poll(() => ipcCalls(electronApp, "terminal:start").then((calls) => calls.length)).toBe(2);
-  await expect.poll(() => ipcCalls(electronApp, "terminal:stop").then((calls) => calls.length)).toBe(2);
-
-  await rail.getByRole("button", { name: "Workspace" }).click();
   const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
   await pasteImage(taskPrompt, "clipboard-turn.png");
   await expect(page.getByText("clipboard-turn.png", { exact: true })).toBeVisible();
@@ -522,8 +491,6 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(page.locator(".send-button.stop")).toBeVisible();
   await expect(page.getByRole("button", { name: "New task" })).toBeEnabled();
   await expect(page.locator(".project-picker")).toBeEnabled();
-  await expect(rail.getByRole("button", { name: "Archived threads" })).toBeEnabled();
-  await expect(rail.getByRole("button", { name: "Terminal" })).toBeEnabled();
   await expect(modelSelect).toBeEnabled();
 
   await modelSelect.selectOption("ui/second");
@@ -558,7 +525,6 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect.poll(() => ipcCalls(electronApp, "agent:turn:start").then((calls) => calls.map((call) => (
     call.args[0] as { model?: string }
   ).model))).toEqual(["ui/model", "ui/second", "ui/second", "ui/second"]);
-  await page.getByRole("button", { name: "Close side panel" }).click();
   await page.getByRole("button", { name: "New task" }).click();
 
   await electronApp.evaluate(({ BrowserWindow }) => {
@@ -590,25 +556,18 @@ async function pasteImage(prompt: ReturnType<Page["getByRole"]>, name: string): 
 
 async function installDeterministicUpdate(activePage: Page): Promise<void> {
   const install = activePage.getByRole("button", { name: "Install and restart" });
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      if (await install.isVisible()) {
-        await install.click();
-        return;
-      }
-      const check = activePage.getByRole("button", { name: "Check for updates" });
-      await check.waitFor({ state: "visible", timeout: 5_000 });
-      await check.click();
-      const download = activePage.getByRole("button", { name: "Download 0.2.0" });
-      await download.waitFor({ state: "visible", timeout: 3_000 });
-      await download.click();
-      await install.click({ timeout: 3_000 });
+  const download = activePage.getByRole("button", { name: "Download 0.2.0" });
+  const check = activePage.getByRole("button", { name: "Check for updates" });
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    if (await install.isVisible()) {
+      await install.click();
       return;
-    } catch {
-      // The real startup update check may overwrite the deterministic state once.
     }
+    if (await download.isVisible()) await download.click();
+    else if (await check.isVisible()) await check.click();
+    await activePage.waitForTimeout(100);
   }
-  throw new Error("The deterministic update never reached the downloaded state.");
+  throw new Error("The deterministic update did not reach the install state.");
 }
 
 async function assertVisibleControlsHaveNames(activePage: Page): Promise<void> {

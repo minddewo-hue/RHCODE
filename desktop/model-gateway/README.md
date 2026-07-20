@@ -19,7 +19,7 @@ Copy-Item gateway.config.example.json gateway.config.json
 Copy-Item .env.example ..\.env
 ```
 
-Edit `gateway.config.json` so every public model maps to a real provider and upstream model. Then replace all placeholder values in `desktop/.env`. The desktop app and standalone gateway launcher both load that file. Never put a key directly in JSON; `api_key` is rejected and `api_key_env` must reference a non-empty environment variable.
+Edit `gateway.config.json` so every public model maps to a real provider and upstream model. Configure at least one Provider key in `desktop/.env`; Providers without a key and models that depend only on them are skipped at startup. Configure multiple keys to load models from multiple Providers. The desktop app and standalone gateway launcher both load that file. Never put a key directly in JSON; `api_key` is rejected and `api_key_env` must reference an environment variable when that Provider is enabled.
 
 The bundled example defines:
 

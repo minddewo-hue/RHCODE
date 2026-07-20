@@ -143,6 +143,92 @@ test("loads a provider key from the desktop env path for the configured upstream
   assert.equal(usedConfiguredKey, true);
 });
 
+test("loads models from any provider with a configured credential", async (context) => {
+  const firstKey = "RHZYCODE_OPTIONAL_PROVIDER_FIRST_KEY";
+  const secondKey = "RHZYCODE_OPTIONAL_PROVIDER_SECOND_KEY";
+  const previousFirst = process.env[firstKey];
+  const previousSecond = process.env[secondKey];
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-optional-providers-"));
+  fs.writeFileSync(path.join(rootDir, "gateway.config.json"), JSON.stringify({
+    providers: {
+      first: {
+        base_url: "http://127.0.0.1:65534/v1",
+        protocol: "responses",
+        api_key_env: firstKey,
+      },
+      second: {
+        base_url: "http://127.0.0.1:65533/v1",
+        protocol: "chat_completions",
+        api_key_env: secondKey,
+      },
+    },
+    models: {
+      "first/model": { provider: "first", upstream_model: "first-model" },
+      "second/model": { provider: "second", upstream_model: "second-model" },
+      "shared/model": {
+        provider: "first",
+        upstream_model: "shared-first",
+        fallbacks: [{ provider: "second", upstream_model: "shared-second" }],
+      },
+    },
+  }));
+
+  context.after(() => {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    if (previousFirst === undefined) delete process.env[firstKey];
+    else process.env[firstKey] = previousFirst;
+    if (previousSecond === undefined) delete process.env[secondKey];
+    else process.env[secondKey] = previousSecond;
+  });
+
+  const cases = [
+    {
+      first: "first-key",
+      second: undefined,
+      providers: ["first"],
+      models: ["first/model", "shared/model"],
+    },
+    {
+      first: undefined,
+      second: "second-key",
+      providers: ["second"],
+      models: ["second/model", "shared/model"],
+    },
+    {
+      first: "first-key",
+      second: "second-key",
+      providers: ["first", "second"],
+      models: ["first/model", "second/model", "shared/model"],
+    },
+  ];
+
+  for (const testCase of cases) {
+    if (testCase.first === undefined) delete process.env[firstKey];
+    else process.env[firstKey] = testCase.first;
+    if (testCase.second === undefined) delete process.env[secondKey];
+    else process.env[secondKey] = testCase.second;
+
+    const gateway = await startEmbeddedGateway({ rootDir, port: 0 });
+    try {
+      assert.equal(gateway.providerCount, testCase.providers.length);
+      assert.deepEqual(
+        [...new Set(gateway.models.map((model) => model.providerId))],
+        testCase.providers,
+      );
+      assert.deepEqual(gateway.models.map((model) => model.id), testCase.models);
+    } finally {
+      await gateway.stop();
+    }
+  }
+
+  delete process.env[firstKey];
+  delete process.env[secondKey];
+  await assert.rejects(
+    startEmbeddedGateway({ rootDir, port: 0 }),
+    /Configure at least one provider credential/,
+  );
+});
+
 test("discovers provider models at startup and makes them routable", async (context) => {
   const upstream = http.createServer((request, response) => {
     if (request.url === "/v1/models") {

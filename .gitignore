@@ -10,6 +10,7 @@ test-results/
 .DS_Store
 
 # Local credentials and generated gateway state
+*.env
 desktop/.env
 desktop/model-gateway/gateway.config.json
 desktop/model-gateway/.proxy.pid

@@ -21,7 +21,7 @@ npm run audit:release --workspace @rhzycode/desktop
 
 ## Provider credentials
 
-Installed builds store Provider API keys in `%APPDATA%\@rhzycode\desktop\gateway-credentials.json`. Values are encrypted with Electron `safeStorage` and Windows DPAPI. The renderer receives only configured/source status and never receives stored plaintext values.
+Installed builds store Provider API keys in `%APPDATA%\@rhzycode\desktop\gateway-credentials.json`. Values are encrypted with Electron `safeStorage` and Windows DPAPI. The renderer receives only configured/source status and never receives stored plaintext values. At least one Provider key is required; Providers without a key and their exclusive models remain disabled.
 
 Source development also loads keys from `desktop/.env`; an external gateway directory may be selected with `RHZYCODE_GATEWAY_HOME`. Installed builds use the secure store, whose values take precedence over environment-loaded keys. The release never packages `.env`.
 

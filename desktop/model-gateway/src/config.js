@@ -76,15 +76,29 @@ function normalizeConfig(raw, meta) {
     throw new Error("Gateway config must be a JSON object.");
   }
 
-  const providers = new Map();
+  const declaredProviders = new Map();
   for (const [id, value] of Object.entries(raw.providers || {})) {
-    providers.set(id, normalizeProvider(id, value));
+    declaredProviders.set(id, normalizeProvider(id, value));
   }
-  if (providers.size === 0) throw new Error("Gateway config has no providers.");
+  if (declaredProviders.size === 0) throw new Error("Gateway config has no providers.");
+
+  const providers = new Map(
+    [...declaredProviders].filter(([, provider]) => provider.credentialAvailable),
+  );
+  if (providers.size === 0) {
+    const credentialNames = [...declaredProviders.values()]
+      .map((provider) => provider.apiKeyEnv)
+      .filter(Boolean);
+    const requirement = credentialNames.length > 0
+      ? ` Configure at least one provider credential: ${credentialNames.join(", ")}.`
+      : "";
+    throw new Error(`Gateway config has no available providers.${requirement}`);
+  }
 
   const models = new Map();
   for (const [id, value] of Object.entries(raw.models || {})) {
-    models.set(id, normalizeModel(id, value, providers));
+    const model = normalizeModel(id, value, declaredProviders);
+    if (model) models.set(id, model);
   }
   const disabledModels = normalizeDisabledModels(raw.disabled_models);
   for (const id of disabledModels.keys()) models.delete(id);
@@ -172,9 +186,7 @@ function normalizeProvider(id, value) {
   }
 
   const apiKeyEnv = value.api_key_env || "";
-  if (apiKeyEnv && !process.env[apiKeyEnv]) {
-    throw new Error(`Provider ${id} requires missing environment variable ${apiKeyEnv}.`);
-  }
+  const apiKey = apiKeyEnv ? process.env[apiKeyEnv]?.trim() || "" : "";
 
   const defaultPath = protocol === "responses" ? "/responses" : "/chat/completions";
   return {
@@ -183,7 +195,8 @@ function normalizeProvider(id, value) {
     protocol,
     path: normalizeEndpointPath(value.path || defaultPath),
     apiKeyEnv,
-    apiKey: apiKeyEnv ? process.env[apiKeyEnv] : "",
+    apiKey,
+    credentialAvailable: !apiKeyEnv || Boolean(apiKey),
     forwardClientAuthorization: Boolean(value.forward_client_authorization),
     customToolBridges: normalizeCustomToolBridges(value.custom_tool_bridges, id),
     emptyResponseRetries: parseNonNegativeInteger(
@@ -250,6 +263,7 @@ function normalizeModel(id, value, providers) {
     if (routeKeys.has(route.key)) throw new Error(`Model ${id} contains a duplicate route ${route.key}.`);
     routeKeys.add(route.key);
   }
+  const availableRoutes = routes.filter((route) => route.provider.credentialAvailable);
 
   const capabilities = normalizeCapabilities(value.capabilities);
   if (value.force_serial_tool_calls != null && typeof value.force_serial_tool_calls !== "boolean") {
@@ -261,11 +275,12 @@ function normalizeModel(id, value, providers) {
   if (value.runtime_instructions != null && typeof value.runtime_instructions !== "string") {
     throw new Error(`Model ${id} runtime_instructions must be a string.`);
   }
+  if (availableRoutes.length === 0) return null;
   return {
     id,
     object: "model",
     created: Number.isInteger(value.created) ? value.created : 0,
-    ownedBy: value.owned_by || primary.provider.id,
+    ownedBy: value.owned_by || availableRoutes[0].provider.id,
     contextWindow: optionalPositiveInteger(value.context_window, `models.${id}.context_window`),
     maxOutputTokens: optionalPositiveInteger(
       value.max_output_tokens,
@@ -280,7 +295,7 @@ function normalizeModel(id, value, providers) {
     ),
     maxBufferedStreamBytes: parseByteSize(value.max_buffered_stream_size || "8mb"),
     runtimeInstructions: value.runtime_instructions?.trim() || null,
-    routes,
+    routes: availableRoutes,
   };
 }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createControlPlane, MobileAccessManager } from "@rhzycode/control-plane";
+import { createControlPlane, MobileAccessManager } from "../../desktop/src/main/control-plane/app";
 import { ControlClient, ControlClientError } from "../src/api/control-client";
 
 test("connects the mobile client to the real desktop control contract", async () => {

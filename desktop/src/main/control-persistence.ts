@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { agentEventSchema, controlSnapshotSchema } from "@rhzycode/protocol";
-import type { ControlStore, ControlStoreState } from "@rhzycode/control-plane";
+import type { ControlStore, ControlStoreState } from "./control-plane/app";
 import type { CredentialEncryption } from "./credential-store";
 
 export type EncryptedLoadStatus = "missing" | "restored" | "partial" | "invalid" | "unavailable";

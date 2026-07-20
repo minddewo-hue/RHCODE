@@ -21,11 +21,11 @@ Updated: 2026-07-16
 | Additional permission requests | Complete | Requested grants are turn-scoped; decline grants an empty profile |
 | Interactive terminal | Complete | App Server PTY, stdin, resize, ANSI rendering, buffered restore, and terminate smoke |
 | Approval policy control | Complete | Persisted `on-request`, `untrusted`, or `never` override on threads and turns |
-| Sandbox policy control | Complete, upstream limitation | Policies map correctly; Codex 0.144.5 Windows Code Mode may reject valid workspace writes |
+| Sandbox policy control | Complete, upstream limitation | Policies map correctly; Codex 0.144.6 Windows Code Mode may reject valid workspace writes |
 | File and image attachments | Complete | Native App Server local-image input plus absolute-path file references; 20-item limit |
 | Thread search and archive | Complete | Server-side title search, archived listing, archive, restore, and cross-client removal events |
 | Provider active health | Complete | Startup, 60-second, and manual probes with latency, circuit state, HTTP status, and sanitized errors |
-| Windows desktop distribution | Complete | NSIS and unpacked builds; Electron 43.1.1 and bundled Codex CLI 0.144.5 pinned |
+| Windows desktop distribution | Complete | NSIS and unpacked builds; Electron 43.1.1 and bundled Codex CLI 0.144.6 pinned |
 | Provider credential storage | Complete | Electron `safeStorage`/Windows DPAPI; stored plaintext is never returned to the renderer |
 | Thread lifecycle management | Complete | Search, rename, archive, restore, permanent delete, and recent-project persistence |
 | Encrypted control persistence | Complete | DPAPI-encrypted snapshots and 2,000-event replay; pending requests are not revived |
@@ -38,7 +38,7 @@ Updated: 2026-07-16
 ## Accepted risks
 
 - The 10 moderate `npm audit` findings currently come from the Expo 57 build toolchain. There are no high or critical findings. The available automated remediation downgrades Expo to 46, so the project accepts these findings temporarily and will update when Expo publishes compatible dependency fixes.
-- Codex CLI 0.144.5 on Windows may reject valid `workspace-write` Code Mode file operations as outside the project even when the desktop sends the correct cwd and writable root. RHZYCODE does not silently escalate permissions; explicit Full access is the temporary local-only workaround. Re-run `validation/workspace-write-smoke` after upgrading Codex.
+- Codex CLI 0.144.6 on Windows may reject valid `workspace-write` Code Mode file operations as outside the project even when the desktop sends the correct cwd and writable root. RHZYCODE does not silently escalate permissions; explicit Full access is the temporary local-only workaround. Re-run `validation/workspace-write-smoke` after upgrading Codex.
 
 ## Phase 1 remaining
 

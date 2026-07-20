@@ -1,5 +1,5 @@
 import { Feather, Ionicons } from "@expo/vector-icons";
-import type { ThreadSummary } from "@rhzycode/protocol";
+import type { RemoteDirectoryBrowseResult, ThreadSummary } from "@rhzycode/protocol";
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
@@ -23,6 +23,7 @@ interface ProjectPickerSheetProps {
   busy: boolean;
   error: string | null;
   onClose: () => void;
+  onBrowseComputer: (path?: string) => Promise<RemoteDirectoryBrowseResult | null>;
   onSelect: (projectPath: string) => void;
   onSubmitPath: (projectPath: string, create: boolean) => Promise<string | null>;
 }
@@ -30,10 +31,13 @@ interface ProjectPickerSheetProps {
 export function ProjectPickerSheet(props: ProjectPickerSheetProps) {
   const insets = useSafeAreaInsets();
   const [projectPath, setProjectPath] = useState("");
+  const [browser, setBrowser] = useState<RemoteDirectoryBrowseResult | null>(null);
+  const [browserBusy, setBrowserBusy] = useState(false);
 
   useEffect(() => {
     if (props.visible) {
       setProjectPath("");
+      setBrowser(null);
     }
   }, [props.visible]);
 
@@ -42,6 +46,17 @@ export function ProjectPickerSheet(props: ProjectPickerSheetProps) {
     if (!trimmed || props.busy) return;
     const selected = await props.onSubmitPath(trimmed, create);
     if (selected) setProjectPath("");
+  };
+
+  const browse = async (path?: string) => {
+    if (browserBusy) return;
+    setBrowserBusy(true);
+    try {
+      const result = await props.onBrowseComputer(path);
+      if (result) setBrowser(result);
+    } finally {
+      setBrowserBusy(false);
+    }
   };
 
   return (
@@ -60,6 +75,30 @@ export function ProjectPickerSheet(props: ProjectPickerSheetProps) {
             </Pressable>
           </View>
           <ScrollView keyboardShouldPersistTaps="handled" style={styles.sheetScroll}>
+            {browser ? (
+              <>
+                <View style={styles.browserHeader}>
+                  <Pressable onPress={() => browser.path ? void browse(browser.parentPath || undefined) : setBrowser(null)} style={styles.browserBack}>
+                    <Ionicons color={colors.ink} name="arrow-back" size={18} />
+                  </Pressable>
+                  <Text numberOfLines={1} style={styles.browserPath}>{browser.path || "此电脑"}</Text>
+                </View>
+                {browser.path && (
+                  <Pressable onPress={() => props.onSelect(browser.path!)} style={styles.selectCurrentButton}>
+                    <Feather color={colors.inverse} name="check" size={15} />
+                    <Text style={styles.selectCurrentText}>选择当前目录</Text>
+                  </Pressable>
+                )}
+                {browserBusy ? <ActivityIndicator color={colors.ink} style={styles.browserLoading} /> : browser.directories.map((directory) => (
+                  <Pressable key={directory.path} onPress={() => void browse(directory.path)} style={styles.browserRow}>
+                    <Feather color={colors.inkMuted} name="folder" size={17} />
+                    <Text numberOfLines={1} style={styles.browserName}>{directory.name}</Text>
+                    <Feather color={colors.inkFaint} name="chevron-right" size={16} />
+                  </Pressable>
+                ))}
+                {!browserBusy && !browser.directories.length && <Text style={styles.emptyProjects}>此目录没有子文件夹</Text>}
+              </>
+            ) : <>
             <Text style={styles.fieldLabel}>已同步目录</Text>
             {props.projects.length ? (
               <View style={styles.projectGrid}>
@@ -85,6 +124,15 @@ export function ProjectPickerSheet(props: ProjectPickerSheetProps) {
             ) : (
               <Text style={styles.emptyProjects}>电脑端还没有登记工程目录</Text>
             )}
+            <Pressable
+              disabled={props.busy}
+              onPress={() => void browse()}
+              style={({ pressed }) => [styles.chooseComputerButton, props.busy && styles.disabled, pressed && styles.pressed]}
+            >
+              {props.busy ? <ActivityIndicator color={colors.ink} size="small" /> : <Feather color={colors.ink} name="folder" size={16} />}
+              <Text style={styles.chooseComputerText}>打开电脑目录</Text>
+              <Feather color={colors.inkMuted} name="chevron-right" size={14} />
+            </Pressable>
             <Text style={[styles.fieldLabel, styles.nextField]}>电脑端完整路径</Text>
             <TextInput
               autoCapitalize="none"
@@ -110,7 +158,7 @@ export function ProjectPickerSheet(props: ProjectPickerSheetProps) {
                 style={({ pressed }) => [styles.openPathButton, (!projectPath.trim() || props.busy) && styles.disabled, pressed && styles.pressed]}
               >
                 <Feather color={colors.ink} name="folder" size={15} />
-                <Text style={styles.openPathText}>打开已有目录</Text>
+                <Text style={styles.openPathText}>使用输入路径</Text>
               </Pressable>
               <Pressable
                 disabled={!projectPath.trim() || props.busy}
@@ -121,6 +169,7 @@ export function ProjectPickerSheet(props: ProjectPickerSheetProps) {
                 <Text style={styles.createPathText}>新建文件夹</Text>
               </Pressable>
             </View>
+            </>}
           </ScrollView>
         </View>
       </KeyboardAvoidingView>
@@ -251,6 +300,16 @@ const styles = StyleSheet.create({
   projectDirectoryText: { flex: 1, minWidth: 0 },
   projectDirectoryPath: { color: colors.inkFaint, fontSize: 10, lineHeight: 14, marginTop: 2, letterSpacing: 0 },
   emptyProjects: { color: colors.inkMuted, fontSize: 12, lineHeight: 18, paddingVertical: 12, letterSpacing: 0 },
+  chooseComputerButton: { minHeight: 42, marginTop: 10, paddingHorizontal: 12, borderWidth: 1, borderColor: colors.borderStrong, borderRadius: 7, flexDirection: "row", gap: 8, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface },
+  chooseComputerText: { flex: 1, color: colors.ink, fontSize: 12, lineHeight: 16, fontWeight: "600", letterSpacing: 0 },
+  browserHeader: { height: 42, flexDirection: "row", alignItems: "center", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  browserBack: { width: 38, height: 38, alignItems: "center", justifyContent: "center" },
+  browserPath: { flex: 1, color: colors.ink, fontSize: 12, lineHeight: 17, fontWeight: "600", letterSpacing: 0 },
+  browserRow: { height: 48, paddingHorizontal: 8, flexDirection: "row", gap: 9, alignItems: "center", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  browserName: { flex: 1, color: colors.ink, fontSize: 13, lineHeight: 18, letterSpacing: 0 },
+  browserLoading: { marginVertical: 24 },
+  selectCurrentButton: { height: 40, marginVertical: 10, borderRadius: 7, flexDirection: "row", gap: 7, alignItems: "center", justifyContent: "center", backgroundColor: colors.ink },
+  selectCurrentText: { color: colors.inverse, fontSize: 12, lineHeight: 16, fontWeight: "600", letterSpacing: 0 },
   projectPathActions: { flexDirection: "row", gap: 8, marginTop: 10, paddingBottom: 16 },
   openPathButton: { flex: 1, minHeight: 40, paddingHorizontal: 8, borderWidth: 1, borderColor: colors.borderStrong, borderRadius: 7, flexDirection: "row", gap: 6, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface },
   openPathText: { color: colors.ink, fontSize: 11, lineHeight: 15, fontWeight: "600", letterSpacing: 0 },

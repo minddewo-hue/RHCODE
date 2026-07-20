@@ -10,8 +10,11 @@ import type {
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Animated,
   FlatList,
+  Image,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   RefreshControl,
@@ -29,7 +32,8 @@ export interface PendingMessage {
   threadId: string;
   content: string;
   createdAt: string;
-  state: "sending" | "failed";
+  state: "sending" | "sent" | "failed";
+  images?: Array<{ name: string; uri: string }>;
 }
 
 interface ChatScreenProps {
@@ -142,6 +146,20 @@ export function ChatScreen(props: ChatScreenProps) {
           </View>
         </View>
         <View style={styles.headerActions}>
+          <HeaderPageButton
+            accessibilityLabel="对话"
+            active={activePage === "result"}
+            icon="message-circle"
+            onPress={() => selectPage("result")}
+          />
+          <HeaderPageButton
+            accessibilityLabel="执行过程"
+            active={activePage === "activity"}
+            badge={activityCount}
+            icon="activity"
+            running={threadRunning}
+            onPress={() => selectPage("activity")}
+          />
           <Pressable
             accessibilityLabel={props.selectedModelLabel ? `切换模型，当前 ${props.selectedModelLabel}` : "切换模型"}
             accessibilityRole="button"
@@ -175,16 +193,6 @@ export function ChatScreen(props: ChatScreenProps) {
           <Feather color={colors.inkMuted} name="chevron-right" size={16} />
         </Pressable>
       )}
-
-      <View accessibilityRole="tablist" style={styles.pageTabs}>
-        <PageTab active={activePage === "result"} label="结果" onPress={() => selectPage("result")} />
-        <PageTab
-          active={activePage === "activity"}
-          badge={activityCount}
-          label="执行过程"
-          onPress={() => selectPage("activity")}
-        />
-      </View>
 
       <FlatList
         data={conversationPages}
@@ -294,29 +302,70 @@ export function ChatScreen(props: ChatScreenProps) {
   );
 }
 
-function PageTab({ active, badge, label, onPress }: {
+function HeaderPageButton({ accessibilityLabel, active, badge, icon, onPress, running = false }: {
+  accessibilityLabel: string;
   active: boolean;
   badge?: number;
-  label: string;
+  icon: "activity" | "message-circle";
   onPress: () => void;
+  running?: boolean;
 }) {
   return (
     <Pressable
+      accessibilityLabel={accessibilityLabel}
       accessibilityRole="tab"
-      accessibilityState={{ selected: active }}
+      accessibilityState={{ selected: active, busy: running }}
+      hitSlop={6}
       onPress={onPress}
-      style={({ pressed }) => [styles.pageTab, pressed && styles.pageTabPressed]}
+      style={({ pressed }) => [
+        styles.headerPageButton,
+        active && styles.headerPageButtonActive,
+        pressed && styles.iconPressed,
+      ]}
     >
-      <Text style={[styles.pageTabText, active && styles.pageTabTextActive]}>{label}</Text>
+      {icon === "activity"
+        ? <ActivityWaveIcon active={active} running={running} />
+        : <Feather color={active ? colors.ink : colors.inkMuted} name={icon} size={19} />}
       {!!badge && (
-        <View style={[styles.pageTabBadge, active && styles.pageTabBadgeActive]}>
-          <Text style={[styles.pageTabBadgeText, active && styles.pageTabBadgeTextActive]}>
+        <View style={styles.headerPageBadge}>
+          <Text style={styles.headerPageBadgeText}>
             {badge > 99 ? "99+" : badge}
           </Text>
         </View>
       )}
-      <View style={[styles.pageTabIndicator, active && styles.pageTabIndicatorActive]} />
     </Pressable>
+  );
+}
+
+function ActivityWaveIcon({ active, running }: { active: boolean; running: boolean }) {
+  const pulse = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (!running) {
+      pulse.stopAnimation();
+      pulse.setValue(0);
+      return;
+    }
+
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1, duration: 460, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0, duration: 590, useNativeDriver: true }),
+      ]),
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [pulse, running]);
+
+  return (
+    <Animated.View
+      style={{
+        opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [running ? 0.62 : 1, 1] }),
+        transform: [{ scaleY: pulse.interpolate({ inputRange: [0, 1], outputRange: [running ? 0.72 : 1, 1.22] }) }],
+      }}
+    >
+      <Feather color={active ? colors.ink : colors.inkMuted} name="activity" size={19} />
+    </Animated.View>
   );
 }
 
@@ -428,12 +477,19 @@ function buildEntries(props: Pick<
 >, includeActivity: boolean): ChatEntry[] {
   if (!props.selectedThreadId) return [];
   const timeline = props.timeline.filter((item) => item.threadId === props.selectedThreadId);
+  const imageMessages = props.pendingMessages.filter((message) => message.images?.length);
   const visiblePending = props.pendingMessages.filter((message) => (
     message.threadId === props.selectedThreadId
-    && !timeline.some((item) => item.kind === "user" && item.content.trim() === message.content.trim())
+    && (message.images?.length
+      || !timeline.some((item) => item.kind === "user" && item.content.trim() === message.content.trim()))
   ));
   return [
-    ...timeline.filter((item) => includeActivity || item.kind === "user" || item.kind === "assistant").map((item): ChatEntry => ({
+    ...timeline.filter((item) => (
+      (includeActivity || item.kind === "user" || item.kind === "assistant")
+      && !(item.kind === "user" && imageMessages.some((message) => (
+        message.threadId === item.threadId && message.content.trim() === item.content.trim()
+      )))
+    )).map((item): ChatEntry => ({
       type: "timeline",
       id: `timeline:${item.id}`,
       createdAt: item.createdAt,
@@ -547,29 +603,47 @@ function TimelineRow({ item }: { item: TimelineItem }) {
   const presentation = activityPresentation(item);
   return (
     <View style={styles.activityRow}>
-      <View style={[styles.activityIcon, { backgroundColor: presentation.background }]}>
-        {item.status === "running"
-          ? <ActivityIndicator color={presentation.color} size={12} />
-          : <Feather color={presentation.color} name={presentation.icon} size={13} />}
+      <View style={styles.activityHeader}>
+        <View style={[styles.activityIcon, { backgroundColor: presentation.background }]}>
+          {item.status === "running"
+            ? <ActivityIndicator color={presentation.color} size={12} />
+            : <Feather color={presentation.color} name={presentation.icon} size={13} />}
+        </View>
+        <View style={styles.activityBody}>
+          <Text numberOfLines={2} style={styles.activityTitle}>{item.title || presentation.label}</Text>
+        </View>
       </View>
-      <View style={styles.activityBody}>
-        <Text numberOfLines={2} style={styles.activityTitle}>{item.title || presentation.label}</Text>
-        {!!item.content && <Text selectable style={styles.activityContent}>{item.content}</Text>}
-      </View>
+      {!!item.content && <Text selectable style={styles.activityContent}>{item.content}</Text>}
     </View>
   );
 }
 
 function PendingMessageRow({ message }: { message: PendingMessage }) {
+  const [previewImage, setPreviewImage] = useState<{ name: string; uri: string } | null>(null);
   return (
     <View style={styles.userRow}>
       <View style={[styles.userBubble, message.state === "failed" && styles.failedBubble]}>
         <Text selectable style={styles.userText}>{message.content}</Text>
+        {!!message.images?.length && (
+          <View style={styles.messageImages}>
+            {message.images.map((image) => (
+              <Pressable key={image.name} onPress={() => setPreviewImage(image)}>
+                <Image accessibilityLabel={image.name} resizeMode="cover" source={{ uri: image.uri }} style={styles.messageImage} />
+              </Pressable>
+            ))}
+          </View>
+        )}
         {message.state !== "failed" && <View style={styles.userBubbleTail} />}
-        <Text style={[styles.pendingLabel, message.state === "failed" && styles.failedLabel]}>
+        {message.state !== "sent" && <Text style={[styles.pendingLabel, message.state === "failed" && styles.failedLabel]}>
           {message.state === "failed" ? "发送失败" : "正在发送"}
-        </Text>
+        </Text>}
       </View>
+      <Modal animationType="fade" onRequestClose={() => setPreviewImage(null)} statusBarTranslucent transparent visible={Boolean(previewImage)}>
+        <Pressable accessibilityLabel="Close image preview" onPress={() => setPreviewImage(null)} style={styles.imagePreview}>
+          {previewImage && <Image resizeMode="contain" source={{ uri: previewImage.uri }} style={styles.previewImage} />}
+          <Feather color="#ffffff" name="x" size={24} style={styles.previewClose} />
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -723,7 +797,7 @@ function UserInputRow({
 }
 
 function composerPlaceholder(props: Pick<ChatScreenProps, "selectedThreadId" | "canWrite" | "connectionStatus">): string {
-  if (!props.selectedThreadId) return "新建任务后开始对话";
+  if (!props.selectedThreadId) return "点击右上角 + 新建对话";
   if (!props.canWrite) return "当前设备只有查看权限";
   if (props.connectionStatus !== "online") return "电脑连接后可发送消息";
   return "给 Codex 发送消息";
@@ -804,6 +878,10 @@ const styles = StyleSheet.create({
   },
   headerTitle: { flex: 1, alignItems: "center", paddingHorizontal: 8 },
   headerActions: { flexDirection: "row", alignItems: "center" },
+  headerPageButton: { width: 36, height: 36, alignItems: "center", justifyContent: "center", borderRadius: 6 },
+  headerPageButtonActive: { backgroundColor: colors.subtle },
+  headerPageBadge: { position: "absolute", top: 1, right: 0, minWidth: 15, height: 15, paddingHorizontal: 3, alignItems: "center", justifyContent: "center", borderRadius: 6, backgroundColor: colors.ink },
+  headerPageBadgeText: { color: colors.inverse, fontSize: 9, lineHeight: 11, fontWeight: "600", letterSpacing: 0 },
   title: { color: colors.ink, fontSize: 15, lineHeight: 20, fontWeight: "600", letterSpacing: 0 },
   statusLine: { flexDirection: "row", alignItems: "center", maxWidth: "100%", marginTop: 1 },
   statusDot: { width: 6, height: 6, borderRadius: 3, marginRight: 5 },
@@ -824,41 +902,6 @@ const styles = StyleSheet.create({
   },
   noticePressed: { opacity: 0.75 },
   noticeText: { flex: 1, color: colors.warning, fontSize: 12, lineHeight: 17, letterSpacing: 0 },
-  pageTabs: {
-    height: 42,
-    flexDirection: "row",
-    alignItems: "stretch",
-    paddingHorizontal: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.border,
-    backgroundColor: colors.canvas,
-  },
-  pageTab: {
-    minWidth: 86,
-    height: 42,
-    paddingHorizontal: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  pageTabPressed: { backgroundColor: colors.pressed },
-  pageTabText: { color: colors.inkMuted, fontSize: 13, lineHeight: 18, fontWeight: "500", letterSpacing: 0 },
-  pageTabTextActive: { color: colors.ink, fontWeight: "600" },
-  pageTabBadge: {
-    minWidth: 18,
-    height: 18,
-    marginLeft: 6,
-    paddingHorizontal: 4,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 6,
-    backgroundColor: colors.subtle,
-  },
-  pageTabBadgeActive: { backgroundColor: colors.ink },
-  pageTabBadgeText: { color: colors.inkMuted, fontSize: 10, lineHeight: 13, fontWeight: "600", letterSpacing: 0 },
-  pageTabBadgeTextActive: { color: colors.inverse },
-  pageTabIndicator: { position: "absolute", right: 12, bottom: 0, left: 12, height: 2, backgroundColor: "transparent" },
-  pageTabIndicatorActive: { backgroundColor: colors.ink },
   pager: { flex: 1 },
   listContent: { paddingHorizontal: 16, paddingTop: 22, paddingBottom: 28 },
   emptyListContent: { flexGrow: 1 },
@@ -870,16 +913,22 @@ const styles = StyleSheet.create({
   userBubbleTail: { position: "absolute", top: 12, right: -8, width: 0, height: 0, borderTopWidth: 7, borderBottomWidth: 7, borderLeftWidth: 9, borderTopColor: "transparent", borderBottomColor: "transparent", borderLeftColor: "#90dd65" },
   failedBubble: { backgroundColor: colors.dangerSoft, borderWidth: 1, borderColor: "#edc3bf" },
   userText: { color: colors.ink, fontSize: 15, lineHeight: 22, letterSpacing: 0 },
+  messageImages: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 },
+  messageImage: { width: 148, height: 108, borderRadius: 6, backgroundColor: colors.subtle },
+  imagePreview: { flex: 1, alignItems: "center", justifyContent: "center", padding: 20, backgroundColor: "#101310ee" },
+  previewImage: { width: "100%", height: "100%" },
+  previewClose: { position: "absolute", top: 48, right: 20 },
   pendingLabel: { color: colors.inkFaint, fontSize: 10, lineHeight: 14, marginTop: 5, letterSpacing: 0 },
   failedLabel: { color: colors.danger },
   assistantRow: { minWidth: 0, marginBottom: 20 },
   assistantText: { color: colors.ink, fontSize: 15, lineHeight: 23, letterSpacing: 0 },
   inlineSpinner: { alignSelf: "flex-start", marginTop: 8 },
-  activityRow: { flexDirection: "row", alignItems: "flex-start", marginBottom: 18 },
+  activityRow: { marginBottom: 18 },
+  activityHeader: { flexDirection: "row", alignItems: "flex-start" },
   activityIcon: { width: 26, height: 26, borderRadius: 5, alignItems: "center", justifyContent: "center", marginRight: 9 },
   activityBody: { flex: 1, minWidth: 0, paddingTop: 2 },
   activityTitle: { color: colors.ink, fontSize: 13, lineHeight: 18, fontWeight: "600", letterSpacing: 0 },
-  activityContent: { color: colors.inkMuted, fontSize: 12, lineHeight: 18, marginTop: 3, letterSpacing: 0 },
+  activityContent: { color: colors.inkMuted, fontSize: 12, lineHeight: 18, marginTop: 7, letterSpacing: 0 },
   requestCard: { marginBottom: 22, borderWidth: 1, borderColor: colors.border, borderRadius: 8, backgroundColor: colors.surface, padding: 14 },
   requestHeading: { flexDirection: "row", alignItems: "center" },
   requestIcon: { width: 30, height: 30, borderRadius: 6, alignItems: "center", justifyContent: "center", marginRight: 10 },

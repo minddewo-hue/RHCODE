@@ -2,7 +2,7 @@
   "expo": {
     "name": "RHZYCODE",
     "slug": "rhzycode",
-    "version": "0.1.3",
+    "version": "0.1.4",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
@@ -11,7 +11,7 @@
     },
     "android": {
       "package": "ai.rhzy.code",
-      "versionCode": 4,
+      "versionCode": 5,
       "adaptiveIcon": {
         "backgroundColor": "#202620"
       }

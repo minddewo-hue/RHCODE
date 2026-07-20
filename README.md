@@ -8,8 +8,7 @@ RHZYCODE is a cross-platform coding agent built around a local or remote Agent H
 desktop/                 Electron desktop client and local Agent Host adapter
 mobile/                  Expo mobile remote-control client
 packages/protocol/       Stable RHZYCODE domain protocol and validation schemas
-services/control-plane/  Device, task, event, and WebSocket control service
-transfer/                Existing OpenAI-compatible multi-model gateway
+desktop/                 Desktop app, embedded control plane, and internal model gateway
 docs/                    Architecture and delivery notes
 ```
 
@@ -29,7 +28,7 @@ RHZYCODE keeps its Agent Host state in an application-owned `codex-home` directo
 
 The desktop control plane listens on `0.0.0.0:8790` by default and advertises a physical LAN IPv4 address in Settings. Mobile connects with that IP, the editable desktop port, and the persistent desktop-generated access key. The saved port persists across restarts; `RHZYCODE_SYNC_HOST` and `RHZYCODE_SYNC_PORT` provide initial deployment defaults. Trusted HTTPS/WSS certificates remain supported for managed deployments.
 
-Build the Windows installer with `npm run dist:desktop`; artifacts are written to `desktop/release`. The release bundles the pinned Codex CLI but never packages `transfer/.env`, Codex authentication, or provider keys. Configure Provider keys from the desktop Settings panel or use `RHZYCODE_GATEWAY_HOME` for an external gateway directory.
+Build the Windows installer with `npm run dist:desktop`; artifacts are written to `desktop/release`. The release bundles the pinned Codex CLI but never packages `desktop/.env`, Codex authentication, or provider keys. Source development loads Provider keys from `desktop/.env`; installed builds use the desktop Settings secure store, and `RHZYCODE_GATEWAY_HOME` may select an external gateway directory.
 
 See [docs/architecture.md](docs/architecture.md) for system boundaries and [docs/roadmap.md](docs/roadmap.md) for implementation status and next milestones.
 

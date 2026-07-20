@@ -13,7 +13,7 @@ interface AgentMessage {
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workspaceRoot = path.resolve(desktopRoot, "..");
-const gatewayRoot = process.env.RHZYCODE_GATEWAY_HOME || path.join(workspaceRoot, "transfer");
+const gatewayRoot = process.env.RHZYCODE_GATEWAY_HOME || path.join(workspaceRoot, "desktop", "model-gateway");
 const codexHome = process.env.RHZYCODE_SMOKE_CODEX_HOME ||
   path.join(os.tmpdir(), "rhzycode-smoke-codex-home");
 const model = process.env.RHZYCODE_SMOKE_MODEL || "faker/kimi-for-coding";

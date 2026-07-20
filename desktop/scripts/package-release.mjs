@@ -48,7 +48,8 @@ if (!actualVersion.stdout.trim().endsWith(expectedVersion)) {
   );
 }
 
-const gatewayConfig = path.join(rootDir, "transfer", "gateway.config.json");
+const gatewayRoot = path.join(desktopDir, "model-gateway");
+const gatewayConfig = path.join(gatewayRoot, "gateway.config.json");
 const gatewayConfigText = fs.readFileSync(gatewayConfig, "utf8");
 if (/"api_key"\s*:/i.test(gatewayConfigText)) {
   throw new Error("The release gateway config contains an inline API key.");
@@ -61,11 +62,11 @@ const extraResources = [
     to: "gateway/gateway.config.json",
   },
   {
-    from: path.join(rootDir, "transfer", "codex-model-catalog.json"),
+    from: path.join(gatewayRoot, "codex-model-catalog.json"),
     to: "gateway/codex-model-catalog.json",
   },
   {
-    from: path.join(rootDir, "transfer", "gateway.config.example.json"),
+    from: path.join(gatewayRoot, "gateway.config.example.json"),
     to: "gateway/gateway.config.example.json",
   },
   {

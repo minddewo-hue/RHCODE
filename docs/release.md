@@ -2,7 +2,7 @@
 
 ## Build
 
-The release pins Electron `43.1.1` and Codex CLI `0.144.5`.
+The release pins Electron `43.1.1` and Codex CLI `0.144.6`.
 
 ```powershell
 npm run pack:desktop
@@ -23,7 +23,7 @@ npm run audit:release --workspace @rhzycode/desktop
 
 Installed builds store Provider API keys in `%APPDATA%\@rhzycode\desktop\gateway-credentials.json`. Values are encrypted with Electron `safeStorage` and Windows DPAPI. The renderer receives only configured/source status and never receives stored plaintext values.
 
-Keys may also come from environment variables or an external gateway directory selected with `RHZYCODE_GATEWAY_HOME`. A secure-store value takes precedence over `.env`.
+Source development also loads keys from `desktop/.env`; an external gateway directory may be selected with `RHZYCODE_GATEWAY_HOME`. Installed builds use the secure store, whose values take precedence over environment-loaded keys. The release never packages `.env`.
 
 Development and automated tests may isolate all Electron application data with `RHZYCODE_USER_DATA_DIR`. Agent Host data remains in the application-owned `codex-home` below that directory unless `RHZYCODE_CODEX_HOME` explicitly selects another isolated location. Do not point either variable at the user's default `.codex` directory.
 

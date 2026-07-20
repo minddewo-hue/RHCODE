@@ -40,7 +40,7 @@ test.beforeAll(async () => {
       ...environment,
       RHZYCODE_USER_DATA_DIR: dataDir,
       RHZYCODE_CODEX_HOME: path.join(dataDir, "codex-home"),
-      RHZYCODE_GATEWAY_HOME: path.join(workspaceDir, "transfer"),
+      RHZYCODE_GATEWAY_HOME: path.join(workspaceDir, "desktop", "model-gateway"),
       RHZYCODE_SYNC_HOST: "127.0.0.1",
       RHZYCODE_SYNC_PORT: "0",
       FAKER_API_KEY: "",

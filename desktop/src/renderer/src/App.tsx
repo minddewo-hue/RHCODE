@@ -68,6 +68,7 @@ import "@xterm/xterm/css/xterm.css";
 
 interface ChatMessage extends ConversationMessage {
   streaming?: boolean;
+  images?: Array<{ path: string; name: string }>;
 }
 
 interface ActivityEntry {
@@ -143,6 +144,7 @@ export function App() {
   const [renameValue, setRenameValue] = useState("");
   const [openingThreadId, setOpeningThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [activities, setActivities] = useState<ActivityEntry[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [resolvingApprovalId, setResolvingApprovalId] = useState<string | null>(null);
@@ -653,9 +655,12 @@ export function App() {
       {
         id: `user-${Date.now()}`,
         role: "user",
-        content: selectedAttachments.length
-          ? `${text}\n\nAttachments: ${selectedAttachments.map((attachment) => attachment.name).join(", ")}`
+        content: selectedAttachments.some((attachment) => attachment.kind === "file")
+          ? `${text}\n\nAttachments: ${selectedAttachments.filter((attachment) => attachment.kind === "file").map((attachment) => attachment.name).join(", ")}`
           : text,
+        images: selectedAttachments
+          .filter((attachment) => attachment.kind === "image")
+          .map((attachment) => ({ path: attachment.path, name: attachment.name })),
       },
     ]);
 
@@ -783,6 +788,9 @@ export function App() {
         ? await window.rhzycode.checkForUpdates()
         : await window.rhzycode.downloadUpdate();
       setUpdateStatus(status);
+      if (action === "check" && status.state === "not_available") {
+        window.alert("Current version is up to date.");
+      }
     } catch (error) {
       upsertActivity(`update-error-${Date.now()}`, "Update failed", getErrorMessage(error), "error");
     }
@@ -947,6 +955,26 @@ export function App() {
       const item = (params.item || {}) as Record<string, unknown>;
       const itemId = String(item.id || `${method}-${Date.now()}`);
       const itemType = String(item.type || "activity");
+      if (method === "item/completed" && itemType === "userMessage") {
+        const incoming = userMessageFromNotification(itemId, item);
+        setMessages((current) => {
+          const exactIndex = current.findIndex((message) => message.id === itemId);
+          if (exactIndex !== -1) {
+            return current.map((message, index) => index === exactIndex ? incoming : message);
+          }
+          const reversedIndex = [...current].reverse().findIndex((message) => (
+            message.role === "user" && message.content.trim() === incoming.content.trim()
+          ));
+          const optimisticIndex = reversedIndex === -1 ? -1 : current.length - reversedIndex - 1;
+          if (optimisticIndex !== -1) {
+            return current.map((message, index) => index === optimisticIndex
+              ? { ...message, images: incoming.images }
+              : message);
+          }
+          return [...current, incoming];
+        });
+        return;
+      }
       upsertActivity(
         itemId,
         activityLabel(itemType),
@@ -966,10 +994,14 @@ export function App() {
         && event.thread.projectPath === selectedProjectPathRef.current
         && (!searchTerm || event.thread.title.toLowerCase().includes(searchTerm));
       setThreads((current) => {
-        const withoutUpdated = current.filter((thread) => thread.id !== event.thread.id);
-        return belongsInCurrentList
-          ? [event.thread, ...withoutUpdated].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-          : withoutUpdated;
+        const existingIndex = current.findIndex((thread) => thread.id === event.thread.id);
+        if (!belongsInCurrentList) {
+          return existingIndex === -1
+            ? current
+            : current.filter((thread) => thread.id !== event.thread.id);
+        }
+        if (existingIndex === -1) return [event.thread, ...current];
+        return current.map((thread, index) => index === existingIndex ? event.thread : thread);
       });
     }
     if (event.type === "thread.removed") {
@@ -1198,7 +1230,16 @@ export function App() {
                 <article key={message.id} className={`message ${message.role}`}>
                   <div className="message-body">
                     {message.streaming && <div className="message-author"><span className="streaming-label">Streaming</span></div>}
-                    <div className="message-content">{message.content}</div>
+                    <div className="message-content">
+                      {!!message.content && <div>{message.content}</div>}
+                      {!!message.images?.length && (
+                        <div className="message-images">
+                          {message.images.map((image) => (
+                            <MessageImage key={image.path} image={image} onOpen={setPreviewImage} />
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </article>
               ))}
@@ -1288,7 +1329,7 @@ export function App() {
       {rightPanelOpen && (
         <aside className="activity-panel">
           <div className="panel-tabs" role="tablist" aria-label="Side panel views">
-            <button role="tab" aria-selected={rightView === "activity"} className={rightView === "activity" ? "active" : ""} onClick={() => setRightView("activity")}><Activity size={15} /> Activity</button>
+            <button role="tab" aria-selected={rightView === "activity"} aria-busy={running} className={rightView === "activity" ? "active" : ""} onClick={() => setRightView("activity")}><Activity className={running ? "activity-wave-running" : ""} size={15} /> Activity</button>
             <button role="tab" aria-selected={rightView === "settings"} className={rightView === "settings" ? "active" : ""} onClick={() => setRightView("settings")}><Settings size={15} /> Settings</button>
             <button className="panel-close" title="Close side panel" aria-label="Close side panel" onClick={() => setRightPanelOpen(false)}><X size={15} /></button>
           </div>
@@ -1320,8 +1361,53 @@ export function App() {
           )}
         </aside>
       )}
+      {previewImage && (
+        <button className="image-preview" aria-label="Close image preview" onClick={() => setPreviewImage(null)}>
+          <img src={previewImage} alt="Full size attachment" onClick={(event) => event.stopPropagation()} />
+          <span><X size={20} /></span>
+        </button>
+      )}
     </div>
   );
+}
+
+function MessageImage({
+  image,
+  onOpen,
+}: {
+  image: { path: string; name: string };
+  onOpen: (source: string) => void;
+}) {
+  const [source, setSource] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    void window.rhzycode.readLocalImage(image.path)
+      .then((value) => { if (active) setSource(value); })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [image.path]);
+  if (!source) return null;
+  return (
+    <button className="message-image" title={`Open ${image.name}`} onClick={() => onOpen(source)}>
+      <img src={source} alt={image.name} />
+    </button>
+  );
+}
+
+function userMessageFromNotification(id: string, item: Record<string, unknown>): ChatMessage {
+  const contentItems = Array.isArray(item.content) ? item.content : [];
+  const content = contentItems.flatMap((rawItem) => {
+    const entry = (rawItem || {}) as Record<string, unknown>;
+    return entry.type === "text" ? [String(entry.text || "")] : [];
+  }).filter(Boolean).join("\n");
+  const images = contentItems.flatMap((rawItem) => {
+    const entry = (rawItem || {}) as Record<string, unknown>;
+    if (entry.type !== "image" && entry.type !== "localImage") return [];
+    const imagePath = String(entry.path || "");
+    if (!imagePath) return [];
+    return [{ path: imagePath, name: imagePath.split(/[\\/]/).at(-1) || "image" }];
+  });
+  return { id, role: "user", content, ...(images.length ? { images } : {}) };
 }
 
 function TerminalWorkspace({

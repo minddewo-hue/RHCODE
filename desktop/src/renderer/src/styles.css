@@ -252,6 +252,12 @@ button:focus-visible, [role="button"]:focus-visible, select:focus-visible {
 .message-content { color: #111111; font-family: "Cascadia Code", "SFMono-Regular", monospace; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
 .message.user .message-content { position: relative; padding: 9px 12px; border: 0; border-radius: 8px; color: #111111; background: #90dd65; }
 .message.user .message-content::after { content: ""; position: absolute; top: 12px; right: -8px; width: 0; height: 0; border-top: 7px solid transparent; border-bottom: 7px solid transparent; border-left: 9px solid #90dd65; }
+.message-images { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.message-image { width: 156px; height: 112px; padding: 0; overflow: hidden; border: 1px solid #6eb64a; border-radius: 6px; background: #edf7e8; cursor: zoom-in; }
+.message-image img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.image-preview { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; width: 100%; height: 100%; padding: 40px; border: 0; background: #101310e8; cursor: zoom-out; }
+.image-preview img { max-width: 100%; max-height: 100%; object-fit: contain; cursor: default; }
+.image-preview span { position: absolute; top: 16px; right: 18px; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 6px; color: #ffffff; background: #ffffff1f; }
 
 .composer-wrap { position: relative; z-index: 2; flex-shrink: 0; padding: 8px 22px 18px; background: #fbfcfa; }
 .composer-box { width: min(820px, 100%); margin: 0 auto; border: 1px solid #cfd4cd; border-radius: 8px; background: #ffffff; box-shadow: 0 5px 18px #202a2012; }
@@ -307,6 +313,11 @@ button:focus-visible, [role="button"]:focus-visible, select:focus-visible {
 .panel-tabs button:hover { background: #e7e9e5; }
 .panel-tabs button.active { color: #303730; background: #dde1da; }
 .panel-tabs .panel-close { width: 34px; padding: 0; }
+.panel-tabs .activity-wave-running {
+  animation: activity-wave-pulse 1.05s ease-in-out infinite;
+  transform-origin: center;
+  will-change: transform, opacity;
+}
 .activity-view { height: calc(100vh - 54px); min-height: 0; display: flex; flex-direction: column; }
 .activity-requests { max-height: 62%; flex-shrink: 0; overflow-y: auto; padding: 9px; border-bottom: 1px solid #d8dcd6; }
 .approval-request { padding: 10px; border: 1px solid #d5c8aa; border-radius: 7px; background: #fffdf7; }
@@ -448,6 +459,11 @@ button:focus-visible, [role="button"]:focus-visible, select:focus-visible {
 .connection-field button .spinning { animation: spin 1.1s linear infinite; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+@keyframes activity-wave-pulse {
+  0%, 100% { transform: scaleY(0.72); opacity: 0.62; }
+  45% { transform: scaleY(1.22); opacity: 1; }
+  62% { transform: scaleY(0.92); opacity: 0.82; }
+}
 @keyframes thread-state-pulse {
   0% { transform: scale(0.9); box-shadow: 0 0 0 0 #168a55b8; }
   45% { transform: scale(1.25); box-shadow: 0 0 0 3px #168a5566; }
@@ -456,6 +472,7 @@ button:focus-visible, [role="button"]:focus-visible, select:focus-visible {
 
 @media (prefers-reduced-motion: reduce) {
   .thread-state.running { animation: none; box-shadow: 0 0 0 4px #168a5540; }
+  .panel-tabs .activity-wave-running { animation: none; opacity: 1; }
 }
 
 @media (max-width: 1180px) {

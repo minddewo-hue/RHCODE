@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import net from "node:net";
 import path from "node:path";
 import test from "node:test";
-import { ControlStore, type RemoteCommandContext } from "@rhzycode/control-plane";
+import { ControlStore, type RemoteCommandContext } from "../src/main/control-plane/app";
 import type { ThreadSummary } from "@rhzycode/protocol";
 import {
   DesktopRuntime,
@@ -115,6 +115,61 @@ test("restores desktop threads without reviving active RPC states", () => {
   assert.equal(store.snapshot().lastSequence, before + 1);
   assert.equal(store.listEvents(before)[0]?.type, "thread.updated");
   assert.equal(runtime.getSnapshot().threads[0]?.status, "interrupted");
+});
+
+test("opens a mobile-created empty thread before its rollout exists", async () => {
+  const { runtime, internals } = createRuntimeHarness();
+  const emptyThread: ThreadSummary = {
+    id: "thread-empty",
+    hostId: "local-desktop",
+    title: "New task",
+    projectPath: path.resolve("."),
+    model: "test/model",
+    status: "idle",
+    updatedAt: new Date().toISOString(),
+  };
+  internals.threads.set(emptyThread.id, emptyThread);
+  runtime.agent.request = async (method) => {
+    if (method === "thread/list") return { data: [] } as never;
+    throw new Error(`no rollout found for thread id ${emptyThread.id}`);
+  };
+
+  assert.deepEqual(await runtime.listThreads({ cwd: emptyThread.projectPath }), [emptyThread]);
+  assert.deepEqual(await runtime.openThread(emptyThread.id), {
+    thread: emptyThread,
+    messages: [],
+    timeline: [],
+  });
+});
+
+test("restores local images as message previews instead of placeholder text", async () => {
+  const { runtime } = createRuntimeHarness();
+  const imagePath = path.resolve("fixtures", "screen.png");
+  runtime.agent.request = async () => ({
+    thread: {
+      id: "thread-1",
+      cwd: path.resolve("."),
+      turns: [{
+        id: "turn-image",
+        items: [{
+          id: "user-image",
+          type: "userMessage",
+          content: [
+            { type: "text", text: "see" },
+            { type: "localImage", path: imagePath },
+          ],
+        }],
+      }],
+    },
+  }) as never;
+
+  const detail = await runtime.openThread("thread-1");
+  assert.deepEqual(detail.messages, [{
+    id: "user-image",
+    role: "user",
+    content: "see",
+    images: [{ path: imagePath, name: "screen.png" }],
+  }]);
 });
 
 test("forwards user answers without storing secret values", () => {

@@ -1,4 +1,4 @@
-import type { ProjectDirectory, RemoteModelOption, RemoteTurnAttachment, ThreadSummary, UserInputAnswers } from "@rhzycode/protocol";
+import type { ProjectDirectory, RemoteDirectoryBrowseResult, RemoteModelOption, RemoteTurnAttachment, ThreadSummary, UserInputAnswers } from "@rhzycode/protocol";
 import Constants from "expo-constants";
 import * as Crypto from "expo-crypto";
 import * as DocumentPicker from "expo-document-picker";
@@ -56,6 +56,13 @@ const updateManifestUrl = process.env.EXPO_PUBLIC_UPDATE_URL
 function isImageAttachment(name: string, mimeType?: string): boolean {
   if (mimeType?.toLowerCase().startsWith("image/")) return true;
   return /\.(avif|bmp|gif|jpe?g|png|webp)$/i.test(name);
+}
+
+function imageMimeType(name: string): string {
+  const extension = name.split(".").at(-1)?.toLowerCase();
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  if (extension === "svg") return "image/svg+xml";
+  return `image/${extension || "png"}`;
 }
 
 interface ThreadActionTarget {
@@ -130,6 +137,9 @@ function AppContent() {
     try {
       const status = await fetchMobileUpdate(currentAppVersion, { manifestUrl: updateManifestUrl });
       setMobileUpdateStatus(status);
+      if (!announce && status.state === "current") {
+        Alert.alert("当前版本已是最新");
+      }
       if (announce && status.state === "available" && announcedUpdateVersion.current !== status.latest.version) {
         announcedUpdateVersion.current = status.latest.version;
         Alert.alert(
@@ -320,7 +330,7 @@ function AppContent() {
 
   useEffect(() => {
     if (!pendingMessages.length) return;
-    setPendingMessages((current) => current.filter((message) => !control.snapshot.timeline.some((item) => (
+    setPendingMessages((current) => current.filter((message) => message.images?.length || !control.snapshot.timeline.some((item) => (
       item.threadId === message.threadId
       && item.kind === "user"
       && item.content.trim() === message.content.trim()
@@ -344,7 +354,8 @@ function AppContent() {
   );
 
   const openProjectDirectory = useCallback(async (projectPath: string, create = false): Promise<string | null> => {
-    if (!taskClient) return null;
+    if (!taskClient || newThreadBusy) return null;
+    setNewThreadBusy(true);
     setNewThreadError(null);
     try {
       const result = await taskClient.openProject(projectPath, create);
@@ -366,6 +377,20 @@ function AppContent() {
       } else {
         setNewThreadError(describeControlError(error));
       }
+      if (isUnauthorized(error) && session) rejectCredentials(session.id);
+      return null;
+    } finally {
+      setNewThreadBusy(false);
+    }
+  }, [newThreadBusy, rejectCredentials, session, taskClient]);
+
+  const browseComputerDirectories = useCallback(async (projectPath?: string): Promise<RemoteDirectoryBrowseResult | null> => {
+    if (!taskClient) return null;
+    setNewThreadError(null);
+    try {
+      return await taskClient.browseDirectories(projectPath);
+    } catch (error) {
+      setNewThreadError(describeControlError(error));
       if (isUnauthorized(error) && session) rejectCredentials(session.id);
       return null;
     }
@@ -447,6 +472,12 @@ function AppContent() {
       content: submittedText,
       createdAt: new Date().toISOString(),
       state: "sending",
+      images: submittedAttachments
+        .filter((attachment) => attachment.kind === "image")
+        .map((attachment) => ({
+          name: attachment.name,
+          uri: `data:${imageMimeType(attachment.name)};base64,${attachment.dataBase64}`,
+        })),
     };
     setPendingMessages((current) => [...current, pending]);
     setDraft("");
@@ -458,6 +489,9 @@ function AppContent() {
         attachments: submittedAttachments,
         ...(selectedModel ? { model: selectedModel } : {}),
       });
+      setPendingMessages((current) => current.map((message) => (
+        message.id === id ? { ...message, state: "sent" } : message
+      )));
       await control.refresh();
     } catch (error) {
       setPendingMessages((current) => current.map((message) => (
@@ -835,11 +869,9 @@ function AppContent() {
       <ProjectPickerSheet
         busy={newThreadBusy}
         error={newThreadError}
+        onBrowseComputer={browseComputerDirectories}
         onClose={() => !newThreadBusy && setProjectPickerVisible(false)}
-        onSelect={(projectPath) => {
-          setSelectedProjectPath(projectPath);
-          setProjectPickerVisible(false);
-        }}
+        onSelect={(projectPath) => void openProjectDirectory(projectPath)}
         onSubmitPath={openProjectDirectory}
         projects={recentProjects}
         selectedProject={selectedProjectPath}

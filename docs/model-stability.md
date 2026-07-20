@@ -53,7 +53,7 @@
 
 这些失败都由上游返回，模型选择和桌面端路由已经正确到达相应 Provider，不是桌面端模型切换错误。
 
-上述 8 个模型已经记录在 `transfer/gateway.config.json` 的 `disabled_models` 中。网关会同时过滤静态配置和动态发现结果，因此桌面端、移动端和 `/v1/models` 均不再显示这些模型，直接请求也会被判定为不支持的模型。
+上述 8 个模型已经记录在 `desktop/model-gateway/gateway.config.json` 的 `disabled_models` 中。网关会同时过滤静态配置和动态发现结果，因此桌面端、移动端和 `/v1/models` 均不再显示这些模型，直接请求也会被判定为不支持的模型。
 
 ## 使用建议
 

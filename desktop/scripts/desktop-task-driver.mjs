@@ -36,7 +36,7 @@ try {
     cwd: desktopDir,
     env: {
       ...environment,
-      RHZYCODE_GATEWAY_HOME: path.join(workspaceDir, "transfer"),
+      RHZYCODE_GATEWAY_HOME: path.join(workspaceDir, "desktop", "model-gateway"),
       RHZYCODE_SYNC_HOST: "127.0.0.1",
       RHZYCODE_SYNC_PORT: "0",
     },

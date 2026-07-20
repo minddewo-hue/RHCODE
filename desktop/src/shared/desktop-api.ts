@@ -212,6 +212,7 @@ export interface RhzycodeDesktopApi {
   forgetProject(path: string): Promise<void>;
   chooseFiles(): Promise<ComposerAttachment[]>;
   savePastedImage(input: PastedImageInput): Promise<ComposerAttachment>;
+  readLocalImage(path: string): Promise<string>;
   startThread(params: StartThreadParams): Promise<StartThreadResult>;
   archiveThread(threadId: string): Promise<void>;
   unarchiveThread(threadId: string): Promise<unknown>;

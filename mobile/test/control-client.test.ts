@@ -181,6 +181,22 @@ test("lists and opens synchronized desktop project directories", async () => {
     path: "D:\\work_space\\created",
     create: true,
   });
+
+});
+
+test("browses desktop directories remotely without a desktop dialog", async () => {
+  let requestedUrl = "";
+  const client = new ControlClient("192.168.1.20", 8790, accessKey, async (input) => {
+    requestedUrl = String(input);
+    return Response.json({
+      path: "D:\\work_space",
+      parentPath: "D:\\",
+      directories: [{ path: "D:\\work_space\\test", name: "test" }],
+    });
+  });
+  const result = await client.browseDirectories("D:\\work_space");
+  assert.equal(result.directories[0]?.name, "test");
+  assert.equal(requestedUrl, "http://192.168.1.20:8790/v1/commands/projects/browse?path=D%3A%5Cwork_space");
 });
 
 test("loads the model catalog from the selected desktop", async () => {

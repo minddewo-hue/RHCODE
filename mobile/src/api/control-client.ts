@@ -5,6 +5,7 @@ import {
   remoteModelListResultSchema,
   remoteProjectCreateResultSchema,
   remoteProjectListResultSchema,
+  remoteDirectoryBrowseResultSchema,
   remoteThreadMutationResultSchema,
   remoteThreadStartResultSchema,
   remoteTurnInterruptResultSchema,
@@ -17,6 +18,7 @@ import {
   type RemoteModelListResult,
   type RemoteProjectCreateResult,
   type RemoteProjectListResult,
+  type RemoteDirectoryBrowseResult,
   type RemoteSandboxMode,
   type RemoteTurnAttachment,
   type RemoteThreadMutationResult,
@@ -185,6 +187,20 @@ export class ControlClient {
       "控制服务返回了无效的打开工程结果。",
       timeoutMs,
     );
+  }
+
+  async browseDirectories(projectPath?: string, timeoutMs = 10_000): Promise<RemoteDirectoryBrowseResult> {
+    const url = new URL(`${this.controlUrl}/v1/commands/projects/browse`);
+    if (projectPath) url.searchParams.set("path", projectPath);
+    const value = await requestJson(
+      this.fetchImpl,
+      url.toString(),
+      { headers: this.authorizedHeaders() },
+      timeoutMs,
+    );
+    const result = remoteDirectoryBrowseResultSchema.safeParse(value);
+    if (!result.success) throw invalidResponse("控制服务返回了无效的电脑目录列表。");
+    return result.data;
   }
 
   async startThread(input: ThreadStartInput, timeoutMs = 8000): Promise<RemoteThreadStartResult> {

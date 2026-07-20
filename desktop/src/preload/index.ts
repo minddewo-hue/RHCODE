@@ -26,6 +26,7 @@ const api: RhzycodeDesktopApi = {
   forgetProject: (path: string) => ipcRenderer.invoke("project:forget", path),
   chooseFiles: () => ipcRenderer.invoke("project:choose-files"),
   savePastedImage: (input) => ipcRenderer.invoke("project:save-pasted-image", input),
+  readLocalImage: (path: string) => ipcRenderer.invoke("project:read-local-image", path),
   startThread: (params: { cwd: string; model?: string; approvalPolicy?: "on-request" | "untrusted" | "never"; sandboxMode?: "read-only" | "workspace-write" | "danger-full-access" }) =>
     ipcRenderer.invoke("agent:thread:start", params),
   archiveThread: (threadId: string) => ipcRenderer.invoke("agent:thread:archive", threadId),

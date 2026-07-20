@@ -5,9 +5,9 @@ import {
   MobileAccessManager,
   normalizeMobileAccessState,
   type MobileAccessState,
-} from "@rhzycode/control-plane";
+} from "./control-plane/app";
 import fs from "node:fs";
-import { extname, join, resolve } from "node:path";
+import { extname, isAbsolute, join, resolve } from "node:path";
 import { DesktopRuntime } from "./runtime";
 import {
   ProjectDirectoryRegistry,
@@ -47,6 +47,16 @@ let quitAfterCleanup = false;
 
 const userDataOverride = process.env.RHZYCODE_USER_DATA_DIR?.trim();
 if (userDataOverride) app.setPath("userData", resolve(userDataOverride));
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
+
+app.on("second-instance", () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -220,13 +230,7 @@ function registerIpc(
   ipcMain.handle("terminal:stop", (_event, processId: unknown) =>
     activeRuntime.stopTerminal(validateIdentifier(processId, "processId")),
   );
-  ipcMain.handle("project:choose", async () => {
-    const result = await dialog.showOpenDialog(mainWindow!, {
-      properties: ["openDirectory"],
-      title: "选择项目目录",
-    });
-    return result.canceled ? null : result.filePaths[0] || null;
-  });
+  ipcMain.handle("project:choose", chooseProjectDirectory);
   ipcMain.handle("project:list", () => activeRuntime.listProjectDirectories());
   ipcMain.handle("project:remember", (_event, projectPath: unknown) =>
     activeRuntime.rememberProjectDirectory(validateProjectPath(projectPath)));
@@ -255,6 +259,18 @@ function registerIpc(
   });
   ipcMain.handle("project:save-pasted-image", (_event, input: unknown) =>
     savePastedImage(pastedImageDirectory(), input));
+  ipcMain.handle("project:read-local-image", (_event, value: unknown) => {
+    if (typeof value !== "string" || !isAbsolute(value)) throw new Error("Image path is invalid.");
+    const extension = extname(value).toLowerCase();
+    const mimeType = new Map([
+      [".avif", "image/avif"], [".bmp", "image/bmp"], [".gif", "image/gif"],
+      [".jpeg", "image/jpeg"], [".jpg", "image/jpeg"], [".png", "image/png"], [".webp", "image/webp"],
+    ]).get(extension);
+    if (!mimeType) throw new Error("Unsupported image format.");
+    const bytes = fs.readFileSync(value);
+    if (bytes.byteLength > 25 * 1024 * 1024) throw new Error("Image is too large to preview.");
+    return `data:${mimeType};base64,${bytes.toString("base64")}`;
+  });
 
   activeRuntime.on("agent:status", (status) => mainWindow?.webContents.send("agent:status", status));
   activeRuntime.on("agent:message", (message) => mainWindow?.webContents.send("agent:message", message));
@@ -279,6 +295,19 @@ function registerIpc(
   mobileAccess.on("status", (status) => mainWindow?.webContents.send("mobile-access:status", status));
 }
 
+async function chooseProjectDirectory(): Promise<string | null> {
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, {
+      properties: ["openDirectory", "createDirectory"],
+      title: "选择项目目录",
+    })
+    : await dialog.showOpenDialog({
+      properties: ["openDirectory", "createDirectory"],
+      title: "选择项目目录",
+    });
+  return result.canceled ? null : result.filePaths[0] || null;
+}
+
 function isImagePath(filePath: string): boolean {
   return new Set([".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"])
     .has(extname(filePath).toLowerCase());
@@ -291,7 +320,7 @@ function pastedImageDirectory(): string {
 function resolveGatewayRoot(): string {
   const candidates = [
     process.env.RHZYCODE_GATEWAY_HOME,
-    resolve(app.getAppPath(), "..", "transfer"),
+    resolve(app.getAppPath(), "model-gateway"),
     join(process.resourcesPath, "gateway"),
     join(app.getPath("userData"), "gateway"),
   ].filter((candidate): candidate is string => Boolean(candidate));
@@ -323,6 +352,7 @@ function traceStartup(stage: string): void {
 }
 
 app.whenReady().then(() => {
+  if (!hasSingleInstanceLock) return;
   traceStartup("ready");
   removeStalePastedImages(pastedImageDirectory());
   useBundledCodexBinary();

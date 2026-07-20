@@ -24,7 +24,7 @@
 - 不把局域网 HTTP/WS 控制端口转发到公网。
 - 不提交 `.env`、证书、私钥、签名证书、密码或任何真实密钥。
 - 不绕过 `contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`，也不在 renderer 中引入 Node.js 文件系统能力。
-- 不让桌面任务和手机任务同时无协调地修改 `services/control-plane/`、`packages/protocol/` 或移动连接格式。
+- 不让桌面任务和手机任务同时无协调地修改 `desktop/src/main/control-plane/`、`packages/protocol/` 或移动连接格式。
 
 ### 1.3 建议的并行文件所有权
 
@@ -46,7 +46,7 @@ docs/mobile-development.md
 
 ```text
 packages/protocol/**
-services/control-plane/**
+desktop/src/main/control-plane/**
 docs/architecture.md
 docs/mobile-connection.md
 package.json
@@ -67,7 +67,7 @@ Preload
 Electron Main
     |-- DesktopRuntime
     |     |-- AppServerClient -- JSONL/stdin/stdout --> codex app-server
-    |     |-- GatewayModule --> 内嵌 @rhzycode/model-gateway
+    |     |-- GatewayModule --> 内嵌 desktop/model-gateway
     |     `-- 内嵌 Control Plane --> HTTP/WS 或 HTTPS/WSS --> 已授权手机
     |-- ProviderCredentialStore --> Electron safeStorage / Windows DPAPI
     |-- EncryptedControlPersistence --> Windows DPAPI
@@ -91,15 +91,15 @@ Electron Main
 | `desktop/src/preload/index.ts` | renderer 唯一允许使用的桌面 API；是 IPC 方法名和参数的直接来源 |
 | `desktop/src/renderer/src/App.tsx` | 工作区、线程、Activity、Gateway、Settings、终端和移动连接 UI |
 | `desktop/src/renderer/src/styles.css` | 桌面响应式布局和组件样式 |
-| `services/control-plane/src/app.ts` | HTTP/WSS 接口、KEY 认证和控制面服务 |
-| `services/control-plane/src/store.ts` | 快照、单调序列、事件应用、回放及耐久状态筛选 |
-| `services/control-plane/src/mobile-access.ts` | 长期 KEY、使用状态、命令审计和轮换 |
+| `desktop/src/main/control-plane/app.ts` | HTTP/WSS 接口、KEY 认证和控制面服务 |
+| `desktop/src/main/control-plane/store.ts` | 快照、单调序列、事件应用、回放及耐久状态筛选 |
+| `desktop/src/main/control-plane/mobile-access.ts` | 长期 KEY、使用状态、命令审计和轮换 |
 | `packages/protocol/src/index.ts` | 桌面与手机共享的 Zod schema 和 TypeScript 类型 |
 | `desktop/scripts/smoke-agent.ts` | 模型目录、真实 Turn、历史、命令、打断、终端冒烟 |
 | `desktop/scripts/smoke-mobile-access.mjs` | 已打包应用的 KEY 认证、加密恢复和轮换冒烟 |
 | `desktop/scripts/package-release.mjs` | Codex 版本门禁、敏感文件排除、签名、NSIS 和更新通道 |
 
-`services/control-plane/README.md` 区分独立内存开发服务和桌面内嵌控制面；实现判断仍以 `src/app.ts`、`src/mobile-access.ts`、测试和本文档为准。
+控制面已内嵌到桌面主进程；实现判断以 `desktop/src/main/control-plane/`、测试和本文档为准。
 
 ## 3. 环境要求与开发隔离
 
@@ -108,7 +108,7 @@ Electron Main
 - Node.js 20 或更高版本。
 - npm 11.x；仓库声明为 `npm@11.6.2`。
 - Windows 桌面发行路径依赖 PowerShell、Electron 43.1.1、electron-builder 26.15.3。
-- 打包时要求可执行的 Codex CLI 0.144.5，版本由 `desktop/codex-version.json` 固定。
+- 打包时要求可执行的 Codex CLI 0.144.6，版本由 `desktop/codex-version.json` 固定。
 
 在仓库根目录安装依赖：
 
@@ -221,7 +221,7 @@ renderer 只能通过 `window.rhzycode` 调用 preload。增加或修改 IPC 时
 
 `approvalPolicy` 允许 `on-request`、`untrusted`、`never`。`sandboxMode` 允许 `read-only`、`workspace-write`、`danger-full-access`。
 
-当前固定的 Codex CLI 0.144.5 在 Windows Code Mode 文件工具上仍需关注该上游限制：即使 session `cwd` 与 `writable_roots` 正确，`workspace-write` 的 `apply_patch` 和写文件命令仍可能被误判为 `writing outside of the project`。桌面不得自动升级为 Full access；需要写入的本机测试必须由用户显式选择 `danger-full-access`，并把项目范围写入任务提示。升级 Codex 后应先运行 `validation/workspace-write-smoke` 回归，再移除此限制说明。
+当前固定的 Codex CLI 0.144.6 在 Windows Code Mode 文件工具上仍需关注该上游限制：即使 session `cwd` 与 `writable_roots` 正确，`workspace-write` 的 `apply_patch` 和写文件命令仍可能被误判为 `writing outside of the project`。桌面不得自动升级为 Full access；需要写入的本机测试必须由用户显式选择 `danger-full-access`，并把项目范围写入任务提示。升级 Codex 后应先运行 `validation/workspace-write-smoke` 回归，再移除此限制说明。
 
 附件格式为：
 
@@ -258,7 +258,7 @@ type ComposerAttachment = {
 ### 6.1 网关与 Agent Host
 
 1. 主进程解析网关目录，加载 Provider 凭据到主进程环境。
-2. `GatewayModule` 使用随机内部端口启动 `@rhzycode/model-gateway`。
+2. `GatewayModule` 使用随机内部端口启动 `desktop/model-gateway`。
 3. `DesktopRuntime.startAgent()` 用 `-c` 参数把内部网关配置传给隔离的 Codex App Server。
 4. `AppServerClient` 启动 `codex app-server --stdio`，通过逐行 JSON 收发 RPC。
 5. App Server 原始通知由 `DesktopRuntime` 转换为 `ThreadSummary`、`TimelineItem`、`ApprovalRequest`、`UserInputRequest` 和 `AgentEvent`。
@@ -405,7 +405,7 @@ npm run dev:desktop
 npm run typecheck --workspace @rhzycode/desktop
 npm test --workspace @rhzycode/desktop
 npm run test:ui --workspace @rhzycode/desktop
-npm test --workspace @rhzycode/control-plane
+npm test --workspace @rhzycode/desktop
 ```
 
 共享协议或控制面变化必须运行：
@@ -469,7 +469,7 @@ npm run dist:desktop
 - `RHZYCODE_REQUIRE_SIGNING=1` 但无签名身份时打包必须失败。
 - 配置 `RHZYCODE_UPDATE_URL` 但无签名身份时也必须失败。
 - 更新源来自打包生成的 `app-update.yml`，运行时环境变量不能替换已签名构建的源。
-- 发布前验证 Codex 二进制版本严格为 0.144.5。
+- 发布前验证 Codex 二进制版本严格为 0.144.6。
 - 检查安装包和 `app.asar` 不含敏感配置、用户状态、TLS 文件或密钥。
 
 ## 12. 可并行继续开发的桌面待办

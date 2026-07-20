@@ -10,11 +10,11 @@ test-results/
 .DS_Store
 
 # Local credentials and generated gateway state
-transfer/.env
-transfer/gateway.config.json
-transfer/.proxy.pid
-transfer/proxy.out.log
-transfer/proxy.err.log
+desktop/.env
+desktop/model-gateway/gateway.config.json
+desktop/model-gateway/.proxy.pid
+desktop/model-gateway/proxy.out.log
+desktop/model-gateway/proxy.err.log
 
 # Desktop release output
 desktop/release/
@@ -24,9 +24,8 @@ appupdate/artifacts/
 mobile/releases/
 mobile/dist-*/
 
-# Local end-to-end driver state (sessions, caches, and temporary plugins)
-validation/driver-*/
-validation/tank-battle/
+# Generated validation output and local end-to-end driver state
+/validation/
 
 # Windows batch scripts
 *.bat

@@ -1,1 +1,0 @@
-Follow `AGENTS.md`. Complete `douyin-im-demo/IMAGE_TASK.md` using the existing partial implementation. Inspect only the four listed reference files, make small edits, run offline checks, then verify Hook readiness on the authorized ADB device. Do not send a live message without an explicit test conversation ID.

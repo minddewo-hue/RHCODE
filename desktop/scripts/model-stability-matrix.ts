@@ -30,7 +30,7 @@ const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const workspaceRoot = path.resolve(desktopRoot, "..");
 const projectRoot = path.join(workspaceRoot, "validation", "a-share-compute-assistant");
 const outputRoot = path.join(workspaceRoot, "validation", "model-stability");
-const gatewayRoot = process.env.RHZYCODE_GATEWAY_HOME || path.join(workspaceRoot, "transfer");
+const gatewayRoot = process.env.RHZYCODE_GATEWAY_HOME || path.join(workspaceRoot, "desktop", "model-gateway");
 const codexHome = process.env.RHZYCODE_MATRIX_CODEX_HOME ||
   path.join(os.tmpdir(), `rhzycode-model-matrix-${process.pid}`);
 const responseTimeoutMs = readTimeout("RHZYCODE_MATRIX_RESPONSE_TIMEOUT_MS", 60_000);

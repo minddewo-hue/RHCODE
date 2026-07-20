@@ -22,6 +22,8 @@ import type {
   RemoteProjectCreateRequest,
   RemoteProjectCreateResult,
   RemoteProjectListResult,
+  RemoteDirectoryBrowseRequest,
+  RemoteDirectoryBrowseResult,
   RemoteThreadMutationResult,
   RemoteThreadRenameRequest,
   RemoteThreadStartRequest,
@@ -39,7 +41,7 @@ import {
   type ControlPlaneHandle,
   type ControlStore,
   type MobileAccessManager,
-} from "@rhzycode/control-plane";
+} from "./control-plane/app";
 import { AppServerClient } from "./app-server";
 import { isValidSyncPort } from "./desktop-settings";
 import { GatewayModule } from "./gateway-module";
@@ -350,7 +352,7 @@ export class DesktopRuntime extends EventEmitter {
       ...(options.searchTerm?.trim() ? { searchTerm: options.searchTerm.trim() } : {}),
       archived: Boolean(options.archived),
     });
-    return (response.data || []).flatMap((serverThread) => {
+    const serverThreads = (response.data || []).flatMap((serverThread) => {
       const threadId = serverThread.id;
       if (!threadId) return [];
       const summary = toThreadSummary(
@@ -368,6 +370,23 @@ export class DesktopRuntime extends EventEmitter {
       }
       return [summary];
     });
+    if (options.archived) return serverThreads;
+
+    const serverThreadIds = new Set(serverThreads.map((thread) => thread.id));
+    const timelineThreadIds = new Set(
+      (this.controlPlane?.store.snapshot().timeline || []).map((item) => item.threadId),
+    );
+    const searchTerm = options.searchTerm?.trim().toLowerCase();
+    const emptyLocalThreads = [...this.threads.values()].filter((thread) =>
+      !serverThreadIds.has(thread.id)
+      && thread.status === "idle"
+      && !timelineThreadIds.has(thread.id)
+      && (!options.cwd || comparablePath(thread.projectPath) === comparablePath(options.cwd))
+      && (!searchTerm || thread.title.toLowerCase().includes(searchTerm)),
+    );
+    return [...serverThreads, ...emptyLocalThreads]
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .slice(0, 100);
   }
 
   async archiveThread(threadId: string): Promise<void> {
@@ -393,11 +412,23 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   async openThread(threadId: string): Promise<ThreadDetail> {
-    const response = await this.agent.request<{
+    let response: {
       thread?: ServerThread;
       model?: string;
       cwd?: string;
-    }>("thread/resume", { threadId });
+    };
+    try {
+      response = await this.agent.request("thread/resume", { threadId });
+    } catch (error) {
+      const localThread = this.threads.get(threadId);
+      const timeline = this.controlPlane?.store.snapshot().timeline || [];
+      const isEmptyLocalThread = localThread?.status === "idle"
+        && !timeline.some((item) => item.threadId === threadId);
+      const message = error instanceof Error ? error.message : String(error);
+      if (!localThread || !isEmptyLocalThread || !/no rollout found/i.test(message)) throw error;
+      this.activeThreadId = threadId;
+      return { thread: localThread, messages: [], timeline: [] };
+    }
     if (!response.thread?.id) throw new Error("Agent Host did not return the resumed thread.");
 
     this.activeThreadId = response.thread.id;
@@ -521,6 +552,7 @@ export class DesktopRuntime extends EventEmitter {
     return {
       listModels: () => this.listRemoteModels(),
       listProjects: () => this.listRemoteProjects(),
+      browseProjects: (request) => this.browseRemoteDirectories(request),
       createProject: (request) => this.createRemoteProject(request),
       listArchivedThreads: (request) => this.listRemoteArchivedThreads(request),
       startThread: (request) => this.startRemoteThread(request),
@@ -931,6 +963,38 @@ export class DesktopRuntime extends EventEmitter {
     return { projects: this.projectDirectories.list() };
   }
 
+  private async browseRemoteDirectories(
+    request: RemoteDirectoryBrowseRequest,
+  ): Promise<RemoteDirectoryBrowseResult> {
+    if (!request.path) {
+      const roots = process.platform === "win32"
+        ? Array.from({ length: 26 }, (_, index) => `${String.fromCharCode(65 + index)}:\\`).filter((root) => fs.existsSync(root))
+        : [path.parse(process.cwd()).root];
+      return {
+        path: null,
+        parentPath: null,
+        directories: roots.map((root) => ({ path: root, name: root })),
+      };
+    }
+    const currentPath = path.resolve(request.path);
+    try {
+      if (!fs.statSync(currentPath).isDirectory()) throw new Error("not-directory");
+      const directories = fs.readdirSync(currentPath, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .slice(0, 500)
+        .map((entry) => ({ path: path.join(currentPath, entry.name), name: entry.name }))
+        .sort((left, right) => left.name.localeCompare(right.name));
+      const root = path.parse(currentPath).root;
+      return {
+        path: currentPath,
+        parentPath: currentPath === root ? null : path.dirname(currentPath),
+        directories,
+      };
+    } catch {
+      throw new ControlCommandError("not_found");
+    }
+  }
+
   private async listRemoteModels(): Promise<RemoteModelListResult> {
     try {
       const response = await this.listModels<{ data?: RemoteModelListResult["models"] }>();
@@ -1223,7 +1287,13 @@ function toThreadDetail(thread: ServerThread, summary: ThreadSummary): ThreadDet
       const itemId = String(item.id || `${turn.id || "turn"}-${messages.length + timeline.length}`);
       const itemType = String(item.type || "notice");
       if (itemType === "userMessage") {
-        messages.push({ id: itemId, role: "user", content: describeUserContent(item.content) });
+        const images = describeUserImages(item.content);
+        messages.push({
+          id: itemId,
+          role: "user",
+          content: describeUserContent(item.content),
+          ...(images.length ? { images } : {}),
+        });
         continue;
       }
       if (itemType === "agentMessage") {
@@ -1266,11 +1336,22 @@ function describeUserContent(value: unknown): string {
       if (item.type === "text") return String(item.text || "");
       if (item.type === "skill") return `Skill: ${String(item.name || item.path || "")}`;
       if (item.type === "mention") return `Mention: ${String(item.name || item.path || "")}`;
-      if (item.type === "image" || item.type === "localImage") return `[${String(item.type)}]`;
+      if (item.type === "image" || item.type === "localImage") return "";
       return "";
     })
     .filter(Boolean)
     .join("\n");
+}
+
+function describeUserImages(value: unknown): Array<{ path: string; name: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((rawItem) => {
+    const item = (rawItem || {}) as Record<string, unknown>;
+    if (item.type !== "image" && item.type !== "localImage") return [];
+    const imagePath = String(item.path || "");
+    if (!imagePath) return [];
+    return [{ path: imagePath, name: path.basename(imagePath) || "image" }];
+  });
 }
 
 function describeHistoricalItem(item: Record<string, unknown>): string {

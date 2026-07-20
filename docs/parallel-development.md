@@ -8,8 +8,8 @@
 
 | 任务 | 主要负责 | 默认只读 |
 | --- | --- | --- |
-| 桌面端 | `desktop/**`、`services/control-plane/**`、桌面发行与本地 Agent Host | `mobile/**` |
-| 手机端 | `mobile/**`、移动端交互、真机连接与 SecureStore | `desktop/**`、`services/control-plane/**` |
+| 桌面端 | `desktop/**`、桌面发行与本地 Agent Host | `mobile/**` |
+| 手机端 | `mobile/**`、移动端交互、真机连接与 SecureStore | `desktop/**` |
 
 `packages/protocol/**`、根 `package.json`、`package-lock.json` 和 `docs/**` 是共享区域。共享区域不能由两个任务同时修改。需要变更协议时，手机端任务先记录所需字段和行为，由桌面端/控制面任务更新 schema 与服务端实现；手机端随后消费已经通过测试的新协议。
 
@@ -109,8 +109,8 @@ Android 模拟器访问宿主机时通常不能使用自己的 `127.0.0.1`。应
 npm run typecheck --workspace @rhzycode/desktop
 npm test --workspace @rhzycode/desktop
 npm run typecheck --workspace @rhzycode/mobile
-npm run typecheck --workspace @rhzycode/control-plane
-npm test --workspace @rhzycode/control-plane
+npm run typecheck --workspace @rhzycode/desktop
+npm test --workspace @rhzycode/desktop
 ```
 
 共享集成完成后由一个任务串行执行：

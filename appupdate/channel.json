@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "publishedAt": "2026-07-20T03:24:39.827Z",
+  "publishedAt": "2026-07-20T05:39:10.219Z",
   "desktop": {
     "version": "0.1.1",
     "path": "desktop/RHZYCODE-Setup-0.1.1-x64.exe",
@@ -9,11 +9,11 @@
     "releaseNotes": "RHZYCODE local desktop release"
   },
   "android": {
-    "version": "0.1.3",
-    "versionCode": 4,
-    "path": "mobile/RHZYCODE-Android-0.1.3.apk",
-    "bytes": 72481718,
-    "sha256": "02542c150c9935cd10b55c4bca4fc0e00945f95dc1166f392d6759525432a9ef",
+    "version": "0.1.4",
+    "versionCode": 5,
+    "path": "mobile/RHZYCODE-Android-0.1.4.apk",
+    "bytes": 72486594,
+    "sha256": "c68fd20b49446406dac81aa7726c0d1e3fade7638653f02215d3d0edff8ac50a",
     "releaseNotes": "RHZYCODE local Android release"
   }
 }

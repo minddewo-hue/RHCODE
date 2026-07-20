@@ -46,7 +46,7 @@ mobile/src/
 mobile/test/                   Node 单元和接口测试
 ```
 
-共享类型的事实来源是 `packages/protocol/src/index.ts`。控制接口的事实来源是 `services/control-plane/src/app.ts`。
+共享类型的事实来源是 `packages/protocol/src/index.ts`。控制接口的事实来源是 `desktop/src/main/control-plane/app.ts`。
 
 ## 3. 启动与验证
 

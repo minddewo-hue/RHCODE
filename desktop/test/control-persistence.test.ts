@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { ControlStore } from "@rhzycode/control-plane";
+import { ControlStore } from "../src/main/control-plane/app";
 import { EncryptedControlPersistence } from "../src/main/control-persistence.js";
 
 test("encrypts and restores durable control-plane state", (context) => {

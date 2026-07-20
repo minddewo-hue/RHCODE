@@ -1,7 +1,0 @@
-import assert from "node:assert/strict";
-import test from "node:test";
-import { normalizeTicker } from "../src/model-smoke.js";
-
-test("normalizes ticker values", () => {
-  assert.equal(normalizeTicker("  sh600000 "), "SH600000");
-});

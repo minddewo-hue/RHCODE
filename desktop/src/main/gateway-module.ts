@@ -7,7 +7,7 @@ import {
   type EmbeddedGatewayHandle,
   type EmbeddedGatewayModel,
   type EmbeddedGatewayProvider,
-} from "@rhzycode/model-gateway";
+} from "../../model-gateway/src/embedded.js";
 
 export type GatewayModuleState = "stopped" | "starting" | "running" | "error";
 
@@ -30,7 +30,10 @@ export class GatewayModule extends EventEmitter {
   private probeInFlight: Promise<GatewayModuleStatus> | null = null;
   private catalogPath: string | null = null;
 
-  constructor(private readonly rootDir: string) {
+  constructor(
+    private readonly rootDir: string,
+    private readonly envPath = resolveGatewayEnvPath(rootDir),
+  ) {
     super();
   }
 
@@ -61,7 +64,11 @@ export class GatewayModule extends EventEmitter {
     if (this.handle) return this.getStatus();
     this.setState("starting");
     try {
-      this.handle = await startEmbeddedGateway({ rootDir: this.rootDir, port: 0 });
+      this.handle = await startEmbeddedGateway({
+        rootDir: this.rootDir,
+        envPath: this.envPath,
+        port: 0,
+      });
       this.catalogPath = this.writeRuntimeCatalog(this.handle.models);
       this.error = null;
       this.setState("running");
@@ -165,4 +172,11 @@ export class GatewayModule extends EventEmitter {
     this.state = state;
     this.emit("status", this.getStatus());
   }
+}
+
+export function resolveGatewayEnvPath(rootDir: string): string {
+  const resolvedRoot = path.resolve(rootDir);
+  return path.basename(resolvedRoot).toLowerCase() === "model-gateway"
+    ? path.join(path.dirname(resolvedRoot), ".env")
+    : path.join(resolvedRoot, ".env");
 }

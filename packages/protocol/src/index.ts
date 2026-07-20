@@ -59,6 +59,10 @@ export const conversationMessageSchema = z.object({
   id: z.string().min(1),
   role: z.enum(["user", "assistant"]),
   content: z.string(),
+  images: z.array(z.object({
+    path: z.string().min(1),
+    name: z.string().min(1),
+  })).optional(),
 });
 export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
 
@@ -201,6 +205,18 @@ export const remoteProjectCreateResultSchema = z.object({
   created: z.boolean(),
 });
 export type RemoteProjectCreateResult = z.infer<typeof remoteProjectCreateResultSchema>;
+
+export const remoteDirectoryBrowseRequestSchema = z.object({
+  path: z.string().trim().max(32_768).optional(),
+}).strict();
+export type RemoteDirectoryBrowseRequest = z.infer<typeof remoteDirectoryBrowseRequestSchema>;
+
+export const remoteDirectoryBrowseResultSchema = z.object({
+  path: z.string().nullable(),
+  parentPath: z.string().nullable(),
+  directories: z.array(projectDirectorySchema).max(500),
+});
+export type RemoteDirectoryBrowseResult = z.infer<typeof remoteDirectoryBrowseResultSchema>;
 
 export const remoteThreadStartRequestSchema = z.object({
   projectPath: z.string().min(1).max(32_768),

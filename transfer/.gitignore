@@ -1,0 +1,7 @@
+.env
+gateway.config.json
+.proxy.pid
+proxy.out.log
+proxy.err.log
+node_modules/
+.codex-test/

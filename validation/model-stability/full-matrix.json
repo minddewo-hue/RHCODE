@@ -1,0 +1,467 @@
+{
+  "startedAt": "2026-07-17T00:50:06.968Z",
+  "finishedAt": "2026-07-17T00:56:36.299Z",
+  "projectRoot": "D:\\work_space\\test\\validation\\a-share-compute-assistant",
+  "catalogCount": 26,
+  "responseTimeoutMs": 60000,
+  "toolTimeoutMs": 90000,
+  "complete": true,
+  "summary": {
+    "stable": [
+      "faker/kimi-for-coding",
+      "faker/MiniMax-M2",
+      "faker/MiniMax-M2.1",
+      "faker/MiniMax-M2.1-highspeed",
+      "faker/MiniMax-M2.5",
+      "faker/MiniMax-M2.5-highspeed",
+      "faker/MiniMax-M2.7",
+      "faker/MiniMax-M2.7-highspeed",
+      "faker/MiniMax-M3",
+      "vllm/gemma-4-31b-it-uncensored-bf16",
+      "sub2api/gpt-5.3-codex-spark",
+      "sub2api/gpt-5.4",
+      "sub2api/gpt-5.4-2026-03-05",
+      "sub2api/gpt-5.4-mini",
+      "sub2api/gpt-5.5",
+      "sub2api/gpt-5.6-luna",
+      "sub2api/gpt-5.6-sol",
+      "sub2api/gpt-5.6-terra"
+    ],
+    "chat-only": [],
+    "unstable": [],
+    "unavailable": [
+      "faker/TrevorJS/gemma-4-26B-A4B-it-uncensored-GGUF",
+      "faker/fake-gpt-4o-mini",
+      "vllm/gemma-4-31b-it-uncensored",
+      "sub2api/gpt-5.2",
+      "sub2api/gpt-5.2-2025-12-11",
+      "sub2api/gpt-5.2-chat-latest",
+      "sub2api/gpt-5.2-pro",
+      "sub2api/gpt-5.2-pro-2025-12-11"
+    ]
+  },
+  "results": [
+    {
+      "model": "faker/kimi-for-coding",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 1858,
+        "output": "<think></think>RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2191,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 12658,
+        "output": "<think></think><think></think>RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M2",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2865,
+        "output": "<think></think>RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 3027,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 4382,
+        "output": "<think></think><think></think>RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M2.1",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2433,
+        "output": "<think></think>RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 1891,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 3933,
+        "output": "<think></think><think></think>RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M2.1-highspeed",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 1399,
+        "output": "<think></think>RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 1856,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 3562,
+        "output": "<think></think><think></think>RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M2.5",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 1445,
+        "output": "<think></think>\nRHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2012,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 4019,
+        "output": "<think></think><think></think>RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M2.5-highspeed",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 1252,
+        "output": "<think></think>RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 1375,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 3488,
+        "output": "<think></think><think></think>RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M2.7",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2306,
+        "output": "<think></think>\n\nRHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2406,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 5626,
+        "output": "<think></think><think></think>\n\nRHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M2.7-highspeed",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 1551,
+        "output": "<think></think>RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 1488,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 3831,
+        "output": "<think></think><think></think>RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M3",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 1656,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 1668,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 3951,
+        "output": "RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/TrevorJS/gemma-4-26B-A4B-it-uncensored-GGUF",
+      "round1": {
+        "ok": false,
+        "elapsedMs": 27316,
+        "output": "",
+        "error": "{\"message\":\"unexpected status 502 Bad Gateway: Provider faker: Upstream request failed, url: http://127.0.0.1:50012/v1/responses, request id: 598cffe9-1f58-493e-a904-bb7fab495351\",\"codexErrorInfo\":\"other\",\"additionalDetails\":null}"
+      },
+      "verdict": "unavailable"
+    },
+    {
+      "model": "faker/fake-gpt-4o-mini",
+      "round1": {
+        "ok": false,
+        "elapsedMs": 6828,
+        "output": "",
+        "error": "{\"message\":\"unexpected status 404 Not Found: Provider faker: Model 'fake-gpt-4o-mini' not found, url: http://127.0.0.1:50012/v1/responses, request id: a192bfe3-7b19-42a5-9fca-ae5167d95614\",\"codexErrorInfo\":\"other\",\"additionalDetails\":null}"
+      },
+      "verdict": "unavailable"
+    },
+    {
+      "model": "vllm/gemma-4-31b-it-uncensored",
+      "round1": {
+        "ok": false,
+        "elapsedMs": 26555,
+        "output": "",
+        "error": "{\"message\":\"unexpected status 502 Bad Gateway: Provider faker: Upstream request failed, url: http://127.0.0.1:50012/v1/responses, request id: 2bfedbea-b8c5-47d1-abb9-8b1761d5e18c\",\"codexErrorInfo\":\"other\",\"additionalDetails\":null}"
+      },
+      "verdict": "unavailable"
+    },
+    {
+      "model": "vllm/gemma-4-31b-it-uncensored-bf16",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 5905,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 838,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 2468,
+        "output": "RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.2",
+      "round1": {
+        "ok": false,
+        "elapsedMs": 27960,
+        "output": "",
+        "error": "{\"message\":\"unexpected status 503 Service Unavailable: Provider sub2api: Service temporarily unavailable, url: http://127.0.0.1:50012/v1/responses, request id: 861381b5-d913-420a-87cc-4652228eda92\",\"codexErrorInfo\":\"other\",\"additionalDetails\":null}"
+      },
+      "verdict": "unavailable"
+    },
+    {
+      "model": "sub2api/gpt-5.2-2025-12-11",
+      "round1": {
+        "ok": false,
+        "elapsedMs": 27865,
+        "output": "",
+        "error": "{\"message\":\"unexpected status 503 Service Unavailable: Provider sub2api: Service temporarily unavailable, url: http://127.0.0.1:50012/v1/responses, request id: 2fd815a4-65fa-41fc-8ff0-65193b19848a\",\"codexErrorInfo\":\"other\",\"additionalDetails\":null}"
+      },
+      "verdict": "unavailable"
+    },
+    {
+      "model": "sub2api/gpt-5.2-chat-latest",
+      "round1": {
+        "ok": false,
+        "elapsedMs": 27161,
+        "output": "",
+        "error": "{\"message\":\"unexpected status 503 Service Unavailable: Provider sub2api: Service temporarily unavailable, url: http://127.0.0.1:50012/v1/responses, request id: dfdf1dfc-0fc2-479d-8dad-ba37492c4aa1\",\"codexErrorInfo\":\"other\",\"additionalDetails\":null}"
+      },
+      "verdict": "unavailable"
+    },
+    {
+      "model": "sub2api/gpt-5.2-pro",
+      "round1": {
+        "ok": false,
+        "elapsedMs": 28817,
+        "output": "",
+        "error": "{\"message\":\"unexpected status 503 Service Unavailable: Provider sub2api: Service temporarily unavailable, url: http://127.0.0.1:50012/v1/responses, request id: aebdfb8d-7894-4dd2-9471-b090feceea02\",\"codexErrorInfo\":\"other\",\"additionalDetails\":null}"
+      },
+      "verdict": "unavailable"
+    },
+    {
+      "model": "sub2api/gpt-5.2-pro-2025-12-11",
+      "round1": {
+        "ok": false,
+        "elapsedMs": 27814,
+        "output": "",
+        "error": "{\"message\":\"unexpected status 503 Service Unavailable: Provider sub2api: Service temporarily unavailable, url: http://127.0.0.1:50012/v1/responses, request id: 2128a1db-4f77-4f86-9ab2-3eb5e461d412\",\"codexErrorInfo\":\"other\",\"additionalDetails\":null}"
+      },
+      "verdict": "unavailable"
+    },
+    {
+      "model": "sub2api/gpt-5.3-codex-spark",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2067,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2720,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 4519,
+        "output": "RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.4",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2529,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 3865,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 6031,
+        "output": "Reading `package.json` with PowerShell now to confirm the package name from the file contents.RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.4-2026-03-05",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 8450,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2646,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 4933,
+        "output": "RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.4-mini",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2135,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2941,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 9824,
+        "output": "I’m checking `package.json` now and will use the output to verify the package name before replying with the exact requested token.RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.5",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2610,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2189,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 4695,
+        "output": "RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.6-luna",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2056,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2243,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 6079,
+        "output": "RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.6-sol",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 1908,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2689,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 7027,
+        "output": "I’ll read `package.json` with the requested shell command and verify its `name` field.RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.6-terra",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 3407,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 1724,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 9423,
+        "output": "I’ll inspect `package.json` and verify the declared package name.RHZY_PROJECT_TOOL_OK"
+      },
+      "verdict": "stable"
+    }
+  ]
+}

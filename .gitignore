@@ -1,0 +1,29 @@
+node_modules/
+dist/
+out/
+.expo/
+.vite/
+coverage/
+test-results/
+*.log
+*.tsbuildinfo
+.DS_Store
+
+# Local credentials and generated gateway state
+transfer/.env
+transfer/gateway.config.json
+transfer/.proxy.pid
+transfer/proxy.out.log
+transfer/proxy.err.log
+
+# Desktop release output
+desktop/release/
+
+# Generated application packages and exported bundles
+appupdate/artifacts/
+mobile/releases/
+mobile/dist-*/
+
+# Local end-to-end driver state (sessions, caches, and temporary plugins)
+validation/driver-*/
+validation/tank-battle/

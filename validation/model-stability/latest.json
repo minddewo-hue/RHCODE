@@ -1,0 +1,470 @@
+{
+  "startedAt": "2026-07-17T01:09:20.391Z",
+  "finishedAt": "2026-07-17T01:20:06.477Z",
+  "projectRoot": "D:\\work_space\\test\\validation\\a-share-compute-assistant",
+  "catalogCount": 18,
+  "responseTimeoutMs": 60000,
+  "toolTimeoutMs": 60000,
+  "codeEditEnabled": true,
+  "complete": true,
+  "summary": {
+    "stable": [
+      "faker/kimi-for-coding",
+      "faker/MiniMax-M2",
+      "faker/MiniMax-M2.1",
+      "faker/MiniMax-M2.1-highspeed",
+      "faker/MiniMax-M2.5",
+      "faker/MiniMax-M2.5-highspeed",
+      "faker/MiniMax-M2.7",
+      "faker/MiniMax-M2.7-highspeed",
+      "faker/MiniMax-M3",
+      "vllm/gemma-4-31b-it-uncensored-bf16",
+      "sub2api/gpt-5.3-codex-spark",
+      "sub2api/gpt-5.4",
+      "sub2api/gpt-5.4-2026-03-05",
+      "sub2api/gpt-5.4-mini",
+      "sub2api/gpt-5.5",
+      "sub2api/gpt-5.6-luna",
+      "sub2api/gpt-5.6-sol",
+      "sub2api/gpt-5.6-terra"
+    ],
+    "coding-failed": [],
+    "chat-only": [],
+    "unstable": [],
+    "unavailable": []
+  },
+  "results": [
+    {
+      "model": "faker/kimi-for-coding",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2175,
+        "output": "<think></think>RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2058,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 13488,
+        "output": "<think></think><think></think>RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 9639,
+        "output": "<think></think><think></think>RHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M2",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2187,
+        "output": "<think></think>RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 1877,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 4357,
+        "output": "<think></think><think></think>RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 32849,
+        "output": "<think></think><think></think><think></think><think></think><think></think><think></think><think></think><think></think><think></think><think></think><think></think><think></think>RHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M2.1",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 1805,
+        "output": "<think></think>RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 1560,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 4189,
+        "output": "<think></think><think></think>RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 25407,
+        "output": "<think></think><think></think><think></think><think></think><think></think><think></think><think></think><think></think><think></think><think></think>RHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M2.1-highspeed",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2050,
+        "output": "<think></think>RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 1137,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 3997,
+        "output": "<think></think><think></think>RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 18822,
+        "output": "<think></think><think></think><think></think><think></think><think></think><think></think><think></think>RHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M2.5",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 1383,
+        "output": "<think></think>RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 1611,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 4652,
+        "output": "<think></think><think></think>RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 24357,
+        "output": "<think></think>I'll create the source file and test file, then run the test.\n<think></think><think></think><think></think><think></think><think></think>The project uses ES modules. Let me update both files to use ESM syntax.\n<think></think><think></think><think></think>RHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M2.5-highspeed",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 1337,
+        "output": "<think></think>RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 1392,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 3858,
+        "output": "<think></think><think></think>RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 24045,
+        "output": "<think></think><think></think><think></think><think></think><think></think><think></think><think></think><think></think><think></think><think></think>RHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M2.7",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2690,
+        "output": "<think></think>RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2262,
+        "output": "<think></think>\n\nRHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 6142,
+        "output": "<think></think><think></think>\n\nRHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 20452,
+        "output": "<think></think><think></think><think></think><think></think><think></think><think></think>\n\nRHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M2.7-highspeed",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 1817,
+        "output": "<think></think>RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 1209,
+        "output": "<think></think>RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 4090,
+        "output": "<think></think><think></think>RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 25762,
+        "output": "<think></think><think></think><think></think><think></think><think></think><think></think><think></think><think></think><think></think>RHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "faker/MiniMax-M3",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 1905,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2925,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 4702,
+        "output": "I'll run the command to check the package name.Package name confirmed: `a-share-compute-assistant`.\n\nRHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 15105,
+        "output": "I'll create the two files and run the test.RHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "vllm/gemma-4-31b-it-uncensored-bf16",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 1263,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 820,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 2463,
+        "output": "RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 39116,
+        "output": "RHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.3-codex-spark",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2319,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2810,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 4297,
+        "output": "RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 17829,
+        "output": "RHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.4",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 3789,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 3116,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 6186,
+        "output": "RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 30703,
+        "output": "Creating the new source and test files, then I’ll run the specified `node --test` command and verify it passes before replying.I’ve confirmed the workspace layout. Next I’m adding the two requested files without touching anything else, then I’ll run the targeted test file.The implementation is in place. Running the exact `node --test test/model-smoke.test.js` command now to verify it passes.The test failed because this repo is configured as an ES module package. I’m updating only the two new fil"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.4-2026-03-05",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 3304,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2671,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 7430,
+        "output": "I’ll read `package.json` with PowerShell, confirm the package name from its contents, and then return exactly the required token.RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 22136,
+        "output": "I’m creating the new source and test files without touching existing files, then I’ll run the targeted `node --test` command to verify it passes.I’ve confirmed the workspace layout. Next I’m adding `src/model-smoke.js` and `test/model-smoke.test.js`, then I’ll run the single test file the user specified.The files are in place. I’m running `node --test test/model-smoke.test.js` now to verify the new export and assertion pass as requested.RHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.4-mini",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2396,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2126,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 11652,
+        "output": "I’ll read `package.json` from the current workspace, verify the package name from the output, and then return exactly the requested token.RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 32731,
+        "output": "I’m checking the workspace layout first so I can add the two new files without touching anything else, then I’ll run the requested test exactly as specified.I have the file list. Next I’m checking the module style in the existing source and tests so the new utility and test match the repo conventions cleanly.I’ve confirmed the repo uses ESM, so I’m adding a small exported helper and a focused `node:test` check in new files only.The files are in place. I’m running the exact test command now to ve"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.5",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 2582,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 3596,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 7341,
+        "output": "RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 16913,
+        "output": "I’ll add only the two requested new files, then run the specific Node test command.The `src` and `test` directories already exist, so I’m creating the requested module and focused smoke test without touching existing files.The files are in place. I’m running the exact requested test command now.RHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.6-luna",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 1809,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 2586,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 8822,
+        "output": "RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 22609,
+        "output": "I’ll verify the target paths, add only the two requested new files, run the specified test, and return the exact success token if it passes.The requested files do not exist, so I can add them without touching existing files. I’m checking the project’s module convention before writing the test.The project uses ES modules, so I’m adding a named export and a `node:test` test with the matching import style.RHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.6-sol",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 3028,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 6081,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 9886,
+        "output": "I’ll read `package.json` and verify its `name` field.RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 34038,
+        "output": "I’ll add only the two requested files, verify they do not already exist, and run the exact test command.Both target paths are new. I’m checking the package module convention, then I’ll create the implementation and matching test without touching existing content.The project uses ES modules. I’m adding a named export and a focused `node:test` case now.The two files are in place. I’m running the exact requested test command and will only return the required success token if it passes.RHZY_CODE_EDI"
+      },
+      "verdict": "stable"
+    },
+    {
+      "model": "sub2api/gpt-5.6-terra",
+      "round1": {
+        "ok": true,
+        "elapsedMs": 12552,
+        "output": "RHZY_MATRIX_R1_OK"
+      },
+      "round2": {
+        "ok": true,
+        "elapsedMs": 4759,
+        "output": "RHZY_MATRIX_R2_OK"
+      },
+      "projectTool": {
+        "ok": true,
+        "elapsedMs": 6932,
+        "output": "I’ll read `package.json` without modifying anything, confirm its package name, and return the required token only.RHZY_PROJECT_TOOL_OK"
+      },
+      "codeEdit": {
+        "ok": true,
+        "elapsedMs": 22899,
+        "output": "I’ll add the two requested files only, then run the specified test.The project layout is present; I’m checking its module format so the export syntax matches the test runner.I’m creating the ESM module and its focused `node:test` coverage, without touching existing files.The requested files are in place. I’m running exactly `node --test test/model-smoke.test.js` now.RHZY_CODE_EDIT_OK"
+      },
+      "verdict": "stable"
+    }
+  ]
+}

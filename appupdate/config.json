@@ -1,0 +1,7 @@
+{
+  "host": "0.0.0.0",
+  "port": 8791,
+  "publicBaseUrl": "http://192.168.11.103:8791",
+  "artifactsDirectory": "artifacts",
+  "channelFile": "channel.json"
+}

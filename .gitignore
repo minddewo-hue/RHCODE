@@ -27,3 +27,6 @@ mobile/dist-*/
 # Local end-to-end driver state (sessions, caches, and temporary plugins)
 validation/driver-*/
 validation/tank-battle/
+
+# Windows batch scripts
+*.bat

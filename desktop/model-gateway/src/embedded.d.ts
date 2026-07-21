@@ -1,6 +1,6 @@
 export interface EmbeddedGatewayProvider {
   id: string;
-  protocol: "responses" | "chat_completions";
+  protocol: "responses" | "chat_completions" | "anthropic_messages";
   health: {
     state: "unknown" | "healthy" | "degraded";
     latencyMs: number | null;
@@ -17,7 +17,8 @@ export interface EmbeddedGatewayModel {
   capabilities: Record<string, boolean>;
   providerId: string;
   upstreamModel: string;
-  protocol: "responses" | "chat_completions";
+  protocol: "responses" | "chat_completions" | "anthropic_messages";
+  contextWindow: number | null;
   runtimeInstructions: string | null;
 }
 

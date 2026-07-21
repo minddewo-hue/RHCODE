@@ -95,9 +95,24 @@ export interface CredentialStatus {
   encryptionAvailable: boolean;
   providers: Array<{
     providerId: string;
+    name: string;
+    baseUrl: string;
+    protocol: "auto" | "responses" | "chat_completions" | "anthropic_messages";
+    detectedProtocol: "responses" | "chat_completions" | "anthropic_messages";
+    models: string[];
+    custom: boolean;
     configured: boolean;
     source: "secure_store" | "environment" | "missing";
   }>;
+}
+
+export interface LlmProviderConfigurationInput {
+  providerId: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  protocol: "auto" | "responses" | "chat_completions" | "anthropic_messages";
+  models: string[];
 }
 
 export interface CredentialUpdateResult {
@@ -233,6 +248,8 @@ export interface RhzycodeDesktopApi {
   probeProviders(): Promise<GatewayStatus>;
   getCredentialStatus(): Promise<CredentialStatus>;
   setProviderCredential(providerId: string, apiKey: string): Promise<CredentialUpdateResult>;
+  configureLlmProvider(input: LlmProviderConfigurationInput): Promise<CredentialUpdateResult>;
+  removeLlmProvider(providerId: string): Promise<CredentialUpdateResult>;
   getUpdateStatus(): Promise<UpdateStatus>;
   checkForUpdates(): Promise<UpdateStatus>;
   downloadUpdate(): Promise<UpdateStatus>;

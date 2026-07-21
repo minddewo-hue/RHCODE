@@ -41,14 +41,17 @@ test("builds result entries only for the selected thread", () => {
   assert.ok(entries.every(isResultEntry));
 });
 
-test("keeps an image pending message without duplicating its timeline message", () => {
+test("keeps a pending message with attachments without duplicating its timeline message", () => {
   const pending: PendingMessage = {
     id: "pending-1",
     threadId: "thread-1",
     content: "inspect this",
     createdAt: now,
     state: "sent",
-    images: [{ name: "screen.png", uri: "file:///screen.png" }],
+    attachments: [
+      { name: "screen.png", kind: "image", size: 100, uri: "file:///screen.png" },
+      { name: "notes.txt", kind: "file", size: 42 },
+    ],
   };
   const entries = buildChatEntries({
     selectedThreadId: "thread-1",

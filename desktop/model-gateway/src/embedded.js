@@ -1,6 +1,7 @@
 import path from "node:path";
 import { loadDotEnv, loadGatewayConfig } from "./config.js";
 import { createGatewayServer } from "./gateway.js";
+import { applyGemma31bModelPolicy } from "./gemma-31b-policy.js";
 
 export async function startEmbeddedGateway(options) {
   const rootDir = path.resolve(options.rootDir);
@@ -15,6 +16,12 @@ export async function startEmbeddedGateway(options) {
     : path.join(rootDir, configuredPath);
   const config = loadGatewayConfig({ configPath });
   await discoverProviderModels(config, options.discoveryTimeoutMs ?? 5000);
+  addAutomaticModelProtocolRoutes(config);
+  if (config.models.size === 0) {
+    throw new Error(
+      "Gateway config has no models. Add model IDs to the provider or use an upstream that supports GET /models.",
+    );
+  }
   const server = createGatewayServer(config);
   const providers = [...config.providers.values()].map((provider) => ({
     id: provider.id,
@@ -64,7 +71,8 @@ export async function startEmbeddedGateway(options) {
       capabilities: model.capabilities,
       providerId: model.routes[0].provider.id,
       upstreamModel: model.routes[0].upstreamModel,
-      protocol: model.routes[0].provider.protocol,
+      protocol: model.routes[0].protocol,
+      contextWindow: model.contextWindow,
       runtimeInstructions: model.runtimeInstructions,
     })),
     async probeProviders(options = {}) {
@@ -106,7 +114,7 @@ async function discoverProviderModels(config, timeoutMs) {
     timeout.unref?.();
     try {
       const response = await fetch(`${provider.baseUrl}/models`, {
-        headers: provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {},
+        headers: providerRequestHeaders(provider),
         signal: controller.signal,
       });
       if (!response.ok) return;
@@ -132,9 +140,12 @@ async function discoverProviderModels(config, timeoutMs) {
           maxBufferedStreamBytes: 8 * 1024 * 1024,
           runtimeInstructions: null,
           routes: [{
-            key: `${provider.id}\u0000${upstreamModel}`,
+            key: `${provider.id}\u0000${upstreamModel}\u0000${provider.protocol}`,
             provider,
             upstreamModel,
+            protocol: provider.protocol,
+            path: provider.path,
+            protocolExplicit: false,
           }],
         });
       }
@@ -144,6 +155,35 @@ async function discoverProviderModels(config, timeoutMs) {
       clearTimeout(timeout);
     }
   }));
+}
+
+function addAutomaticModelProtocolRoutes(config) {
+  for (const model of config.models.values()) {
+    const routes = model.routes.flatMap((route) => {
+      if (!route.provider.modelDiscovery?.detectProtocol || route.protocolExplicit) return [route];
+      const protocols = [
+        route.protocol,
+        ...["responses", "chat_completions", "anthropic_messages"].filter(
+          (protocol) => protocol !== route.protocol,
+        ),
+      ];
+      return protocols.map((protocol) => ({
+        ...route,
+        key: `${route.provider.id}\u0000${route.upstreamModel}\u0000${protocol}`,
+        protocol,
+        path: endpointPath(protocol),
+      }));
+    });
+    model.routes = routes.filter((route, index) =>
+      routes.findIndex((candidate) => candidate.key === route.key) === index);
+    applyGemma31bModelPolicy(model);
+  }
+}
+
+function endpointPath(protocol) {
+  if (protocol === "responses") return "/responses";
+  if (protocol === "anthropic_messages") return "/messages";
+  return "/chat/completions";
 }
 
 function hasProviderRoute(config, providerId, upstreamModel) {
@@ -159,7 +199,7 @@ async function probeProvider(provider, timeoutMs) {
   try {
     const response = await fetch(`${provider.baseUrl}/models`, {
       method: "GET",
-      headers: provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {},
+      headers: providerRequestHeaders(provider),
       signal: controller.signal,
     });
     await response.body?.cancel().catch(() => undefined);
@@ -187,6 +227,18 @@ async function probeProvider(provider, timeoutMs) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function providerRequestHeaders(provider, protocol = provider.protocol) {
+  if (!provider.apiKey) return {};
+  if (protocol === "anthropic_messages") {
+    return {
+      authorization: `Bearer ${provider.apiKey}`,
+      "x-api-key": provider.apiKey,
+      "anthropic-version": provider.anthropicVersion,
+    };
+  }
+  return { authorization: `Bearer ${provider.apiKey}` };
 }
 
 function sanitizeProbeError(error) {

@@ -650,11 +650,12 @@ test("multi-model gateway integration", async (t) => {
     assert.equal(call.body.messages[0].content[1].image_url.detail, "low");
   });
 
-  await t.test("drops Responses-only namespaces and web search on Chat routes", async () => {
+  await t.test("drops Responses-only reasoning, namespaces, and web search on Chat routes", async () => {
     const response = await gatewayFetch(baseUrl, "/v1/responses", {
       body: {
         model: "chat/model",
         input: "use the regular function",
+        reasoning: { effort: "medium", summary: "auto" },
         tools: [
           {
             type: "namespace",
@@ -674,6 +675,7 @@ test("multi-model gateway integration", async (t) => {
     const call = calls.filter((entry) => entry.body.model === "chat-upstream").at(-1);
     assert.equal(call.body.tools.length, 1);
     assert.equal(call.body.tools[0].function.name, "weather");
+    assert.equal(call.body.reasoning, undefined);
   });
 
   await t.test("converts Chat Completions SSE in Responses event order", async () => {

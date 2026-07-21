@@ -10,7 +10,12 @@ export interface PendingMessage {
   content: string;
   createdAt: string;
   state: "sending" | "sent" | "failed";
-  images?: Array<{ name: string; uri: string }>;
+  attachments?: Array<{
+    name: string;
+    kind: "file" | "image";
+    size: number;
+    uri?: string;
+  }>;
 }
 
 export type ChatEntry =
@@ -38,17 +43,17 @@ export function isResultEntry(entry: ChatEntry): boolean {
 export function buildChatEntries(source: ChatEntrySource, includeActivity: boolean): ChatEntry[] {
   if (!source.selectedThreadId) return [];
   const timeline = source.timeline.filter((item) => item.threadId === source.selectedThreadId);
-  const imageMessages = source.pendingMessages.filter((message) => message.images?.length);
+  const attachmentMessages = source.pendingMessages.filter((message) => message.attachments?.length);
   const visiblePending = source.pendingMessages.filter((message) => (
     message.threadId === source.selectedThreadId
-    && (message.images?.length
+    && (message.attachments?.length
       || !timeline.some((item) => item.kind === "user" && item.content.trim() === message.content.trim()))
   ));
 
   return [
     ...timeline.filter((item) => (
       (includeActivity || item.kind === "user" || item.kind === "assistant")
-      && !(item.kind === "user" && imageMessages.some((message) => (
+      && !(item.kind === "user" && attachmentMessages.some((message) => (
         message.threadId === item.threadId && message.content.trim() === item.content.trim()
       )))
     )).map((item): ChatEntry => ({

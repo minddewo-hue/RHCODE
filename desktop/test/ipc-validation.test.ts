@@ -6,6 +6,7 @@ import {
   validateClipboardText,
   validateCredentialUpdate,
   validateIdentifier,
+  validateLlmProviderConfiguration,
   validateStartThread,
   validateStartTurn,
   validateSyncPort,
@@ -121,6 +122,21 @@ test("validates credentials, clipboard, approvals, and user answers", () => {
     providerId: "faker",
     apiKey: "secret-value",
   });
+  assert.deepEqual(validateLlmProviderConfiguration({
+    providerId: "claude-relay",
+    name: "Claude relay",
+    baseUrl: "https://claude.example/v1/messages",
+    apiKey: "secret-value",
+    protocol: "auto",
+    models: ["claude-sonnet", "claude-sonnet"],
+  }), {
+    providerId: "claude-relay",
+    name: "Claude relay",
+    baseUrl: "https://claude.example/v1/messages",
+    apiKey: "secret-value",
+    protocol: "auto",
+    models: ["claude-sonnet"],
+  });
   assert.deepEqual(validateApprovalResolution("approval-1", "approved"), {
     id: "approval-1",
     decision: "approved",
@@ -152,6 +168,28 @@ test("validates credentials, clipboard, approvals, and user answers", () => {
       assert.doesNotMatch(String(error), /xxx/);
       return true;
     },
+  );
+  assert.throws(
+    () => validateLlmProviderConfiguration({
+      providerId: "Claude Relay",
+      name: "Claude",
+      baseUrl: "https://claude.example/v1",
+      apiKey: "secret",
+      protocol: "messages",
+      models: [],
+    }),
+    /providerId/,
+  );
+  assert.throws(
+    () => validateLlmProviderConfiguration({
+      providerId: "claude-relay",
+      name: "Claude",
+      baseUrl: "api.example.com/v1",
+      apiKey: "secret",
+      protocol: "auto",
+      models: [],
+    }),
+    /baseUrl must be a valid URL starting with http:\/\/ or https:\/\//,
   );
 });
 

@@ -16,6 +16,7 @@ import {
 } from "./project-directories";
 import type { ComposerAttachment } from "../shared/desktop-api";
 import { ProviderCredentialStore } from "./credential-store";
+import { detectLlmProtocol } from "./llm-protocol";
 import { DesktopSettingsStore, isValidSyncPort } from "./desktop-settings";
 import { removeStalePastedImages, savePastedImage } from "./pasted-image-store";
 import { buildTextContextMenu } from "./text-context-menu";
@@ -26,6 +27,7 @@ import {
   validateClipboardText,
   validateCredentialUpdate,
   validateIdentifier,
+  validateLlmProviderConfiguration,
   validateProjectPath,
   validateStartThread,
   validateStartTurn,
@@ -166,6 +168,51 @@ function registerIpc(
   ipcMain.handle("credentials:set", async (_event, providerId: unknown, apiKey: unknown) => {
     const input = validateCredentialUpdate(providerId, apiKey);
     credentials.set(input.providerId, input.apiKey);
+    credentials.applyToEnvironment();
+    let gatewayError: string | null = null;
+    try {
+      await activeRuntime.restartGateway();
+    } catch (error) {
+      gatewayError = error instanceof Error ? error.message : String(error);
+    }
+    return {
+      credentials: credentials.status(),
+      gateway: activeRuntime.gateway.getStatus(),
+      gatewayError,
+    };
+  });
+  ipcMain.handle("providers:configure", async (_event, value: unknown) => {
+    const input = validateLlmProviderConfiguration(value);
+    const apiKey = input.apiKey.trim() || credentials.getApiKey(input.providerId);
+    if (!apiKey) throw new Error("An API key is required for this provider.");
+    const detected = await detectLlmProtocol({
+      baseUrl: input.baseUrl,
+      apiKey,
+      protocol: input.protocol,
+    });
+    credentials.upsert({
+      providerId: input.providerId,
+      name: input.name,
+      baseUrl: detected.baseUrl,
+      protocol: input.protocol,
+      detectedProtocol: detected.protocol,
+      models: input.models,
+    }, input.apiKey);
+    credentials.applyToEnvironment();
+    let gatewayError: string | null = null;
+    try {
+      await activeRuntime.restartGateway();
+    } catch (error) {
+      gatewayError = error instanceof Error ? error.message : String(error);
+    }
+    return {
+      credentials: credentials.status(),
+      gateway: activeRuntime.gateway.getStatus(),
+      gatewayError,
+    };
+  });
+  ipcMain.handle("providers:remove", async (_event, providerId: unknown) => {
+    credentials.remove(validateIdentifier(providerId, "providerId"));
     credentials.applyToEnvironment();
     let gatewayError: string | null = null;
     try {
@@ -371,6 +418,7 @@ app.whenReady().then(() => {
   );
   traceStartup("credentials-created");
   credentials.applyToEnvironment();
+  const runtimeGatewayConfigPath = credentials.writeRuntimeConfig();
   traceStartup("credentials-applied");
   const updateUrl = process.env.RHZYCODE_UPDATE_URL?.trim()
     || "http://192.168.11.103:8791/desktop";
@@ -432,6 +480,7 @@ app.whenReady().then(() => {
     controlStore,
     mobileAccess,
     projectDirectories,
+    runtimeGatewayConfigPath,
   );
   traceStartup("runtime-created");
   registerIpc(runtime, credentials, updates, mobileAccess, desktopSettings, () => ({

@@ -44,6 +44,8 @@ const api: RhzycodeDesktopApi = {
   getCredentialStatus: () => ipcRenderer.invoke("credentials:status"),
   setProviderCredential: (providerId: string, apiKey: string) =>
     ipcRenderer.invoke("credentials:set", providerId, apiKey),
+  configureLlmProvider: (input) => ipcRenderer.invoke("providers:configure", input),
+  removeLlmProvider: (providerId: string) => ipcRenderer.invoke("providers:remove", providerId),
   getUpdateStatus: () => ipcRenderer.invoke("updates:status"),
   checkForUpdates: () => ipcRenderer.invoke("updates:check"),
   downloadUpdate: () => ipcRenderer.invoke("updates:download"),

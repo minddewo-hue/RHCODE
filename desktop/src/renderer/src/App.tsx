@@ -48,6 +48,7 @@ import type {
   ComposerAttachment,
   CredentialStatus,
   GatewayStatus,
+  LlmProviderConfigurationInput,
   ModelOption,
   MobileAccessStatus,
   PersistenceStatus,
@@ -68,10 +69,12 @@ import {
   formatFileChanges,
   formatFileSize,
   getErrorMessage,
+  groupModelsBySource,
   isActiveThreadStatus,
   isComposerRunning,
   modelReasoningEfforts,
   notificationThreadId,
+  providerDisplayName,
   providerCredentialPresentation,
   storedApprovalPolicy,
   storedLastProject,
@@ -182,6 +185,7 @@ export function App() {
   const projectPickerRef = useRef<HTMLButtonElement | null>(null);
   const threadActionsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const conversationRef = useRef<HTMLElement | null>(null);
+  const selectedModelRef = useRef(selectedModel);
   const selectedProjectPathRef = useRef(projectPath);
   const selectedThreadIdRef = useRef<string | null>(null);
   const navigationRevisionRef = useRef(0);
@@ -189,6 +193,10 @@ export function App() {
   const followConversationRef = useRef(true);
   const lastPrompt = useRef("");
   const composerDraftsRef = useRef(new Map<string, ComposerDraft>());
+
+  useEffect(() => {
+    selectedModelRef.current = selectedModel;
+  }, [selectedModel]);
 
   useEffect(() => {
     selectedProjectPathRef.current = projectPath;
@@ -300,6 +308,10 @@ export function App() {
   const activeModel = useMemo(
     () => models.find((model) => model.model === selectedModel),
     [models, selectedModel],
+  );
+  const modelGroups = useMemo(
+    () => groupModelsBySource(models, credentialStatus.providers),
+    [credentialStatus.providers, models],
   );
   const reasoningEfforts = useMemo(() => modelReasoningEfforts(activeModel), [activeModel]);
 
@@ -686,6 +698,7 @@ export function App() {
     }
 
     const submissionProject = projectPath;
+    const submissionModel = selectedModelRef.current;
     const submissionRevision = navigationRevisionRef.current;
     const existingThreadId = threadId;
     let submittedThreadId = existingThreadId;
@@ -715,7 +728,7 @@ export function App() {
       if (!activeThreadId) {
         const response = await window.rhzycode.startThread({
           cwd: submissionProject,
-          ...(selectedModel ? { model: selectedModel } : {}),
+          ...(submissionModel ? { model: submissionModel } : {}),
           approvalPolicy,
           sandboxMode,
         });
@@ -727,7 +740,7 @@ export function App() {
           hostId: "local-desktop",
           title: summarizePrompt(text),
           projectPath: submissionProject,
-          model: selectedModel || "default",
+          model: submissionModel || "default",
           status: "running",
           updatedAt: new Date().toISOString(),
         };
@@ -750,7 +763,7 @@ export function App() {
         ? {
             ...thread,
             title: thread.title === "New task" ? summarizePrompt(text) : thread.title,
-            model: selectedModel || thread.model,
+            model: submissionModel || thread.model,
             status: "running",
             updatedAt: new Date().toISOString(),
           }
@@ -758,7 +771,7 @@ export function App() {
       await window.rhzycode.startTurn({
         threadId: activeThreadId,
         text,
-        ...(selectedModel ? { model: selectedModel } : {}),
+        ...(submissionModel ? { model: submissionModel } : {}),
         approvalPolicy,
         sandboxMode,
         reasoningEffort,
@@ -801,11 +814,6 @@ export function App() {
   }
 
   async function saveProviderCredential(providerId: string, apiKey: string) {
-    if (!apiKey) {
-      const provider = credentialStatus.providers.find((entry) => entry.providerId === providerId);
-      const label = providerCredentialPresentation(provider?.providerId || providerId).label;
-      if (!window.confirm(`Clear the saved ${label}?`)) return;
-    }
     setSavingCredentialId(providerId);
     try {
       const result = await window.rhzycode.setProviderCredential(providerId, apiKey);
@@ -821,6 +829,45 @@ export function App() {
       upsertActivity(`credential-error-${Date.now()}`, "Credential update failed", getErrorMessage(error), "error");
     } finally {
       setSavingCredentialId(null);
+    }
+  }
+
+  async function configureLlmProvider(input: LlmProviderConfigurationInput) {
+    try {
+      if (typeof window.rhzycode.configureLlmProvider !== "function") {
+        throw new Error("The desktop bridge is out of date. Fully quit and reopen RHZYCODE, then save again.");
+      }
+      const result = await window.rhzycode.configureLlmProvider(input);
+      setCredentialStatus(result.credentials);
+      setGatewayStatus(result.gateway);
+      setCredentialDrafts((current) => ({ ...current, [input.providerId]: "" }));
+      if (result.gatewayError) {
+        upsertActivity(`provider-error-${Date.now()}`, "Provider saved; gateway unavailable", result.gatewayError, "error");
+      } else {
+        await connectAndLoad();
+      }
+    } catch (error) {
+      upsertActivity(`provider-error-${Date.now()}`, "Provider configuration failed", getErrorMessage(error), "error");
+      throw error;
+    }
+  }
+
+  async function removeLlmProvider(providerId: string) {
+    try {
+      if (typeof window.rhzycode.removeLlmProvider !== "function") {
+        throw new Error("The desktop bridge is out of date. Fully quit and reopen RHZYCODE, then try again.");
+      }
+      const result = await window.rhzycode.removeLlmProvider(providerId);
+      setCredentialStatus(result.credentials);
+      setGatewayStatus(result.gateway);
+      if (result.gatewayError) {
+        upsertActivity(`provider-error-${Date.now()}`, "Provider removed; gateway unavailable", result.gatewayError, "error");
+      } else {
+        await connectAndLoad();
+      }
+    } catch (error) {
+      upsertActivity(`provider-error-${Date.now()}`, "Provider removal failed", getErrorMessage(error), "error");
+      throw error;
     }
   }
 
@@ -899,7 +946,7 @@ export function App() {
     const method = notification.method || "unknown";
     const params = notification.params || {};
     const eventThreadId = notificationThreadId(params);
-    const isSelectedThread = !eventThreadId || eventThreadId === selectedThreadIdRef.current;
+    const isSelectedThread = eventThreadId !== null && eventThreadId === selectedThreadIdRef.current;
 
     if (method === "turn/started" && eventThreadId) {
       markThreadActive(eventThreadId, true);
@@ -1225,9 +1272,13 @@ export function App() {
           <div className="header-actions">
             <label className="model-select" title="Model for the next turn">
               <Bot size={15} />
-              <select value={selectedModel} onChange={(event) => { setSelectedModel(event.target.value); localStorage.setItem("rhzycode.selectedModel", event.target.value); }} disabled={!models.length} aria-label="Model for next turn">
+              <select value={selectedModel} onChange={(event) => { selectedModelRef.current = event.target.value; setSelectedModel(event.target.value); localStorage.setItem("rhzycode.selectedModel", event.target.value); }} disabled={!models.length} aria-label="Model for next turn">
                 {!models.length && <option value="">Loading models</option>}
-                {models.map((model) => <option key={model.id} value={model.model}>{model.displayName}</option>)}
+                {modelGroups.map((group) => (
+                  <optgroup key={group.key} label={group.source}>
+                    {group.models.map((model) => <option key={model.id} value={model.model}>{model.sourceModelName}</option>)}
+                  </optgroup>
+                ))}
               </select>
             </label>
             <button className={`icon-button ${rightPanelOpen ? "selected" : ""}`} title="Side panel" aria-label="Side panel" aria-pressed={rightPanelOpen} onClick={() => setRightPanelOpen((value) => !value)}>
@@ -1237,6 +1288,7 @@ export function App() {
         </header>
 
         <section
+          key={`${projectPath}\u0000${threadId || "new"}`}
           className="conversation"
           aria-live="polite"
           ref={conversationRef}
@@ -1399,6 +1451,8 @@ export function App() {
               savingProviderId={savingCredentialId}
               onChange={(providerId, value) => setCredentialDrafts((current) => ({ ...current, [providerId]: value }))}
               onSave={saveProviderCredential}
+              onConfigure={configureLlmProvider}
+              onRemove={removeLlmProvider}
               onUpdateAction={runUpdateAction}
               onRotateAccessKey={rotateMobileAccessKey}
               onSyncPortChange={updateSyncPort}
@@ -1676,6 +1730,8 @@ function SettingsView({
   savingProviderId,
   onChange,
   onSave,
+  onConfigure,
+  onRemove,
   onUpdateAction,
   onRotateAccessKey,
   onSyncPortChange,
@@ -1689,6 +1745,8 @@ function SettingsView({
   savingProviderId: string | null;
   onChange: (providerId: string, value: string) => void;
   onSave: (providerId: string, value: string) => Promise<void>;
+  onConfigure: (input: LlmProviderConfigurationInput) => Promise<void>;
+  onRemove: (providerId: string) => Promise<void>;
   onUpdateAction: (action: "check" | "download" | "install") => Promise<void>;
   onRotateAccessKey: () => Promise<void>;
   onSyncPortChange: (port: number) => Promise<SyncStatus>;
@@ -1697,6 +1755,9 @@ function SettingsView({
   const [portDraft, setPortDraft] = useState(String(syncStatus.port));
   const [savingPort, setSavingPort] = useState(false);
   const [portError, setPortError] = useState<string | null>(null);
+  const [providerEditor, setProviderEditor] = useState<LlmProviderConfigurationInput | null>(null);
+  const [providerEditorError, setProviderEditorError] = useState<string | null>(null);
+  const [savingProviderConfig, setSavingProviderConfig] = useState(false);
   const parsedPort = Number(portDraft);
   const portValid = /^\d{1,5}$/.test(portDraft) && Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65_535;
   const portChanged = portValid && parsedPort !== syncStatus.port;
@@ -1733,25 +1794,121 @@ function SettingsView({
     }
   }
 
+  function addProvider() {
+    let sequence = status.providers.length + 1;
+    let providerId = `provider-${sequence}`;
+    while (status.providers.some((provider) => provider.providerId === providerId)) {
+      providerId = `provider-${++sequence}`;
+    }
+    setProviderEditor({
+      providerId,
+      name: "",
+      baseUrl: "",
+      apiKey: "",
+      protocol: "auto",
+      models: [],
+    });
+    setProviderEditorError(null);
+  }
+
+  function editProvider(provider: CredentialStatus["providers"][number]) {
+    const presentation = providerCredentialPresentation(provider.providerId);
+    setProviderEditor({
+      providerId: provider.providerId,
+      name: provider.name || presentation.label.replace(/ API key$/i, ""),
+      baseUrl: provider.baseUrl || presentation.domain,
+      apiKey: "",
+      protocol: provider.protocol || "responses",
+      models: provider.models || [],
+    });
+    setProviderEditorError(null);
+  }
+
+  async function saveProviderConfiguration() {
+    if (!providerEditor) return;
+    if (!providerEditor.name.trim() || !providerEditor.baseUrl.trim()) {
+      setProviderEditorError("Name and URL are required.");
+      return;
+    }
+    if (!/^https?:\/\//i.test(providerEditor.baseUrl.trim())) {
+      setProviderEditorError("URL must start with http:// or https://.");
+      return;
+    }
+    setSavingProviderConfig(true);
+    setProviderEditorError(null);
+    try {
+      await onConfigure(providerEditor);
+      setProviderEditor(null);
+    } catch (error) {
+      setProviderEditorError(getErrorMessage(error));
+    } finally {
+      setSavingProviderConfig(false);
+    }
+  }
+
+  async function removeProvider(providerId: string) {
+    const provider = status.providers.find((entry) => entry.providerId === providerId);
+    const name = provider ? providerDisplayName(provider) : providerId;
+    if (!window.confirm(`Delete ${name} and its saved API key?`)) return;
+    setSavingProviderConfig(true);
+    setProviderEditorError(null);
+    try {
+      await onRemove(providerId);
+      setProviderEditor(null);
+    } catch (error) {
+      setProviderEditorError(getErrorMessage(error));
+    } finally {
+      setSavingProviderConfig(false);
+    }
+  }
+
   return (
     <div className="settings-view">
       <section className="settings-section">
         <div className="settings-heading"><KeyRound size={18} /><div><strong>Provider credentials</strong><small>Windows secure storage</small></div></div>
         {!status.encryptionAvailable && <p className="gateway-error">Secure credential storage is unavailable.</p>}
+        <div className="provider-config-toolbar">
+          <button disabled={!status.encryptionAvailable || savingProviderConfig} onClick={addProvider}><Plus size={13} /> Add provider</button>
+        </div>
+        {providerEditor && (
+          <div className="provider-editor">
+            <div className="provider-editor-title">
+              <strong>{status.providers.some((provider) => provider.providerId === providerEditor.providerId) ? "Edit provider" : "New provider"}</strong>
+              <button title="Close provider editor" aria-label="Close provider editor" onClick={() => setProviderEditor(null)}><X size={14} /></button>
+            </div>
+            <div className="provider-editor-fields">
+              <label><span>ID</span><input value={providerEditor.providerId} disabled={status.providers.some((provider) => provider.providerId === providerEditor.providerId)} onChange={(event) => setProviderEditor({ ...providerEditor, providerId: event.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "") })} /></label>
+              <label><span>Name</span><input value={providerEditor.name} onChange={(event) => setProviderEditor({ ...providerEditor, name: event.target.value })} /></label>
+              <label className="wide"><span>URL</span><input type="url" placeholder="https://api.example.com/v1" value={providerEditor.baseUrl} onChange={(event) => setProviderEditor({ ...providerEditor, baseUrl: event.target.value })} /></label>
+              <label className="wide"><span>KEY</span><input type="password" autoComplete="new-password" placeholder={status.providers.some((provider) => provider.providerId === providerEditor.providerId) ? "Leave blank to keep current KEY" : "API key"} value={providerEditor.apiKey} onChange={(event) => setProviderEditor({ ...providerEditor, apiKey: event.target.value })} /></label>
+              <label className="wide"><span>Protocol</span><select value={providerEditor.protocol} onChange={(event) => setProviderEditor({ ...providerEditor, protocol: event.target.value as LlmProviderConfigurationInput["protocol"] })}><option value="auto">Auto detect (recommended)</option><option value="responses">Codex / Responses</option><option value="chat_completions">OpenAI / Chat Completions</option><option value="anthropic_messages">Claude / Messages</option></select></label>
+              <label className="wide"><span>Models (optional)</span><textarea rows={3} placeholder="Auto-discover from /models" value={providerEditor.models.join("\n")} onChange={(event) => setProviderEditor({ ...providerEditor, models: event.target.value.split(/[\n,]/).map((value) => value.trim()).filter(Boolean) })} /></label>
+            </div>
+            {providerEditorError && <p className="gateway-error">{providerEditorError}</p>}
+            <div className="provider-editor-actions">
+              <span />
+              <button className="secondary" disabled={savingProviderConfig} onClick={() => setProviderEditor(null)}>Cancel</button>
+              <button disabled={savingProviderConfig || !providerEditor.providerId || !providerEditor.name.trim() || !providerEditor.baseUrl.trim()} onClick={() => void saveProviderConfiguration()}>{savingProviderConfig ? <RefreshCw className="spinning" size={13} /> : <Save size={13} />} {providerEditor.protocol === "auto" ? "Detect and save" : "Save"}</button>
+            </div>
+          </div>
+        )}
         <div className="credential-list">
           {status.providers.map((provider) => {
             const draft = drafts[provider.providerId] || "";
             const saving = savingProviderId === provider.providerId;
             const presentation = providerCredentialPresentation(provider.providerId);
+            const label = `${providerDisplayName(provider)} API key`;
+            const domain = provider.baseUrl || presentation.domain;
+            const protocol = provider.detectedProtocol || provider.protocol || "responses";
             return (
               <div className="credential-row" key={provider.providerId}>
                 <div className="credential-label">
                   <span className={`connection-dot ${provider.configured ? "running" : "error"}`} />
-                  <div><strong>{presentation.label}</strong><small>{presentation.domain} | KEY starts with {presentation.prefix} | {credentialSourceLabel(provider.source)}</small></div>
+                  <div><strong>{label}</strong><small>{domain} | {protocol} | KEY starts with {presentation.prefix} | {credentialSourceLabel(provider.source)}</small></div>
                 </div>
                 <input
                   type="password"
-                  aria-label={`${presentation.label} for ${presentation.domain}`}
+                  aria-label={`${label} for ${provider.custom ? domain : presentation.domain}`}
                   value={draft}
                   autoComplete="new-password"
                   spellCheck={false}
@@ -1761,7 +1918,8 @@ function SettingsView({
                   onKeyDown={(event) => { if (event.key === "Enter" && draft.trim()) void onSave(provider.providerId, draft); }}
                 />
                 <div className="credential-actions">
-                  {provider.source === "secure_store" && <button className="clear" disabled={saving} onClick={() => void onSave(provider.providerId, "")}><Trash2 size={13} /> Clear KEY</button>}
+                  <button className="clear" disabled={saving || savingProviderConfig} onClick={() => editProvider(provider)}><Pencil size={13} /> Edit</button>
+                  <button className="clear danger" disabled={saving || savingProviderConfig} onClick={() => void removeProvider(provider.providerId)}><Trash2 size={13} /> Delete</button>
                   <button disabled={!draft.trim() || saving || !status.encryptionAvailable} onClick={() => void onSave(provider.providerId, draft)}>{saving ? <RefreshCw size={13} /> : <Save size={13} />} Save KEY</button>
                 </div>
               </div>

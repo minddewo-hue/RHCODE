@@ -630,16 +630,40 @@ function TimelineRow({ item }: { item: TimelineItem }) {
 
 function PendingMessageRow({ message }: { message: PendingMessage }) {
   const [previewImage, setPreviewImage] = useState<{ name: string; uri: string } | null>(null);
+  const images = message.attachments?.filter(
+    (attachment): attachment is typeof attachment & { uri: string } => attachment.kind === "image" && Boolean(attachment.uri),
+  ) || [];
+  const files = message.attachments?.filter((attachment) => attachment.kind === "file") || [];
   return (
     <View style={styles.userRow}>
       <View style={[styles.userBubble, message.state === "failed" && styles.failedBubble]}>
         <Text selectable style={styles.userText}>{message.content}</Text>
-        {!!message.images?.length && (
+        {!!images.length && (
           <View style={styles.messageImages}>
-            {message.images.map((image) => (
-              <Pressable key={image.name} onPress={() => setPreviewImage(image)}>
+            {images.map((image, index) => (
+              <Pressable
+                accessibilityLabel={`查看大图 ${image.name}`}
+                accessibilityRole="button"
+                key={`${image.name}:${index}`}
+                onPress={() => setPreviewImage(image)}
+              >
                 <Image accessibilityLabel={image.name} resizeMode="cover" source={{ uri: image.uri }} style={styles.messageImage} />
               </Pressable>
+            ))}
+          </View>
+        )}
+        {!!files.length && (
+          <View style={styles.messageFiles}>
+            {files.map((file, index) => (
+              <View key={`${file.name}:${index}`} style={styles.messageFile}>
+                <View style={styles.messageFileIcon}>
+                  <Ionicons color={colors.inkMuted} name="document-outline" size={18} />
+                </View>
+                <View style={styles.messageFileText}>
+                  <Text numberOfLines={2} style={styles.messageFileName}>{file.name}</Text>
+                  <Text style={styles.messageFileSize}>{formatFileSize(file.size)}</Text>
+                </View>
+              </View>
             ))}
           </View>
         )}
@@ -656,6 +680,12 @@ function PendingMessageRow({ message }: { message: PendingMessage }) {
       </Modal>
     </View>
   );
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function ApprovalRow({
@@ -925,6 +955,12 @@ const styles = StyleSheet.create({
   userText: { color: colors.ink, fontSize: 15, lineHeight: 22, letterSpacing: 0 },
   messageImages: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 },
   messageImage: { width: 148, height: 108, borderRadius: 6, backgroundColor: colors.subtle },
+  messageFiles: { gap: 6, marginTop: 8 },
+  messageFile: { width: 240, maxWidth: "100%", minHeight: 48, flexDirection: "row", alignItems: "center", paddingHorizontal: 9, paddingVertical: 7, borderWidth: 1, borderColor: "#69bd43", borderRadius: 6, backgroundColor: "#ffffffaa" },
+  messageFileIcon: { width: 30, height: 30, alignItems: "center", justifyContent: "center", borderRadius: 5, backgroundColor: colors.subtle },
+  messageFileText: { flex: 1, minWidth: 0, marginLeft: 8 },
+  messageFileName: { color: colors.ink, fontSize: 12, lineHeight: 16, fontWeight: "600", letterSpacing: 0 },
+  messageFileSize: { color: colors.inkMuted, fontSize: 10, lineHeight: 14, marginTop: 1, letterSpacing: 0 },
   imagePreview: { flex: 1, alignItems: "center", justifyContent: "center", padding: 20, backgroundColor: "#101310ee" },
   previewImage: { width: "100%", height: "100%" },
   previewClose: { position: "absolute", top: 48, right: 20 },

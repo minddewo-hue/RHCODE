@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const SUPPORTED_PROTOCOLS = new Set(["responses", "chat_completions"]);
+const SUPPORTED_PROTOCOLS = new Set(["responses", "chat_completions", "anthropic_messages"]);
 
 export function loadDotEnv(filePath = ".env") {
   if (!fs.existsSync(filePath)) return;
@@ -102,8 +102,6 @@ function normalizeConfig(raw, meta) {
   }
   const disabledModels = normalizeDisabledModels(raw.disabled_models);
   for (const id of disabledModels.keys()) models.delete(id);
-  if (models.size === 0) throw new Error("Gateway config has no models.");
-
   const access = normalizeAccess(raw.access);
   if (access.length === 0 && process.env.PROXY_API_KEY) {
     access.push({ source: "PROXY_API_KEY", key: process.env.PROXY_API_KEY, models: ["*"] });
@@ -171,7 +169,7 @@ function normalizeProvider(id, value) {
   if (!SUPPORTED_PROTOCOLS.has(protocol)) {
     throw new Error(
       `Provider ${id} has unsupported protocol ${JSON.stringify(protocol)}. ` +
-        "Supported protocols: responses, chat_completions.",
+        "Supported protocols: responses, chat_completions, anthropic_messages.",
     );
   }
 
@@ -188,7 +186,11 @@ function normalizeProvider(id, value) {
   const apiKeyEnv = value.api_key_env || "";
   const apiKey = apiKeyEnv ? process.env[apiKeyEnv]?.trim() || "" : "";
 
-  const defaultPath = protocol === "responses" ? "/responses" : "/chat/completions";
+  const defaultPath = protocol === "responses"
+    ? "/responses"
+    : protocol === "anthropic_messages"
+      ? "/messages"
+      : "/chat/completions";
   return {
     id,
     baseUrl: stripTrailingSlash(value.base_url),
@@ -198,6 +200,7 @@ function normalizeProvider(id, value) {
     apiKey,
     credentialAvailable: !apiKeyEnv || Boolean(apiKey),
     forwardClientAuthorization: Boolean(value.forward_client_authorization),
+    anthropicVersion: String(value.anthropic_version || "2023-06-01"),
     customToolBridges: normalizeCustomToolBridges(value.custom_tool_bridges, id),
     emptyResponseRetries: parseNonNegativeInteger(
       value.empty_response_retries ?? 0,
@@ -244,7 +247,15 @@ function normalizeModelDiscovery(value, providerId) {
       throw new Error(`Provider ${providerId} model_discovery rule ${index} has an invalid pattern: ${error.message}`);
     }
   });
-  return { prefix, ownedBy: String(value.owned_by || providerId), rules };
+  if (value.detect_protocol != null && typeof value.detect_protocol !== "boolean") {
+    throw new Error(`Provider ${providerId} model_discovery.detect_protocol must be boolean.`);
+  }
+  return {
+    prefix,
+    ownedBy: String(value.owned_by || providerId),
+    rules,
+    detectProtocol: Boolean(value.detect_protocol),
+  };
 }
 
 function normalizeModel(id, value, providers) {
@@ -310,10 +321,26 @@ function normalizeRoute(modelId, value, providers) {
   if (typeof upstreamModel !== "string" || !upstreamModel.trim()) {
     throw new Error(`Model ${modelId} requires a non-empty upstream_model.`);
   }
+  const protocol = value.protocol || provider.protocol;
+  if (!SUPPORTED_PROTOCOLS.has(protocol)) {
+    throw new Error(
+      `Model ${modelId} has unsupported route protocol ${JSON.stringify(protocol)}. ` +
+        "Supported protocols: responses, chat_completions, anthropic_messages.",
+    );
+  }
+  const defaultPath = protocol === "responses"
+    ? "/responses"
+    : protocol === "anthropic_messages"
+      ? "/messages"
+      : "/chat/completions";
+  const routePath = value.path || (protocol === provider.protocol ? provider.path : defaultPath);
   return {
-    key: `${provider.id}\u0000${upstreamModel}`,
+    key: `${provider.id}\u0000${upstreamModel}\u0000${protocol}`,
     provider,
     upstreamModel,
+    protocol,
+    path: normalizeEndpointPath(routePath),
+    protocolExplicit: value.protocol != null,
   };
 }
 

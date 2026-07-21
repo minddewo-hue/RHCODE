@@ -399,7 +399,7 @@ function AppContent() {
 
   useEffect(() => {
     if (!pendingMessages.length) return;
-    setPendingMessages((current) => current.filter((message) => message.images?.length || !control.snapshot.timeline.some((item) => (
+    setPendingMessages((current) => current.filter((message) => message.attachments?.length || !control.snapshot.timeline.some((item) => (
       item.threadId === message.threadId
       && item.kind === "user"
       && item.content.trim() === message.content.trim()
@@ -557,12 +557,14 @@ function AppContent() {
         content: submittedText,
         createdAt: new Date().toISOString(),
         state: "sending",
-        images: submittedAttachments
-          .filter((attachment) => attachment.kind === "image")
-          .map((attachment) => ({
-            name: attachment.name,
-            uri: `data:${imageMimeType(attachment.name)};base64,${attachment.dataBase64}`,
-          })),
+        attachments: submittedAttachments.map((attachment) => ({
+          name: attachment.name,
+          kind: attachment.kind,
+          size: attachment.size,
+          ...(attachment.kind === "image"
+            ? { uri: `data:${imageMimeType(attachment.name)};base64,${attachment.dataBase64}` }
+            : {}),
+        })),
       };
       pendingAdded = true;
       setPendingMessages((current) => [...current, pending]);

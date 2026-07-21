@@ -4,6 +4,37 @@
       "base_url": "https://model.rhzy.ai/v1",
       "protocol": "responses",
       "api_key_env": "SUB2API_API_KEY"
+    },
+    "openai_legacy": {
+      "base_url": "https://openai-compatible.example/v1",
+      "protocol": "chat_completions",
+      "api_key_env": "OPENAI_LEGACY_API_KEY"
+    },
+    "claude": {
+      "base_url": "https://api.anthropic.com/v1",
+      "protocol": "anthropic_messages",
+      "anthropic_version": "2023-06-01",
+      "api_key_env": "ANTHROPIC_API_KEY"
+    },
+    "openai_legacy/coder": {
+      "provider": "openai_legacy",
+      "upstream_model": "coder-model",
+      "capabilities": {
+        "function_tools": true,
+        "parallel_tool_calls": true,
+        "image_input": true,
+        "streaming": true
+      }
+    },
+    "claude/sonnet": {
+      "provider": "claude",
+      "upstream_model": "claude-sonnet-model",
+      "capabilities": {
+        "function_tools": true,
+        "parallel_tool_calls": true,
+        "image_input": true,
+        "streaming": true
+      }
     }
   },
   "models": {
@@ -22,7 +53,7 @@
   "access": [
     {
       "api_key_env": "RHZY_GATEWAY_API_KEY",
-      "models": ["sub2api/*"]
+      "models": ["sub2api/*", "openai_legacy/*", "claude/*"]
     }
   ],
   "upstream_timeout_ms": 600000,

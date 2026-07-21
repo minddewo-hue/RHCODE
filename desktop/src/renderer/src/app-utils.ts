@@ -8,6 +8,17 @@ export interface ActivityEntry {
   state: "running" | "done" | "error";
 }
 
+export interface ModelGroup {
+  key: string;
+  source: string;
+  models: Array<ModelOption & { sourceModelName: string }>;
+}
+
+const modelNameCollator = new Intl.Collator(["zh-CN", "en"], {
+  numeric: true,
+  sensitivity: "base",
+});
+
 export function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).at(-1) || path;
 }
@@ -21,6 +32,15 @@ export function credentialSourceLabel(source: CredentialStatus["providers"][numb
 export function providerCredentialPresentation(providerId: string): { label: string; domain: string; prefix: string } {
   if (providerId === "sub2api") return { label: "model.rhzy.ai API key", domain: "model.rhzy.ai", prefix: "sk-" };
   return { label: `${providerId} API key`, domain: providerId, prefix: "provider" };
+}
+
+export function providerDisplayName(provider: CredentialStatus["providers"][number]): string {
+  const configuredName = provider.name.trim();
+  if (configuredName && configuredName.toLocaleLowerCase() !== provider.providerId.toLocaleLowerCase()) {
+    return configuredName;
+  }
+  if (provider.providerId === "sub2api") return "Sub2API";
+  return configuredName || provider.providerId;
 }
 
 export function updateStateLabel(status: UpdateStatus): string {
@@ -103,6 +123,80 @@ export function modelReasoningEfforts(model: ModelOption | undefined): Reasoning
   return reasoningEffortValues.includes(model?.defaultReasoningEffort as ReasoningEffort)
     ? [model?.defaultReasoningEffort as ReasoningEffort]
     : ["high"];
+}
+
+export function groupModelsBySource(
+  models: ModelOption[],
+  providers: CredentialStatus["providers"] = [],
+): ModelGroup[] {
+  const providersById = new Map(providers.map((provider, index) => [
+    provider.providerId,
+    { provider, index },
+  ]));
+  const groups = new Map<string, ModelGroup & { providerOrder: number }>();
+  for (const model of models) {
+    const presentation = modelSourcePresentation(model, providersById);
+    const group = groups.get(presentation.key) || {
+      key: presentation.key,
+      source: presentation.source,
+      models: [],
+      providerOrder: presentation.providerOrder,
+    };
+    group.models.push({ ...model, sourceModelName: presentation.modelName });
+    groups.set(presentation.key, group);
+  }
+  return [...groups.values()]
+    .sort((left, right) =>
+      left.providerOrder - right.providerOrder
+      || modelNameCollator.compare(left.source, right.source))
+    .map(({ providerOrder: _providerOrder, ...group }) => ({
+      ...group,
+      models: group.models.sort((left, right) =>
+        modelNameCollator.compare(left.sourceModelName, right.sourceModelName)
+        || modelNameCollator.compare(left.model, right.model)),
+    }));
+}
+
+function modelSourcePresentation(
+  model: ModelOption,
+  providersById: Map<string, { provider: CredentialStatus["providers"][number]; index: number }>,
+): { key: string; source: string; modelName: string; providerOrder: number } {
+  const slashIndex = model.model.indexOf("/");
+  const providerId = slashIndex > 0 ? model.model.slice(0, slashIndex) : "";
+  const configuredProvider = providersById.get(providerId);
+  if (configuredProvider) {
+    return {
+      key: `provider:${providerId}`,
+      source: providerDisplayName(configuredProvider.provider),
+      modelName: model.model.slice(slashIndex + 1),
+      providerOrder: configuredProvider.index,
+    };
+  }
+  const separatorIndex = model.displayName.indexOf(" - ");
+  if (separatorIndex > 0) {
+    const source = model.displayName.slice(0, separatorIndex).trim();
+    return {
+      key: `display:${source}`,
+      source,
+      modelName: model.displayName.slice(separatorIndex + 3).trim() || model.model,
+      providerOrder: Number.MAX_SAFE_INTEGER,
+    };
+  }
+  if (slashIndex > 0) {
+    const source = model.model.slice(0, slashIndex);
+    return {
+      key: `model:${source}`,
+      source,
+      modelName: model.displayName || model.model.slice(slashIndex + 1),
+      providerOrder: Number.MAX_SAFE_INTEGER,
+    };
+  }
+  return {
+    key: "other",
+    source: "Other",
+    modelName: model.displayName || model.model,
+    providerOrder: Number.MAX_SAFE_INTEGER,
+  };
 }
 
 export function storedReasoningEffort(): ReasoningEffort {

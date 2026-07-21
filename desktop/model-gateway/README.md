@@ -5,7 +5,8 @@ This Node.js gateway gives Codex one Responses API endpoint while routing namesp
 ```text
 Codex -> POST /v1/responses -> model registry
                                |- native Responses (transparent forwarding)
-                               `- Chat Completions (protocol conversion)
+                               |- Chat Completions (protocol conversion)
+                               `- Anthropic Messages (protocol conversion)
 ```
 
 Requirements: Node.js 20 or newer. The gateway binds to `127.0.0.1:8787` by default.
@@ -23,9 +24,9 @@ Edit `gateway.config.json` so every public model maps to a real provider and ups
 
 The bundled example defines:
 
-- `faker/kimi-for-coding` through Chat Completions conversion
 - `sub2api/gpt-codex` through native Responses
-- `local/gemma` through Chat Completions conversion
+- `openai_legacy/coder` through Chat Completions conversion
+- `claude/sonnet` through Anthropic Messages conversion
 
 Capability values in the example are illustrative. Confirm them against each deployed model before use. A capability explicitly set to `false` is enforced with a clear 400 error.
 
@@ -110,6 +111,6 @@ Set `model_catalog_json` in the user-level Codex `config.toml` to the generated 
 
 ## Current protocol scope
 
-Native Responses requests, errors, and SSE bytes are forwarded without conversion except for the upstream model ID. Chat Completions supports text, function tools, tool results, parallel-tool flags, non-streaming output, and SSE conversion. The current Faker deployment must use Chat Completions because its Responses route forwards the gateway key as an upstream key. Anthropic Messages conversion is intentionally not enabled yet; a provider using an unsupported protocol fails configuration validation at startup.
+Native Responses requests, errors, and SSE bytes are forwarded without conversion except for the upstream model ID. Chat Completions and Anthropic Messages both support text, function tools, tool results, parallel-tool flags, non-streaming output, and SSE conversion. Anthropic providers use `/messages`, `x-api-key`, and the configured `anthropic-version`; OpenAI-compatible providers use bearer authentication. When the desktop provider editor uses Auto detect, every discovered model receives its own protocol candidates. The gateway selects them independently on first use and only retries another protocol when the upstream explicitly reports an unsupported route. Explicit protocol selection still applies one protocol to the whole Provider.
 
-For Chat Completions routes, Codex namespace tools (MCP and multi-agent groups) and hosted web search are not sent upstream because Chat cannot represent them. Core function-based shell and file tools remain available. Native Responses routes keep the complete tool payload.
+For converted Chat Completions and Anthropic Messages routes, Codex namespace tools (MCP and multi-agent groups) and hosted web search are not sent upstream because those APIs cannot represent the complete Responses payload. Core function-based shell and file tools remain available. Native Responses routes keep the complete tool payload.

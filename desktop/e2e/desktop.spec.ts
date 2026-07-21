@@ -21,12 +21,15 @@ const packagedExecutable = process.env.RHZYCODE_E2E_EXECUTABLE?.trim();
 let electronApp: ElectronApplication;
 let page: Page;
 let dataDir: string;
+let emptyProjectDir: string;
 const rendererErrors: string[] = [];
 
 test.describe.configure({ mode: "serial" });
 
 test.beforeAll(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-playwright-"));
+  emptyProjectDir = path.join(dataDir, "empty-project");
+  fs.mkdirSync(emptyProjectDir);
   const environment = Object.fromEntries(
     Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
   );
@@ -402,27 +405,14 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(page.getByText("Mobile connection", { exact: true })).toBeVisible();
   await expect(page.getByText("Local state protection", { exact: true })).toHaveCount(0);
   await assertVisibleControlsHaveNames(page);
-  const sub2apiCredential = page.locator(".credential-row").filter({ hasText: "model.rhzy.ai API key" });
+  const sub2apiCredential = page.locator(".credential-row").filter({ hasText: "Sub2API API key" });
   await expect(page.locator(".credential-row")).toHaveCount(1);
   await expect(sub2apiCredential).toContainText("model.rhzy.ai");
   await expect(sub2apiCredential).toContainText("KEY starts with sk-");
-  await expect(page.getByLabel("model.rhzy.ai API key for model.rhzy.ai")).toHaveAttribute("placeholder", "Configured | paste new sk- KEY");
-  const clearCredential = sub2apiCredential.getByRole("button", { name: "Clear KEY", exact: true });
-  const credentialCallsBefore = (await ipcCalls(electronApp, "credentials:set")).length;
-  await Promise.all([
-    page.waitForEvent("dialog").then((dialog) => dialog.dismiss()),
-    clearCredential.click(),
-  ]);
-  expect((await ipcCalls(electronApp, "credentials:set")).length).toBe(credentialCallsBefore);
-  await Promise.all([
-    page.waitForEvent("dialog").then((dialog) => dialog.accept()),
-    clearCredential.click(),
-  ]);
-  await expect(clearCredential).toBeHidden();
-  const credentialInput = page.getByLabel("model.rhzy.ai API key for model.rhzy.ai");
+  await expect(page.getByLabel("Sub2API API key for model.rhzy.ai")).toHaveAttribute("placeholder", "Configured | paste new sk- KEY");
+  const credentialInput = page.getByLabel("Sub2API API key for model.rhzy.ai");
   await credentialInput.fill("ui-test-key");
   await sub2apiCredential.getByRole("button", { name: "Save KEY", exact: true }).click();
-  await expect(clearCredential).toBeVisible();
   await expect.poll(() => ipcCalls(electronApp, "credentials:set").then((calls) => calls.at(-1)?.args)).toEqual([
     "sub2api",
     "ui-test-key",
@@ -432,6 +422,42 @@ test("supports core desktop workflows at the minimum window size", async () => {
     animations: "disabled",
     caret: "hide",
   });
+
+  const deleteCredential = sub2apiCredential.getByRole("button", { name: "Delete", exact: true });
+  const removeCallsBefore = (await ipcCalls(electronApp, "providers:remove")).length;
+  await Promise.all([
+    page.waitForEvent("dialog").then((dialog) => dialog.dismiss()),
+    deleteCredential.click(),
+  ]);
+  expect((await ipcCalls(electronApp, "providers:remove")).length).toBe(removeCallsBefore);
+  await Promise.all([
+    page.waitForEvent("dialog").then((dialog) => dialog.accept()),
+    deleteCredential.click(),
+  ]);
+  await expect(sub2apiCredential).toHaveCount(0);
+  await expect.poll(() => ipcCalls(electronApp, "providers:remove").then((calls) => calls.at(-1)?.args)).toEqual(["sub2api"]);
+
+  await page.getByRole("button", { name: "Add provider" }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Claude relay");
+  await page.getByLabel("URL", { exact: true }).fill("https://claude.example/v1/messages");
+  await page.getByLabel("KEY", { exact: true }).fill("claude-ui-key");
+  await page.locator(".provider-editor select").selectOption("anthropic_messages");
+  await page.getByLabel("Models (optional)", { exact: true }).fill("claude-sonnet-test");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const claudeProvider = page.locator(".credential-row").filter({ hasText: "Claude relay API key" });
+  await expect(claudeProvider).toContainText("anthropic_messages");
+  await expect.poll(() => ipcCalls(electronApp, "providers:configure").then((calls) => calls.at(-1)?.args[0])).toMatchObject({
+    providerId: "provider-1",
+    baseUrl: "https://claude.example/v1/messages",
+    protocol: "anthropic_messages",
+    models: ["claude-sonnet-test"],
+  });
+  await Promise.all([
+    page.waitForEvent("dialog").then((dialog) => dialog.accept()),
+    claudeProvider.getByRole("button", { name: "Delete", exact: true }).click(),
+  ]);
+  await expect(claudeProvider).toHaveCount(0);
+  await expect.poll(() => ipcCalls(electronApp, "providers:remove").then((calls) => calls.at(-1)?.args)).toEqual(["provider-1"]);
 
   await expect(page.getByText("192.168.1.25", { exact: true })).toBeVisible();
   const mobilePort = page.getByRole("textbox", { name: "Mobile connection port", exact: true });
@@ -532,6 +558,13 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect.poll(() => ipcCalls(electronApp, "agent:turn:start").then((calls) => calls.map((call) => (
     call.args[0] as { model?: string }
   ).model))).toEqual(["ui/model", "ui/second", "ui/second", "ui/second"]);
+  await modelSelect.selectOption("ui/model");
+  await taskPrompt.fill("Switch back to the first model");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect.poll(() => ipcCalls(electronApp, "agent:turn:start").then((calls) => (
+    calls.at(-1)?.args[0] as { model?: string } | undefined
+  )?.model)).toBe("ui/model");
+  await page.locator(".send-button.stop").click();
   await page.getByRole("button", { name: "New task" }).click();
   await expect(taskPrompt).toHaveValue("");
   await expect(page.locator(".attachment-list")).toHaveCount(0);
@@ -547,6 +580,31 @@ test("supports core desktop workflows at the minimum window size", async () => {
     maskColor: "#d8dcd6",
     mask: [page.locator(".project-picker small")],
   });
+
+  await getThreadRow(page, "Run deterministic verification").click();
+  const previousProjectMessage = page.getByText(
+    "I will inspect the project structure, trace the main workflows, and report concrete findings.",
+    { exact: true },
+  );
+  await expect(previousProjectMessage).toBeVisible();
+  await electronApp.evaluate(({ dialog }, selectedDirectory) => {
+    dialog.showOpenDialog = (async () => ({
+      canceled: false,
+      filePaths: [selectedDirectory],
+    })) as typeof dialog.showOpenDialog;
+  }, emptyProjectDir);
+  await page.getByRole("button", { name: "Open folder" }).click();
+  await expect(page.locator(".project-picker")).toContainText("empty-project");
+  await expect(page.getByText("No tasks in this project", { exact: true })).toBeVisible();
+  await expect(page.getByText("Start a new task", { exact: true })).toBeVisible();
+  await expect(page.locator(".message-list")).toHaveCount(0);
+  await expect(previousProjectMessage).toHaveCount(0);
+
+  await sendAgentMessage(electronApp, {
+    method: "item/agentMessage/delta",
+    params: { itemId: "late-previous-project-message", delta: "This stale message must stay hidden." },
+  });
+  await expect(page.getByText("This stale message must stay hidden.", { exact: true })).toHaveCount(0);
 
   expect(rendererErrors).toEqual([]);
 });
@@ -737,7 +795,17 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
     let credentialStatus = {
       encryptionAvailable: true,
       providers: [
-        { providerId: "sub2api", configured: true, source: "secure_store" },
+        {
+          providerId: "sub2api",
+          name: "sub2api",
+          baseUrl: "https://model.rhzy.ai/v1",
+          protocol: "responses",
+          detectedProtocol: "responses",
+          models: ["gpt-5.5"],
+          custom: false,
+          configured: true,
+          source: "secure_store",
+        },
       ],
     };
     let mobileAccessStatus = {
@@ -907,12 +975,42 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
       credentialStatus = {
         encryptionAvailable: true,
         providers: credentialStatus.providers.map((provider) => provider.providerId === providerId
-          ? {
-              providerId,
+            ? {
+              ...provider,
               configured: Boolean(apiKey),
               source: apiKey ? "secure_store" : "missing",
             }
           : provider),
+      };
+      return { credentials: credentialStatus, gateway: gatewayStatus(), gatewayError: null };
+    });
+    replace("providers:configure", (_event, input) => {
+      record("providers:configure", input);
+      const provider = {
+        providerId: input.providerId,
+        name: input.name,
+        baseUrl: input.baseUrl,
+        protocol: input.protocol,
+        detectedProtocol: input.protocol === "auto" ? "responses" : input.protocol,
+        models: input.models,
+        custom: !credentialStatus.providers.some((entry) => entry.providerId === input.providerId && !entry.custom),
+        configured: true,
+        source: "secure_store",
+      };
+      credentialStatus = {
+        ...credentialStatus,
+        providers: [
+          ...credentialStatus.providers.filter((entry) => entry.providerId !== input.providerId),
+          provider,
+        ],
+      };
+      return { credentials: credentialStatus, gateway: gatewayStatus(), gatewayError: null };
+    });
+    replace("providers:remove", (_event, providerId) => {
+      record("providers:remove", providerId);
+      credentialStatus = {
+        ...credentialStatus,
+        providers: credentialStatus.providers.filter((provider) => provider.providerId !== providerId),
       };
       return { credentials: credentialStatus, gateway: gatewayStatus(), gatewayError: null };
     });

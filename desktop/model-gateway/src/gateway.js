@@ -6,6 +6,12 @@ import {
   responsesToChatRequest,
   streamChatAsResponses,
 } from "./chat-adapter.js";
+import {
+  anthropicToResponse,
+  responsesToAnthropicRequest,
+  streamAnthropicAsResponses,
+} from "./anthropic-adapter.js";
+import { applyGemma31bChatRequestPolicy } from "./gemma-31b-policy.js";
 
 export function createGatewayServer(config) {
   const state = {
@@ -141,7 +147,7 @@ async function handleResponses({
     return;
   }
 
-  if (selected.route.provider.protocol === "responses") {
+  if (selected.route.protocol === "responses") {
     if (body.stream) {
       await pipeNativeResponsesStream({
         selected,
@@ -175,7 +181,10 @@ async function handleResponses({
   rememberResponse(responseId, selected.route, model, state, config, selected.gammaState);
   if (body.stream) {
     try {
-      await streamChatAsResponses({
+      const streamAdapter = selected.route.protocol === "anthropic_messages"
+        ? streamAnthropicAsResponses
+        : streamChatAsResponses;
+      await streamAdapter({
         reader: selected.reader,
         firstChunk: selected.firstChunk,
         clientRes: res,
@@ -208,8 +217,15 @@ async function handleResponses({
   }
 
   try {
-    const chatResponse = parseJson(selected.body.toString("utf8"), "upstream chat response");
-    const response = chatToResponse(selected.responseRequest || body, chatResponse, responseId, model.id);
+    const upstreamResponse = parseJson(
+      selected.body.toString("utf8"),
+      selected.route.protocol === "anthropic_messages"
+        ? "upstream Anthropic response"
+        : "upstream chat response",
+    );
+    const response = selected.route.protocol === "anthropic_messages"
+      ? anthropicToResponse(selected.responseRequest || body, upstreamResponse, responseId, model.id)
+      : chatToResponse(selected.responseRequest || body, upstreamResponse, responseId, model.id);
     writeJson(res, 200, response);
     logRequest(config, {
       requestId,
@@ -224,7 +240,11 @@ async function handleResponses({
     recordFailure(selected.route, state, config, 502);
     throw new HttpError(
       502,
-      `Provider ${selected.route.provider.id} returned an invalid Chat Completions response.`,
+      `Provider ${selected.route.provider.id} returned an invalid ${
+        selected.route.protocol === "anthropic_messages"
+          ? "Anthropic Messages"
+          : "Chat Completions"
+      } response.`,
       "invalid_upstream_response",
       { cause: error },
     );
@@ -256,22 +276,34 @@ async function selectUpstream({ routes, model, body, req, res, requestId, config
   for (let index = 0; index < candidates.length; index += 1) {
     const route = candidates[index];
     const provider = route.provider;
-    const responseRequest = provider.protocol === "chat_completions"
+    const responseRequest = route.protocol !== "responses"
       ? withBridgedCustomTools(body, provider.customToolBridges)
       : body;
     let requestBody =
-      provider.protocol === "responses"
+      route.protocol === "responses"
         ? { ...body, model: route.upstreamModel }
-        : responsesToChatRequest(responseRequest, route.upstreamModel, (chat) =>
-            log(config, "debug", {
-              event: "chat_request",
-              request_id: requestId,
-              provider: provider.id,
-              public_model: model.id,
-              request: chat,
-            }),
-          );
-    if (provider.protocol === "chat_completions" && model.bufferChatStream) {
+        : route.protocol === "anthropic_messages"
+          ? responsesToAnthropicRequest(responseRequest, route.upstreamModel, (anthropic) =>
+              log(config, "debug", {
+                event: "anthropic_request",
+                request_id: requestId,
+                provider: provider.id,
+                public_model: model.id,
+                request: anthropic,
+              }),
+            )
+          : responsesToChatRequest(responseRequest, route.upstreamModel);
+    if (route.protocol === "chat_completions") {
+      requestBody = applyGemma31bChatRequestPolicy(requestBody, route.upstreamModel);
+      log(config, "debug", {
+        event: "chat_request",
+        request_id: requestId,
+        provider: provider.id,
+        public_model: model.id,
+        request: requestBody,
+      });
+    }
+    if (route.protocol === "chat_completions" && model.bufferChatStream) {
       updateGammaFailureState(requestBody.messages, gammaState);
       requestBody = withGammaToolResultFeedback(requestBody, gammaState);
     }
@@ -285,6 +317,7 @@ async function selectUpstream({ routes, model, body, req, res, requestId, config
         if (!upstream.response.ok) {
           const errorBody = await readResponseBuffer(upstream.response);
           const status = upstream.response.status;
+          const protocolMismatch = isProtocolRouteMismatch(status, errorBody);
           upstream.cleanup();
           upstream = null;
           if (isRetryableStatus(status) && preOutputAttempt < model.preOutputRetries) {
@@ -292,9 +325,12 @@ async function selectUpstream({ routes, model, body, req, res, requestId, config
             logPreOutputRetry(config, requestId, model, route, status, preOutputAttempt);
             continue;
           }
-          if (isRetryableStatus(status) && index < candidates.length - 1) {
-            recordFailure(route, state, config, status);
-            logFailover(config, requestId, model, route, status);
+          if ((isRetryableStatus(status) || protocolMismatch) && index < candidates.length - 1) {
+            if (protocolMismatch) logProtocolFallback(config, requestId, model, route, status);
+            else {
+              recordFailure(route, state, config, status);
+              logFailover(config, requestId, model, route, status);
+            }
             lastFailure = { status, message: `Provider ${provider.id} returned HTTP ${status}.` };
             continue routeLoop;
           }
@@ -312,7 +348,7 @@ async function selectUpstream({ routes, model, body, req, res, requestId, config
             throw new Error("Upstream stream ended before its first byte.");
           }
           let firstChunk = first.value;
-          if (provider.protocol === "chat_completions" && model.bufferChatStream) {
+          if (route.protocol === "chat_completions" && model.bufferChatStream) {
             const buffered = await bufferAndValidateChatStream(
               reader,
               firstChunk,
@@ -323,7 +359,7 @@ async function selectUpstream({ routes, model, body, req, res, requestId, config
               throw new Error(`Provider ${provider.id} returned an invalid buffered stream: ${buffered.reason}`);
             }
             firstChunk = buffered.firstChunk;
-          } else if (provider.protocol === "chat_completions" && provider.emptyResponseRetries > 0) {
+          } else if (route.protocol === "chat_completions" && provider.emptyResponseRetries > 0) {
             const probe = await probeChatStream(reader, firstChunk);
             if (!probe.meaningful) {
               await reader.cancel().catch(() => {});
@@ -356,7 +392,7 @@ async function selectUpstream({ routes, model, body, req, res, requestId, config
         upstream?.cleanup();
         upstream = null;
         if (
-          provider.protocol === "chat_completions" &&
+          route.protocol === "chat_completions" &&
           model.bufferChatStream &&
           body.stream &&
           isRepeatedGammaCommandError(error)
@@ -368,7 +404,7 @@ async function selectUpstream({ routes, model, body, req, res, requestId, config
         const status = timedOut ? 504 : 502;
         if (preOutputAttempt < model.preOutputRetries) {
           preOutputAttempt += 1;
-          if (!timedOut && provider.protocol === "chat_completions") {
+          if (!timedOut && route.protocol === "chat_completions") {
             requestBody = withPreOutputRetryFeedback(requestBody, error);
           }
           logPreOutputRetry(config, requestId, model, route, status, preOutputAttempt, error);
@@ -676,9 +712,8 @@ function routeCanRepresentRequest(route, body) {
 }
 
 function unsupportedRouteFeatures(route, body) {
-  if (route.provider.protocol === "responses") return [];
+  if (route.protocol === "responses") return [];
   const unsupported = [];
-  if (body.reasoning != null) unsupported.push("reasoning");
   const droppableChatToolTypes = new Set(["namespace", "web_search"]);
   const toolTypes = [
     ...new Set((body.tools || []).map((tool) => tool?.type || "unknown")),
@@ -707,6 +742,10 @@ async function fetchRoute({ route, requestBody, req, res, requestId, config }) {
   else if (provider.forwardClientAuthorization && req.headers.authorization) {
     headers.Authorization = req.headers.authorization;
   }
+  if (route.protocol === "anthropic_messages") {
+    headers["anthropic-version"] = provider.anthropicVersion;
+    if (provider.apiKey) headers["x-api-key"] = provider.apiKey;
+  }
 
   const cleanup = () => {
     clearTimeout(timeout);
@@ -715,7 +754,7 @@ async function fetchRoute({ route, requestBody, req, res, requestId, config }) {
   };
 
   try {
-    const response = await fetch(`${provider.baseUrl}${provider.path}`, {
+    const response = await fetch(`${provider.baseUrl}${route.path}`, {
       method: "POST",
       headers,
       body: JSON.stringify(requestBody),
@@ -1050,6 +1089,24 @@ function isRetryableStatus(status) {
   return status === 408 || status === 429 || status >= 500;
 }
 
+function isProtocolRouteMismatch(status, body) {
+  if (![400, 404, 405, 422].includes(status)) return false;
+  const message = body.toString("utf8", 0, Math.min(body.length, 4096));
+  return /request_not_supported_by_route|unsupported[^\n]{0,80}route|route[^\n]{0,80}not[^\n]{0,40}support/i.test(message);
+}
+
+function logProtocolFallback(config, requestId, model, route, status) {
+  log(config, "info", {
+    event: "model_protocol_fallback",
+    request_id: requestId,
+    provider: route.provider.id,
+    public_model: model.id,
+    upstream_model: route.upstreamModel,
+    protocol: route.protocol,
+    status,
+  });
+}
+
 function logFailover(config, requestId, model, route, status) {
   log(config, "warn", {
     event: "route_failover",
@@ -1081,7 +1138,7 @@ function logRequest(config, { requestId, model, route, status, startedAt, stream
     provider: route.provider.id,
     public_model: model.id,
     upstream_model: route.upstreamModel,
-    protocol: route.provider.protocol,
+    protocol: route.protocol,
     streamed,
     status,
     latency_ms: Date.now() - startedAt,

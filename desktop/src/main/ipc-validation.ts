@@ -3,6 +3,7 @@ import type { UserInputAnswers } from "@rhzycode/protocol";
 import type {
   ApprovalPolicy,
   ComposerAttachment,
+  LlmProviderConfigurationInput,
   ReasoningEffort,
   SandboxMode,
   StartThreadParams,
@@ -24,6 +25,9 @@ const REASONING_EFFORTS = new Set<ReasoningEffort>([
 ]);
 const ATTACHMENT_KINDS = new Set<ComposerAttachment["kind"]>(["file", "image"]);
 const RESERVED_ANSWER_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const LLM_PROTOCOLS = new Set<LlmProviderConfigurationInput["protocol"]>([
+  "auto", "responses", "chat_completions", "anthropic_messages",
+]);
 
 export function validateThreadListOptions(value: unknown): ThreadListOptions {
   if (value === undefined) return {};
@@ -122,6 +126,36 @@ export function validateCredentialUpdate(providerId: unknown, apiKey: unknown): 
   return {
     providerId: validateIdentifier(providerId, "providerId"),
     apiKey: requireString(apiKey, "apiKey", 20_000, true),
+  };
+}
+
+export function validateLlmProviderConfiguration(value: unknown): LlmProviderConfigurationInput {
+  const input = requireObject(value, "provider configuration");
+  assertOnlyKeys(
+    input,
+    ["providerId", "name", "baseUrl", "apiKey", "protocol", "models"],
+    "provider configuration",
+  );
+  const providerId = requireNonEmptyString(input.providerId, "providerId", 80).trim();
+  if (!/^[a-z0-9][a-z0-9_-]*$/.test(providerId)) {
+    invalid("providerId", "must contain only lowercase letters, numbers, hyphens, or underscores");
+  }
+  if (typeof input.protocol !== "string" || !LLM_PROTOCOLS.has(input.protocol as LlmProviderConfigurationInput["protocol"])) {
+    invalid("protocol", "is unsupported");
+  }
+  if (!Array.isArray(input.models) || input.models.length > 200) {
+    invalid("models", "must be an array with at most 200 entries");
+  }
+  const models = [...new Set(input.models.map((model, index) =>
+    requireNonEmptyString(model, `models[${index}]`, 500).trim()))];
+  const baseUrl = requireHttpUrl(input.baseUrl, "baseUrl");
+  return {
+    providerId,
+    name: requireNonEmptyString(input.name, "name", 120).trim(),
+    baseUrl,
+    apiKey: requireString(input.apiKey, "apiKey", 20_000, true),
+    protocol: input.protocol as LlmProviderConfigurationInput["protocol"],
+    models,
   };
 }
 
@@ -265,6 +299,20 @@ function requireAbsolutePath(value: unknown, field: string): string {
   if (result.includes("\0")) invalid(field, "contains an invalid character");
   if (!path.isAbsolute(result)) invalid(field, "must be an absolute path");
   return path.normalize(result);
+}
+
+function requireHttpUrl(value: unknown, field: string): string {
+  const result = requireNonEmptyString(value, field, 2_000).trim();
+  let url: URL;
+  try {
+    url = new URL(result);
+  } catch {
+    invalid(field, "must be a valid URL starting with http:// or https://");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    invalid(field, "must start with http:// or https://");
+  }
+  return result;
 }
 
 function requireBoolean(value: unknown, field: string): boolean {

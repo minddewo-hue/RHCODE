@@ -33,6 +33,7 @@ export class GatewayModule extends EventEmitter {
   constructor(
     private readonly rootDir: string,
     private readonly envPath = resolveGatewayEnvPath(rootDir),
+    private readonly configPath?: string,
   ) {
     super();
   }
@@ -67,6 +68,7 @@ export class GatewayModule extends EventEmitter {
       this.handle = await startEmbeddedGateway({
         rootDir: this.rootDir,
         envPath: this.envPath,
+        configPath: this.configPath,
         port: 0,
       });
       this.catalogPath = this.writeRuntimeCatalog(this.handle.models);
@@ -100,11 +102,16 @@ export class GatewayModule extends EventEmitter {
     for (const [index, model] of models.entries()) {
       const existing = entries.get(model.id);
       if (existing) {
-        if (model.runtimeInstructions) {
+        if (model.runtimeInstructions || model.contextWindow) {
           const entry = structuredClone(existing);
           const instructions = String(entry.base_instructions || "");
-          if (!instructions.includes("# Model Runtime Rules")) {
+          if (model.runtimeInstructions && !instructions.includes("# Model Runtime Rules")) {
             entry.base_instructions = `${instructions}\n\n# Model Runtime Rules\n${model.runtimeInstructions}`;
+          }
+          if (model.contextWindow) {
+            entry.context_window = model.contextWindow;
+            entry.max_context_window = model.contextWindow;
+            entry.effective_context_window_percent = 90;
           }
           entries.set(model.id, entry);
         }
@@ -119,13 +126,34 @@ export class GatewayModule extends EventEmitter {
       entry.display_name = `${model.ownedBy} - ${model.upstreamModel}`;
       entry.description = `${model.upstreamModel} through the local RHZY gateway.`;
       entry.priority = index + 1;
-      if (model.protocol === "chat_completions") {
+      if (model.protocol !== "responses") {
         const instructions = String(entry.base_instructions || "");
         const remainder = instructions.includes("\n\n") ? instructions.slice(instructions.indexOf("\n\n")) : "";
         const runtimeInstructions = model.runtimeInstructions
           ? `\n\n# Model Runtime Rules\n${model.runtimeInstructions}`
           : "";
         entry.base_instructions = `You are Codex, a coding agent powered by ${model.upstreamModel} through the Codex CLI. The active model ID is ${model.id}. If asked which model is active, answer with this model ID and do not claim to be an OpenAI GPT model.${remainder}${runtimeInstructions}`;
+        entry.default_reasoning_level = null;
+        entry.supported_reasoning_levels = [];
+        entry.supports_reasoning_summaries = false;
+        entry.default_reasoning_summary = "none";
+        entry.support_verbosity = false;
+        entry.default_verbosity = null;
+        entry.supports_parallel_tool_calls = model.capabilities.parallel_tool_calls !== false;
+        entry.supports_image_detail_original = false;
+        entry.input_modalities = ["text"];
+        entry.supports_search_tool = false;
+        entry.use_responses_lite = false;
+        entry.shell_type = "default";
+        entry.apply_patch_tool_type = null;
+        entry.context_window = Number(entry.context_window) || 131_072;
+        entry.max_context_window = entry.context_window;
+        entry.effective_context_window_percent = 90;
+      }
+      if (model.contextWindow) {
+        entry.context_window = model.contextWindow;
+        entry.max_context_window = model.contextWindow;
+        entry.effective_context_window_percent = 90;
       }
       entries.set(model.id, entry);
     }

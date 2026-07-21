@@ -142,6 +142,34 @@ test("opens a mobile-created empty thread before its rollout exists", async () =
   });
 });
 
+test("opens an active thread after its new rollout metadata is written", async () => {
+  const { runtime, internals } = createRuntimeHarness();
+  const thread = internals.threads.get("thread-1")!;
+  let resumeAttempts = 0;
+  runtime.agent.request = async (method) => {
+    assert.equal(method, "thread/resume");
+    resumeAttempts += 1;
+    if (resumeAttempts < 3) {
+      throw new Error("failed to read session metadata C:\\sessions\\rollout.jsonl: rollout at C:\\sessions\\rollout.jsonl is empty");
+    }
+    return {
+      thread: {
+        id: thread.id,
+        cwd: thread.projectPath,
+        preview: "Request test",
+        status: { type: "active" },
+        turns: [],
+      },
+      model: thread.model,
+    } as never;
+  };
+
+  const detail = await runtime.openThread(thread.id);
+
+  assert.equal(resumeAttempts, 3);
+  assert.equal(detail.thread.id, thread.id);
+});
+
 test("deletes a local empty thread before its rollout exists", async () => {
   const { runtime, internals, store } = createRuntimeHarness();
   const emptyThread: ThreadSummary = {
@@ -157,6 +185,29 @@ test("deletes a local empty thread before its rollout exists", async () => {
   store.upsertThread(emptyThread);
   runtime.agent.request = async () => {
     throw new Error(`no rollout found for thread id ${emptyThread.id}`);
+  };
+
+  await runtime.deleteThread(emptyThread.id);
+
+  assert.equal(internals.threads.has(emptyThread.id), false);
+  assert.equal(store.snapshot().threads.some((thread) => thread.id === emptyThread.id), false);
+});
+
+test("deletes a local empty thread whose rollout file has no metadata yet", async () => {
+  const { runtime, internals, store } = createRuntimeHarness();
+  const emptyThread: ThreadSummary = {
+    id: "thread-empty-file",
+    hostId: "local-desktop",
+    title: "New task",
+    projectPath: path.resolve("."),
+    model: "test/model",
+    status: "idle",
+    updatedAt: new Date().toISOString(),
+  };
+  internals.threads.set(emptyThread.id, emptyThread);
+  store.upsertThread(emptyThread);
+  runtime.agent.request = async () => {
+    throw new Error("failed to read session metadata C:\\sessions\\rollout.jsonl: rollout at C:\\sessions\\rollout.jsonl is empty");
   };
 
   await runtime.deleteThread(emptyThread.id);

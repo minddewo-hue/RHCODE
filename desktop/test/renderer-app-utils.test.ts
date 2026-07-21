@@ -6,10 +6,12 @@ import {
   describeItem,
   formatFileChanges,
   formatFileSize,
+  groupModelsBySource,
   isComposerRunning,
   modelReasoningEfforts,
   notificationThreadId,
   providerCredentialPresentation,
+  providerDisplayName,
   summarizePrompt,
 } from "../src/renderer/src/app-utils";
 
@@ -38,6 +40,70 @@ test("uses every reasoning effort supported by the selected model", () => {
       { reasoningEffort: "xhigh", description: "Deep" },
     ],
   }), ["low", "medium", "xhigh"]);
+});
+
+test("groups models by source and naturally sorts versions within each source", () => {
+  const model = (modelId: string, displayName: string) => ({
+    id: modelId,
+    model: modelId,
+    displayName,
+    description: "Test model",
+    defaultReasoningEffort: "medium",
+  });
+
+  const providers = [
+    {
+      providerId: "sub2api",
+      name: "Sub2API",
+      baseUrl: "https://model.example/v1",
+      protocol: "responses" as const,
+      detectedProtocol: "responses" as const,
+      models: [],
+      custom: false,
+      configured: true,
+      source: "secure_store" as const,
+    },
+    {
+      providerId: "domestic",
+      name: "Domestic",
+      baseUrl: "https://domestic.example/v1",
+      protocol: "responses" as const,
+      detectedProtocol: "responses" as const,
+      models: [],
+      custom: true,
+      configured: true,
+      source: "secure_store" as const,
+    },
+  ];
+  const groups = groupModelsBySource([
+    model("domestic/minimax-m2.7", "Legacy label - MiniMax-M2.7"),
+    model("sub2api/gpt-5.4-mini", "Codex - gpt-5.4-mini"),
+    model("domestic/minimax-m2.1", "Domestic - MiniMax-M2.1"),
+    model("sub2api/gpt-5.4", "Sub2API - gpt-5.4"),
+    model("domestic/minimax-m3", "Domestic - MiniMax-M3"),
+  ], providers);
+
+  assert.deepEqual(groups.map((group) => ({
+    source: group.source,
+    models: group.models.map((entry) => entry.sourceModelName),
+  })), [
+    { source: "Sub2API", models: ["gpt-5.4", "gpt-5.4-mini"] },
+    { source: "Domestic", models: ["minimax-m2.1", "minimax-m2.7", "minimax-m3"] },
+  ]);
+});
+
+test("uses the configured provider name consistently", () => {
+  assert.equal(providerDisplayName({
+    providerId: "sub2api",
+    name: "sub2api",
+    baseUrl: "https://model.example/v1",
+    protocol: "responses",
+    detectedProtocol: "responses",
+    models: [],
+    custom: false,
+    configured: true,
+    source: "secure_store",
+  }), "Sub2API");
 });
 
 test("normalizes activity details", () => {

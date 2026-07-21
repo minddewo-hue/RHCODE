@@ -71,6 +71,16 @@ interface PendingUserInput {
   questions: UserInputQuestion[];
 }
 
+const ROLLOUT_WRITE_RETRY_DELAYS_MS = [25, 50, 100, 200, 400] as const;
+
+function isRolloutNotReadyMessage(message: string): boolean {
+  return /no rollout found|rollout\b.*\bis empty/i.test(message);
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 interface ServerThread {
   id?: string;
   preview?: string;
@@ -135,9 +145,10 @@ export class DesktopRuntime extends EventEmitter {
     private readonly restoredControlStore?: ControlStore,
     private readonly mobileAccess?: MobileAccessManager,
     private readonly projectDirectories = new ProjectDirectoryRegistry(),
+    gatewayConfigPath?: string,
   ) {
     super();
-    this.gateway = new GatewayModule(gatewayRoot);
+    this.gateway = new GatewayModule(gatewayRoot, undefined, gatewayConfigPath);
     this.syncStatus = {
       state: "stopped",
       host: resolveAdvertisedSyncHost(syncHost),
@@ -411,7 +422,7 @@ export class DesktopRuntime extends EventEmitter {
       await this.agent.request("thread/delete", { threadId });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!this.isEmptyLocalThread(threadId) || !/no rollout found/i.test(message)) throw error;
+      if (!this.isEmptyLocalThread(threadId) || !isRolloutNotReadyMessage(message)) throw error;
     }
     this.removeRuntimeThread(threadId);
   }
@@ -422,14 +433,25 @@ export class DesktopRuntime extends EventEmitter {
       model?: string;
       cwd?: string;
     };
-    try {
-      response = await this.agent.request("thread/resume", { threadId });
-    } catch (error) {
-      const localThread = this.threads.get(threadId);
-      const message = error instanceof Error ? error.message : String(error);
-      if (!localThread || !this.isEmptyLocalThread(threadId) || !/no rollout found/i.test(message)) throw error;
-      this.activeThreadId = threadId;
-      return { thread: localThread, messages: [], timeline: [] };
+    let rolloutRetry = 0;
+    while (true) {
+      try {
+        response = await this.agent.request("thread/resume", { threadId });
+        break;
+      } catch (error) {
+        const localThread = this.threads.get(threadId);
+        const message = error instanceof Error ? error.message : String(error);
+        if (!localThread || !isRolloutNotReadyMessage(message)) throw error;
+        if (this.isEmptyLocalThread(threadId)) {
+          this.activeThreadId = threadId;
+          return { thread: localThread, messages: [], timeline: [] };
+        }
+        if (!/rollout\b.*\bis empty/i.test(message) || rolloutRetry >= ROLLOUT_WRITE_RETRY_DELAYS_MS.length) {
+          throw error;
+        }
+        await delay(ROLLOUT_WRITE_RETRY_DELAYS_MS[rolloutRetry]!);
+        rolloutRetry += 1;
+      }
     }
     if (!response.thread?.id) throw new Error("Agent Host did not return the resumed thread.");
 

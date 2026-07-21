@@ -14,6 +14,7 @@ test("audits a clean release and rejects sensitive ASAR or resource files", asyn
   const resources = path.join(desktopDir, "release", "win-unpacked", "resources");
   fs.mkdirSync(source, { recursive: true });
   fs.mkdirSync(resources, { recursive: true });
+  fs.writeFileSync(path.join(desktopDir, "package.json"), "{\"dependencies\":{}}\n");
   fs.writeFileSync(path.join(source, "index.js"), "console.log('clean');\n");
   fs.writeFileSync(path.join(desktopDir, "release", "win-unpacked", "RHZYCODE.exe"), "test executable");
   await createPackage(source, path.join(resources, "app.asar"));
@@ -37,6 +38,23 @@ test("audits a clean release and rejects sensitive ASAR or resource files", asyn
     codexVersion: "test-codex",
   });
   assert.equal(currentBuild.manifest.artifacts.some((artifact) => artifact.path === "stale-installer.exe"), false);
+
+  fs.writeFileSync(path.join(desktopDir, "package.json"), "{\"dependencies\":{\"electron-updater\":\"test\"}}\n");
+  assert.throws(
+    () => auditRelease({ desktopDir, version: "test", electronVersion: "test", codexVersion: "test" }),
+    /missing runtime packages.*electron-updater/i,
+  );
+  fs.mkdirSync(path.join(source, "node_modules", "electron-updater"), { recursive: true });
+  fs.writeFileSync(path.join(source, "node_modules", "electron-updater", "package.json"), "{\"name\":\"electron-updater\"}\n");
+  fs.rmSync(path.join(resources, "app.asar"));
+  await createPackage(source, path.join(resources, "app.asar"));
+  const packagedDependencies = auditRelease({
+    desktopDir,
+    version: "test",
+    electronVersion: "test",
+    codexVersion: "test",
+  });
+  assert.deepEqual(packagedDependencies.manifest.audit.runtimePackages, ["electron-updater"]);
 
   fs.writeFileSync(path.join(source, "auth.json"), "{\"forbidden\":true}\n");
   fs.rmSync(path.join(resources, "app.asar"));

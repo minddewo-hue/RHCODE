@@ -5,20 +5,26 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const desktopDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const executable = path.join(desktopDir, "release", "win-unpacked", "RHZYCODE.exe");
-if (!fs.existsSync(executable)) throw new Error("Build the unpacked desktop release before mobile access smoke.");
+const packagedAppDir = path.join(desktopDir, "release", "win-unpacked");
+const packagedExecutable = path.join(packagedAppDir, "RHZYCODE.exe");
+if (!fs.existsSync(packagedExecutable)) throw new Error("Build the unpacked desktop release before mobile access smoke.");
 
-const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-mobile-access-smoke-"));
-const syncUrl = "http://127.0.0.1:8791";
+const smokeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-packaged-smoke-"));
+const isolatedAppDir = path.join(smokeRoot, "app");
+const executable = path.join(isolatedAppDir, "RHZYCODE.exe");
+const dataDir = path.join(smokeRoot, "user-data");
+const syncUrl = "http://127.0.0.1:8891";
 const cdpUrl = "http://127.0.0.1:9336";
 let appProcess = null;
 
 try {
+  fs.cpSync(packagedAppDir, isolatedAppDir, { recursive: true });
+  fs.mkdirSync(dataDir, { recursive: true });
   let session = await launch();
   await assertLongConversationLayout(session);
   const initialUpdates = await session.evaluate("window.rhzycode.getUpdateStatus()");
-  if (initialUpdates.enabled || initialUpdates.state !== "disabled") {
-    throw new Error("Unsigned local release unexpectedly enabled automatic updates.");
+  if (!initialUpdates.enabled || initialUpdates.state !== "idle") {
+    throw new Error("Packaged release did not enable the configured update channel.");
   }
   const access = await session.evaluate("window.rhzycode.getMobileAccessStatus()");
   const key = access.accessKey?.key;
@@ -52,26 +58,24 @@ try {
   if (!replacementAuthorized.ok) {
     throw new Error(`Replacement key failed with HTTP ${replacementAuthorized.status}.`);
   }
-  await session.evaluate("document.querySelector('button[title=\"Settings\"]')?.click()");
+  await session.evaluate("[...document.querySelectorAll('button[role=\"tab\"]')].find((button) => button.textContent?.includes('Settings'))?.click()");
   const connectionVisible = await waitForEvaluation(
     session,
     "document.querySelectorAll('.connection-field').length === 3",
     5000,
   );
   if (!connectionVisible) throw new Error("Mobile IP, port, and access key were not rendered.");
-  const storageRows = await session.evaluate("document.querySelectorAll('.storage-state-row').length");
-  if (storageRows !== 2) throw new Error(`Expected two storage restore rows, found ${storageRows}.`);
   await session.close();
-  console.log("Desktop smoke passed: long conversation layout, persistent key auth, encrypted restart, rotation, and connection UI.");
+  console.log("Isolated desktop smoke passed: packaged dependencies, long conversation layout, persistent key auth, encrypted restart, rotation, and connection UI.");
 } finally {
   await stopCurrentProcess();
   const tempRoot = path.resolve(os.tmpdir()) + path.sep;
-  const resolvedDataDir = path.resolve(dataDir);
-  if (resolvedDataDir.startsWith(tempRoot)) {
+  const resolvedSmokeRoot = path.resolve(smokeRoot);
+  if (resolvedSmokeRoot.startsWith(tempRoot)) {
     try {
-      fs.rmSync(resolvedDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+      fs.rmSync(resolvedSmokeRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     } catch (error) {
-      console.warn(`Unable to remove mobile access smoke data: ${error instanceof Error ? error.message : error}`);
+      console.warn(`Unable to remove packaged smoke data: ${error instanceof Error ? error.message : error}`);
     }
   }
 }
@@ -82,7 +86,7 @@ async function launch() {
   appProcess = spawn(executable, ["--remote-debugging-port=9336", `--user-data-dir=${dataDir}`], {
     env: {
       ...process.env,
-      RHZYCODE_SYNC_PORT: "8791",
+      RHZYCODE_SYNC_PORT: "8891",
       RHZYCODE_STARTUP_TRACE: "1",
       RHZYCODE_USER_DATA_DIR: dataDir,
       RHZYCODE_GATEWAY_HOME: "",

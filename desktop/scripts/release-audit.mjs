@@ -34,9 +34,8 @@ export function auditRelease({
   }
 
   uncache(asarPath);
-  const asarMatches = listPackage(asarPath)
-    .map(normalizeArchivePath)
-    .filter(isSensitivePath);
+  const asarEntries = listPackage(asarPath).map(normalizeArchivePath);
+  const asarMatches = asarEntries.filter(isSensitivePath);
   const resourceMatches = walkFiles(resourcesDir)
     .filter((filePath) => filePath !== asarPath)
     .map((filePath) => path.relative(resourcesDir, filePath).replace(/\\/g, "/"))
@@ -47,6 +46,14 @@ export function auditRelease({
   ];
   if (sensitiveMatches.length > 0) {
     throw new Error(`Release contains forbidden sensitive files: ${sensitiveMatches.join(", ")}`);
+  }
+
+  const runtimePackages = readRuntimePackageNames(desktopDir);
+  const archiveEntrySet = new Set(asarEntries);
+  const missingRuntimePackages = runtimePackages.filter((packageName) =>
+    !archiveEntrySet.has(`node_modules/${packageName}/package.json`));
+  if (missingRuntimePackages.length > 0) {
+    throw new Error(`Release is missing runtime packages: ${missingRuntimePackages.join(", ")}`);
   }
 
   const updaterConfigPath = path.join(resourcesDir, "app-update.yml");
@@ -102,12 +109,20 @@ export function auditRelease({
     audit: {
       sensitiveFileMatches: 0,
       updaterConfigPresent: hasUpdaterConfig,
+      runtimePackages,
     },
     artifacts,
   };
   const manifestPath = path.join(releaseDir, "release-manifest.json");
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   return { manifest, manifestPath };
+}
+
+function readRuntimePackageNames(desktopDir) {
+  const packagePath = path.join(desktopDir, "package.json");
+  if (!fs.existsSync(packagePath)) return [];
+  const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+  return Object.keys(packageJson.dependencies || {}).sort((left, right) => left.localeCompare(right));
 }
 
 function normalizeArchivePath(value) {

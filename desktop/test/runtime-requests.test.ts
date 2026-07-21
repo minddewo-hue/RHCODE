@@ -142,6 +142,52 @@ test("opens a mobile-created empty thread before its rollout exists", async () =
   });
 });
 
+test("deletes a local empty thread before its rollout exists", async () => {
+  const { runtime, internals, store } = createRuntimeHarness();
+  const emptyThread: ThreadSummary = {
+    id: "thread-empty",
+    hostId: "local-desktop",
+    title: "New task",
+    projectPath: path.resolve("."),
+    model: "test/model",
+    status: "idle",
+    updatedAt: new Date().toISOString(),
+  };
+  internals.threads.set(emptyThread.id, emptyThread);
+  store.upsertThread(emptyThread);
+  runtime.agent.request = async () => {
+    throw new Error(`no rollout found for thread id ${emptyThread.id}`);
+  };
+
+  await runtime.deleteThread(emptyThread.id);
+
+  assert.equal(internals.threads.has(emptyThread.id), false);
+  assert.equal(store.snapshot().threads.some((thread) => thread.id === emptyThread.id), false);
+});
+
+test("preserves a local empty thread when App Server deletion fails", async () => {
+  const { runtime, internals, store } = createRuntimeHarness();
+  const emptyThread: ThreadSummary = {
+    id: "thread-empty",
+    hostId: "local-desktop",
+    title: "New task",
+    projectPath: path.resolve("."),
+    model: "test/model",
+    status: "idle",
+    updatedAt: new Date().toISOString(),
+  };
+  internals.threads.set(emptyThread.id, emptyThread);
+  store.upsertThread(emptyThread);
+  runtime.agent.request = async () => {
+    throw new Error("App Server unavailable");
+  };
+
+  await assert.rejects(() => runtime.deleteThread(emptyThread.id), /App Server unavailable/);
+
+  assert.equal(internals.threads.has(emptyThread.id), true);
+  assert.equal(store.snapshot().threads.some((thread) => thread.id === emptyThread.id), true);
+});
+
 test("restores local images as message previews instead of placeholder text", async () => {
   const { runtime } = createRuntimeHarness();
   const imagePath = path.resolve("fixtures", "screen.png");

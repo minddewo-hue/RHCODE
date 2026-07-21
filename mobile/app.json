@@ -13,6 +13,9 @@
     "android": {
       "package": "ai.rhzy.code",
       "versionCode": 7,
+      "permissions": [
+        "REQUEST_INSTALL_PACKAGES"
+      ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#202620"
@@ -21,6 +24,15 @@
     "plugins": [
       "expo-secure-store",
       "expo-status-bar",
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "允许 RHZYCODE 使用相机拍摄附件。",
+          "photosPermission": "允许 RHZYCODE 从相册选择附件。",
+          "microphonePermission": false
+        }
+      ],
+      "./plugins/with-android-local-toolchain.cjs",
       "./plugins/with-private-network-cleartext.cjs"
     ],
     "extra": {

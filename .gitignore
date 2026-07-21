@@ -24,6 +24,7 @@ appupdate/artifacts/
 mobile/releases/
 mobile/dist-*/
 mobile/android/.kotlin/
+mobile/modules/**/android/build/
 mobile/*.png
 mobile/*.xml
 

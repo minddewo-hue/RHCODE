@@ -407,7 +407,12 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   async deleteThread(threadId: string): Promise<void> {
-    await this.agent.request("thread/delete", { threadId });
+    try {
+      await this.agent.request("thread/delete", { threadId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!this.isEmptyLocalThread(threadId) || !/no rollout found/i.test(message)) throw error;
+    }
     this.removeRuntimeThread(threadId);
   }
 
@@ -421,11 +426,8 @@ export class DesktopRuntime extends EventEmitter {
       response = await this.agent.request("thread/resume", { threadId });
     } catch (error) {
       const localThread = this.threads.get(threadId);
-      const timeline = this.controlPlane?.store.snapshot().timeline || [];
-      const isEmptyLocalThread = localThread?.status === "idle"
-        && !timeline.some((item) => item.threadId === threadId);
       const message = error instanceof Error ? error.message : String(error);
-      if (!localThread || !isEmptyLocalThread || !/no rollout found/i.test(message)) throw error;
+      if (!localThread || !this.isEmptyLocalThread(threadId) || !/no rollout found/i.test(message)) throw error;
       this.activeThreadId = threadId;
       return { thread: localThread, messages: [], timeline: [] };
     }
@@ -1179,6 +1181,12 @@ export class DesktopRuntime extends EventEmitter {
     const existed = this.threads.delete(threadId);
     if (existed) this.controlPlane?.store.removeThread(threadId);
     if (this.activeThreadId === threadId) this.activeThreadId = null;
+  }
+
+  private isEmptyLocalThread(threadId: string): boolean {
+    const thread = this.threads.get(threadId);
+    const timeline = this.controlPlane?.store.snapshot().timeline || [];
+    return thread?.status === "idle" && !timeline.some((item) => item.threadId === threadId);
   }
 
   private appendTerminalOutput(

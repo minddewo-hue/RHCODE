@@ -3,12 +3,13 @@ import Constants from "expo-constants";
 import * as Crypto from "expo-crypto";
 import * as DocumentPicker from "expo-document-picker";
 import { File } from "expo-file-system";
+import * as ImagePicker from "expo-image-picker";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
-  Linking,
+  AppState,
   Platform,
   Pressable,
   StyleSheet,
@@ -42,7 +43,9 @@ import {
   fetchMobileUpdate,
   initialMobileUpdateStatus,
   type MobileUpdateStatus,
+  type AndroidUpdate,
 } from "./update/mobile-update";
+import UpdateInstaller from "../modules/update-installer";
 
 const defaultControlHost = process.env.EXPO_PUBLIC_CONTROL_HOST || builtInControlHost;
 const newConnectionHost = defaultControlHost === builtInControlHost ? "" : defaultControlHost;
@@ -68,6 +71,16 @@ function imageMimeType(name: string): string {
 interface ThreadActionTarget {
   thread: ThreadSummary;
   archived: boolean;
+}
+
+type AttachmentSource = "camera" | "library" | "file";
+
+interface PickedAttachment {
+  uri: string;
+  name: string;
+  mimeType?: string | null;
+  size?: number | null;
+  dataBase64?: string | null;
 }
 
 export default function App() {
@@ -124,6 +137,8 @@ function AppContent() {
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
   const [mobileUpdateStatus, setMobileUpdateStatus] = useState<MobileUpdateStatus>(initialMobileUpdateStatus);
   const announcedUpdateVersion = useRef<string | null>(null);
+  const pendingInstallPermission = useRef<AndroidUpdate | null>(null);
+  const installPermissionScreenOpened = useRef(false);
   const modelsLoadingRef = useRef(false);
   const modelSelectionContext = useRef("");
   const session = useMemo(
@@ -131,8 +146,57 @@ function AppContent() {
     [sessionState],
   );
 
-  const openUpdateDownload = useCallback(async (apkUrl: string) => {
-    await Linking.openURL(apkUrl);
+  const installDownloadedUpdate = useCallback(async (update: AndroidUpdate) => {
+    setMobileUpdateStatus({ state: "installing", latest: update, error: null });
+    await UpdateInstaller.installDownloaded();
+  }, []);
+
+  const downloadAndInstallUpdate = useCallback(async (update: AndroidUpdate) => {
+    if (Platform.OS !== "android") return;
+    setMobileUpdateStatus({ state: "downloading", latest: update, error: null });
+    try {
+      await UpdateInstaller.download(update.apkUrl, update.bytes, update.sha256);
+      if (await UpdateInstaller.canInstallPackages()) {
+        await installDownloadedUpdate(update);
+        return;
+      }
+      pendingInstallPermission.current = update;
+      installPermissionScreenOpened.current = false;
+      setMobileUpdateStatus({ state: "awaiting_permission", latest: update, error: null });
+      await UpdateInstaller.requestInstallPermission();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "更新下载或安装失败。";
+      setMobileUpdateStatus({ state: "error", latest: update, error: message });
+      Alert.alert("无法安装更新", message);
+    }
+  }, [installDownloadedUpdate]);
+
+  useEffect(() => {
+    if (Platform.OS !== "android") return undefined;
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (!pendingInstallPermission.current) return;
+      if (state !== "active") {
+        installPermissionScreenOpened.current = true;
+        return;
+      }
+      if (!installPermissionScreenOpened.current) return;
+      const update = pendingInstallPermission.current;
+      pendingInstallPermission.current = null;
+      installPermissionScreenOpened.current = false;
+      void UpdateInstaller.canInstallPackages().then(async (allowed) => {
+        if (!allowed) {
+          setMobileUpdateStatus({ state: "available", latest: update, error: null });
+          Alert.alert("需要安装权限", "请允许 RHZYCODE 安装未知应用，然后重新点击下载并安装。");
+          return;
+        }
+        await installDownloadedUpdate(update);
+      }).catch((error) => {
+        const message = error instanceof Error ? error.message : "无法继续安装更新。";
+        setMobileUpdateStatus({ state: "error", latest: update, error: message });
+        Alert.alert("无法安装更新", message);
+      });
+    });
+    return () => subscription.remove();
   }, []);
 
   const checkForAppUpdate = useCallback(async (announce: boolean) => {
@@ -151,7 +215,7 @@ function AppContent() {
           `RHZYCODE ${status.latest.version} 已可下载。`,
           [
             { text: "稍后", style: "cancel" },
-            { text: "下载更新", onPress: () => void openUpdateDownload(status.latest.apkUrl) },
+            { text: "下载并安装", onPress: () => void downloadAndInstallUpdate(status.latest) },
           ],
         );
       }
@@ -162,7 +226,7 @@ function AppContent() {
         error: error instanceof Error ? error.message : "无法检查更新。",
       }));
     }
-  }, [openUpdateDownload]);
+  }, [downloadAndInstallUpdate]);
 
   useEffect(() => {
     if (Platform.OS !== "android") return undefined;
@@ -532,35 +596,76 @@ function AppContent() {
     }
   }, [approvalPolicy, attachments, control, draft, newThreadDraft, reasoningEffort, rejectCredentials, sandboxMode, selectedIsArchived, selectedModel, selectedProjectPath, selectedThreadId, sending, session, taskClient]);
 
-  const chooseAttachments = useCallback(async () => {
-    try {
-      const result = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: true });
-      if (result.canceled) return;
-      const available = Math.max(0, 20 - attachments.length);
-      const selected = result.assets.slice(0, available);
-      const knownSize = attachments.reduce((sum, attachment) => sum + attachment.size, 0)
-        + selected.reduce((sum, asset) => sum + (asset.size || 0), 0);
-      if (knownSize > 25 * 1024 * 1024) throw new Error("Attachments can contain at most 25 MB per message.");
-      const loaded: RemoteTurnAttachment[] = [];
-      for (const asset of selected) {
-        const file = new File(asset.uri);
-        const size = asset.size || file.size;
-        if (!size) throw new Error(`${asset.name} is empty.`);
-        loaded.push({
-          name: asset.name,
-          kind: isImageAttachment(asset.name, asset.mimeType) ? "image" : "file",
-          size,
-          dataBase64: asset.base64 || await file.base64(),
-        });
-      }
-      const totalSize = attachments.reduce((sum, attachment) => sum + attachment.size, 0)
-        + loaded.reduce((sum, attachment) => sum + attachment.size, 0);
-      if (totalSize > 25 * 1024 * 1024) throw new Error("Attachments can contain at most 25 MB per message.");
-      setAttachments((current) => [...current, ...loaded]);
-    } catch (error) {
-      Alert.alert("Unable to attach files", error instanceof Error ? error.message : "File selection failed.");
+  const addPickedAttachments = useCallback(async (picked: PickedAttachment[]) => {
+    const available = Math.max(0, 20 - attachments.length);
+    const selected = picked.slice(0, available);
+    const knownSize = attachments.reduce((sum, attachment) => sum + attachment.size, 0)
+      + selected.reduce((sum, asset) => sum + (asset.size || 0), 0);
+    if (knownSize > 25 * 1024 * 1024) throw new Error("每条消息的附件总大小不能超过 25 MB。");
+
+    const loaded: RemoteTurnAttachment[] = [];
+    for (const asset of selected) {
+      const file = new File(asset.uri);
+      const size = asset.size || file.size;
+      if (!size) throw new Error(`${asset.name} 是空文件。`);
+      loaded.push({
+        name: asset.name,
+        kind: isImageAttachment(asset.name, asset.mimeType || undefined) ? "image" : "file",
+        size,
+        dataBase64: asset.dataBase64 || await file.base64(),
+      });
     }
+
+    const totalSize = attachments.reduce((sum, attachment) => sum + attachment.size, 0)
+      + loaded.reduce((sum, attachment) => sum + attachment.size, 0);
+    if (totalSize > 25 * 1024 * 1024) throw new Error("每条消息的附件总大小不能超过 25 MB。");
+    setAttachments((current) => [...current, ...loaded]);
   }, [attachments]);
+
+  const chooseAttachments = useCallback(async (source: AttachmentSource) => {
+    try {
+      if (source === "file") {
+        const result = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: true });
+        if (result.canceled) return;
+        await addPickedAttachments(result.assets.map((asset) => ({
+          uri: asset.uri,
+          name: asset.name,
+          mimeType: asset.mimeType,
+          size: asset.size,
+          dataBase64: asset.base64,
+        })));
+        return;
+      }
+
+      if (source === "camera") {
+        const permission = await ImagePicker.requestCameraPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert("需要相机权限", "允许使用相机后才能拍照添加附件。");
+          return;
+        }
+      }
+
+      const result = source === "camera"
+        ? await ImagePicker.launchCameraAsync({ mediaTypes: ["images"], quality: 1 })
+        : await ImagePicker.launchImageLibraryAsync({
+          allowsMultipleSelection: true,
+          mediaTypes: ["images"],
+          quality: 1,
+          selectionLimit: Math.max(1, 20 - attachments.length),
+        });
+      if (result.canceled) return;
+      const capturedAt = Date.now();
+      await addPickedAttachments(result.assets.map((asset, index) => ({
+        uri: asset.uri,
+        name: asset.fileName || `photo-${capturedAt}-${index + 1}.jpg`,
+        mimeType: asset.mimeType || "image/jpeg",
+        size: asset.fileSize,
+        dataBase64: asset.base64,
+      })));
+    } catch (error) {
+      Alert.alert("无法添加附件", error instanceof Error ? error.message : "附件选择失败。");
+    }
+  }, [addPickedAttachments, attachments.length]);
 
   const interruptTurn = useCallback(async () => {
     if (!taskClient || !selectedThreadId || interrupting) return;
@@ -795,7 +900,7 @@ function AppContent() {
         interrupting={interrupting}
         onApproval={(id, decision) => void control.resolveApproval(id, decision)}
         onApprovalPolicyChange={setApprovalPolicy}
-        onAttach={() => void chooseAttachments()}
+        onAttach={(source) => void chooseAttachments(source)}
         onDraftChange={setDraft}
         onInterrupt={() => void interruptTurn()}
         onNewThread={openNewThread}
@@ -864,7 +969,7 @@ function AppContent() {
         onCheckForUpdate={() => void checkForAppUpdate(false)}
         onDownloadUpdate={() => {
           if (mobileUpdateStatus.state === "available") {
-            void openUpdateDownload(mobileUpdateStatus.latest.apkUrl);
+            void downloadAndInstallUpdate(mobileUpdateStatus.latest);
           }
         }}
         onOpenProjects={openProjectPicker}

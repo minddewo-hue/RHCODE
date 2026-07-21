@@ -423,14 +423,14 @@ function SettingsPage(props: AppDrawerProps) {
         </View>
       </View>
       <Pressable
-        disabled={props.updateStatus.state === "checking"}
+        disabled={["checking", "downloading", "awaiting_permission", "installing"].includes(props.updateStatus.state)}
         onPress={props.updateStatus.state === "available" ? props.onDownloadUpdate : props.onCheckForUpdate}
-        style={({ pressed }) => [styles.settingLink, props.updateStatus.state === "checking" && styles.disabled, pressed && styles.settingLinkPressed]}
+        style={({ pressed }) => [styles.settingLink, ["checking", "downloading", "awaiting_permission", "installing"].includes(props.updateStatus.state) && styles.disabled, pressed && styles.settingLinkPressed]}
       >
-        {props.updateStatus.state === "checking"
+        {["checking", "downloading", "awaiting_permission", "installing"].includes(props.updateStatus.state)
           ? <ActivityIndicator color={colors.inkMuted} size="small" />
           : <Feather color={colors.inkMuted} name={props.updateStatus.state === "available" ? "download" : "refresh-cw"} size={16} />}
-        <Text style={styles.settingLinkText}>{props.updateStatus.state === "available" ? `下载 ${props.updateStatus.latest.version}` : "检查更新"}</Text>
+        <Text style={styles.settingLinkText}>{updateActionLabel(props.updateStatus)}</Text>
         <Feather color={colors.inkMuted} name="chevron-right" size={16} />
       </Pressable>
 
@@ -446,10 +446,21 @@ function SettingsPage(props: AppDrawerProps) {
 
 function mobileUpdateLabel(status: MobileUpdateStatus): string {
   if (status.state === "checking") return "正在检查本机更新服务";
+  if (status.state === "downloading") return `正在下载 ${status.latest.version}`;
+  if (status.state === "awaiting_permission") return "等待允许安装未知应用";
+  if (status.state === "installing") return "已启动系统安装程序";
   if (status.state === "available") return `发现新版本 ${status.latest.version}`;
   if (status.state === "current") return "当前已是最新版本";
   if (status.state === "error") return "暂时无法连接更新服务";
   return "等待自动检查";
+}
+
+function updateActionLabel(status: MobileUpdateStatus): string {
+  if (status.state === "available") return `下载并安装 ${status.latest.version}`;
+  if (status.state === "downloading") return "正在下载更新";
+  if (status.state === "awaiting_permission") return "等待安装权限";
+  if (status.state === "installing") return "正在启动安装";
+  return status.state === "checking" ? "正在检查" : "检查更新";
 }
 
 function ThreadRow({

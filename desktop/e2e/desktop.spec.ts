@@ -501,6 +501,17 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await getThreadRow(page, "Run deterministic verification").click();
   await expect(page.locator(".send-button.stop")).toBeVisible();
   await expect(modelSelect).toBeEnabled();
+  await taskPrompt.fill("Draft for the first task");
+  await pasteImage(taskPrompt, "first-task-draft.png");
+  await expect(page.getByText("first-task-draft.png", { exact: true })).toBeVisible();
+  await getThreadRow(page, "Run concurrent second task").click();
+  await expect(taskPrompt).toHaveValue("");
+  await expect(page.getByText("first-task-draft.png", { exact: true })).toBeHidden();
+  await getThreadRow(page, "Run deterministic verification").click();
+  await expect(taskPrompt).toHaveValue("Draft for the first task");
+  await expect(page.getByText("first-task-draft.png", { exact: true })).toBeVisible();
+  await taskPrompt.fill("");
+  await page.getByRole("button", { name: "Remove first-task-draft.png" }).click();
   await getThreadRow(page, "Run concurrent second task").click();
   await page.locator(".send-button.stop").click();
   await getThreadRow(page, "Run deterministic verification").click();
@@ -522,6 +533,10 @@ test("supports core desktop workflows at the minimum window size", async () => {
     call.args[0] as { model?: string }
   ).model))).toEqual(["ui/model", "ui/second", "ui/second", "ui/second"]);
   await page.getByRole("button", { name: "New task" }).click();
+  await expect(taskPrompt).toHaveValue("");
+  await expect(page.locator(".attachment-list")).toHaveCount(0);
+  await expect(page.locator(".message-list")).toHaveCount(0);
+  await expect(page.getByText("Start a new task", { exact: true })).toBeVisible();
 
   await electronApp.evaluate(({ BrowserWindow }) => {
     BrowserWindow.getAllWindows()[0]?.setSize(1440, 900);

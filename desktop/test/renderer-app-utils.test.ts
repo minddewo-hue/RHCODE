@@ -6,6 +6,7 @@ import {
   describeItem,
   formatFileChanges,
   formatFileSize,
+  isComposerRunning,
   modelReasoningEfforts,
   notificationThreadId,
   providerCredentialPresentation,
@@ -60,4 +61,13 @@ test("extracts thread identifiers from supported notifications", () => {
 test("creates bounded task titles", () => {
   assert.equal(summarizePrompt("  Fix   desktop layout  "), "Fix desktop layout");
   assert.equal(summarizePrompt("x".repeat(80)), `${"x".repeat(57)}...`);
+});
+
+test("locks the composer only for the selected running thread", () => {
+  const activeThreadIds = new Set(["thread-running"]);
+
+  assert.equal(isComposerRunning("thread-running", activeThreadIds, false), true);
+  assert.equal(isComposerRunning("thread-completed", activeThreadIds, false), false);
+  assert.equal(isComposerRunning(null, activeThreadIds, false), false);
+  assert.equal(isComposerRunning("thread-completed", activeThreadIds, true), true);
 });

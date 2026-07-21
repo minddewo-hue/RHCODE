@@ -139,6 +139,14 @@ export function isActiveThreadStatus(status: ThreadSummary["status"]): boolean {
   return status === "running" || status === "waiting_for_approval" || status === "waiting_for_input";
 }
 
+export function isComposerRunning(
+  selectedThreadId: string | null,
+  activeThreadIds: ReadonlySet<string>,
+  submittingTurn: boolean,
+): boolean {
+  return submittingTurn || (selectedThreadId !== null && activeThreadIds.has(selectedThreadId));
+}
+
 export function notificationThreadId(params: Record<string, unknown>): string | null {
   if (typeof params.threadId === "string") return params.threadId;
   if (typeof params.conversationId === "string") return params.conversationId;

@@ -27,6 +27,7 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { ApprovalOperation, ConnectionStatus } from "../hooks/use-control-plane";
 import { colors } from "../ui/theme";
 import { TaskMenu } from "./TaskMenu";
@@ -76,7 +77,7 @@ interface ChatScreenProps {
   onRefresh: () => void;
   onDraftChange: (value: string) => void;
   onSend: () => void;
-  onAttach: () => void;
+  onAttach: (source: "camera" | "library" | "file") => void;
   onRemoveAttachment: (index: number) => void;
   onInterrupt: () => void;
   onApproval: (id: string, decision: "approved" | "declined") => void;
@@ -94,6 +95,7 @@ export function ChatScreen(props: ChatScreenProps) {
   const { width: pageWidth } = useWindowDimensions();
   const [activePage, setActivePage] = useState<ConversationPage>("result");
   const [taskMenuVisible, setTaskMenuVisible] = useState(false);
+  const [attachmentMenuVisible, setAttachmentMenuVisible] = useState(false);
   const entries = useMemo(() => buildChatEntries(props, activePage === "activity"), [
     activePage,
     props.approvals,
@@ -285,7 +287,7 @@ export function ChatScreen(props: ChatScreenProps) {
               accessibilityLabel="Choose attachments"
               accessibilityRole="button"
               disabled={!composerEnabled || props.sending || props.attachments.length >= 20}
-              onPress={props.onAttach}
+              onPress={() => setAttachmentMenuVisible(true)}
               style={({ pressed }) => [styles.attachButton, pressed && styles.iconPressed]}
             >
               <Ionicons color={colors.ink} name="attach" size={19} />
@@ -321,7 +323,55 @@ export function ChatScreen(props: ChatScreenProps) {
           </View>
         </View>
       </View>
+      <AttachmentMenu
+        onClose={() => setAttachmentMenuVisible(false)}
+        onSelect={(source) => {
+          setAttachmentMenuVisible(false);
+          props.onAttach(source);
+        }}
+        visible={attachmentMenuVisible}
+      />
     </KeyboardAvoidingView>
+  );
+}
+
+function AttachmentMenu({ onClose, onSelect, visible }: {
+  onClose: () => void;
+  onSelect: (source: "camera" | "library" | "file") => void;
+  visible: boolean;
+}) {
+  const insets = useSafeAreaInsets();
+  return (
+    <Modal animationType="slide" onRequestClose={onClose} statusBarTranslucent transparent visible={visible}>
+      <Pressable accessibilityLabel="关闭附件菜单" onPress={onClose} style={styles.attachmentMenuScrim} />
+      <View style={[styles.attachmentMenu, { paddingBottom: Math.max(insets.bottom, 18) }]}>
+        <View style={styles.attachmentMenuHandle} />
+        <Text style={styles.attachmentMenuTitle}>添加附件</Text>
+        <View style={styles.attachmentMenuOptions}>
+          <AttachmentMenuOption icon="camera-outline" label="拍照" onPress={() => onSelect("camera")} />
+          <AttachmentMenuOption icon="images-outline" label="相册" onPress={() => onSelect("library")} />
+          <AttachmentMenuOption icon="document-outline" label="文件" onPress={() => onSelect("file")} />
+        </View>
+        <Pressable accessibilityRole="button" onPress={onClose} style={({ pressed }) => [styles.attachmentMenuCancel, pressed && styles.iconPressed]}>
+          <Text style={styles.attachmentMenuCancelText}>取消</Text>
+        </Pressable>
+      </View>
+    </Modal>
+  );
+}
+
+function AttachmentMenuOption({ icon, label, onPress }: {
+  icon: React.ComponentProps<typeof Ionicons>["name"];
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable accessibilityLabel={label} accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.attachmentMenuOption, pressed && styles.iconPressed]}>
+      <View style={styles.attachmentMenuIcon}>
+        <Ionicons color={colors.ink} name={icon} size={24} />
+      </View>
+      <Text style={styles.attachmentMenuOptionText}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -930,6 +980,16 @@ const styles = StyleSheet.create({
   composerInput: { flex: 1, minHeight: 32, maxHeight: 112, paddingTop: 5, paddingBottom: 4, paddingRight: 7, color: colors.ink, fontSize: 14, lineHeight: 20, letterSpacing: 0 },
   composerActions: { flexDirection: "row", alignItems: "center", gap: 5 },
   attachButton: { width: 32, height: 32, borderRadius: 6, alignItems: "center", justifyContent: "center" },
+  attachmentMenuScrim: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0, backgroundColor: colors.overlay },
+  attachmentMenu: { position: "absolute", right: 0, bottom: 0, left: 0, borderTopLeftRadius: 8, borderTopRightRadius: 8, backgroundColor: colors.surface, paddingHorizontal: 18, paddingTop: 8, paddingBottom: 18 },
+  attachmentMenuHandle: { width: 36, height: 4, alignSelf: "center", borderRadius: 2, backgroundColor: colors.borderStrong },
+  attachmentMenuTitle: { marginTop: 12, color: colors.ink, fontSize: 15, lineHeight: 21, fontWeight: "600", textAlign: "center", letterSpacing: 0 },
+  attachmentMenuOptions: { flexDirection: "row", justifyContent: "space-around", marginTop: 18, marginBottom: 14 },
+  attachmentMenuOption: { width: 76, alignItems: "center", paddingVertical: 6, borderRadius: 6 },
+  attachmentMenuIcon: { width: 48, height: 48, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 8, backgroundColor: colors.subtle },
+  attachmentMenuOptionText: { marginTop: 7, color: colors.ink, fontSize: 13, lineHeight: 18, letterSpacing: 0 },
+  attachmentMenuCancel: { height: 42, alignItems: "center", justifyContent: "center", borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  attachmentMenuCancelText: { color: colors.ink, fontSize: 14, lineHeight: 19, fontWeight: "600", letterSpacing: 0 },
   stopButton: { width: 32, height: 32, borderRadius: 6, alignItems: "center", justifyContent: "center", backgroundColor: colors.subtle },
   sendButton: { width: 32, height: 32, borderRadius: 6, alignItems: "center", justifyContent: "center", backgroundColor: colors.ink },
   sendButtonDisabled: { backgroundColor: colors.borderStrong },

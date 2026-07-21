@@ -14,6 +14,9 @@ export type MobileUpdateStatus =
   | { state: "checking"; latest: AndroidUpdate | null; error: null }
   | { state: "current"; latest: AndroidUpdate; error: null }
   | { state: "available"; latest: AndroidUpdate; error: null }
+  | { state: "downloading"; latest: AndroidUpdate; error: null }
+  | { state: "awaiting_permission"; latest: AndroidUpdate; error: null }
+  | { state: "installing"; latest: AndroidUpdate; error: null }
   | { state: "error"; latest: AndroidUpdate | null; error: string };
 
 export const initialMobileUpdateStatus: MobileUpdateStatus = {

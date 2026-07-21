@@ -69,6 +69,7 @@ import {
   formatFileSize,
   getErrorMessage,
   isActiveThreadStatus,
+  isComposerRunning,
   modelReasoningEfforts,
   notificationThreadId,
   providerCredentialPresentation,
@@ -88,6 +89,11 @@ import {
 interface ChatMessage extends ConversationMessage {
   streaming?: boolean;
   images?: Array<{ path: string; name: string }>;
+}
+
+interface ComposerDraft {
+  text: string;
+  attachments: ComposerAttachment[];
 }
 
 const emptyGateway: GatewayStatus = {
@@ -169,7 +175,7 @@ export function App() {
   const [sandboxMode, setSandboxMode] = useState<SandboxMode>(() => storedSandboxMode());
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(() => storedReasoningEffort());
   const [failedPrompt, setFailedPrompt] = useState<string | null>(null);
-  const [running, setRunning] = useState(false);
+  const [submittingTurn, setSubmittingTurn] = useState(false);
   const [activeThreadIds, setActiveThreadIds] = useState<Set<string>>(() => new Set());
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [rightView, setRightView] = useState<"activity" | "settings">("activity");
@@ -182,6 +188,7 @@ export function App() {
   const threadSearchRef = useRef(threadSearch);
   const followConversationRef = useRef(true);
   const lastPrompt = useRef("");
+  const composerDraftsRef = useRef(new Map<string, ComposerDraft>());
 
   useEffect(() => {
     selectedProjectPathRef.current = projectPath;
@@ -304,7 +311,7 @@ export function App() {
     localStorage.setItem("rhzycode.reasoningEffort", next);
   }, [reasoningEffort, reasoningEfforts]);
 
-  const hasActiveTurns = activeThreadIds.size > 0;
+  const running = isComposerRunning(threadId, activeThreadIds, submittingTurn);
 
   function setWorkspaceProject(path: string): void {
     selectedProjectPathRef.current = path;
@@ -329,24 +336,50 @@ export function App() {
     });
   }
 
+  function composerDraftKey(project: string, id: string | null): string {
+    return `${project}\u0000${id || "new"}`;
+  }
+
+  function saveComposerDraft(): void {
+    const project = selectedProjectPathRef.current;
+    if (!project) return;
+    const key = composerDraftKey(project, selectedThreadIdRef.current);
+    if (!composer.trim() && attachments.length === 0) {
+      composerDraftsRef.current.delete(key);
+      return;
+    }
+    composerDraftsRef.current.set(key, { text: composer, attachments: [...attachments] });
+  }
+
+  function restoreComposerDraft(project: string, id: string): void {
+    const draft = composerDraftsRef.current.get(composerDraftKey(project, id));
+    setComposer(draft?.text || "");
+    setAttachments(draft ? [...draft.attachments] : []);
+  }
+
   function resetConversation(): void {
     setWorkspaceThread(null);
     setMessages([]);
     setActivities([]);
-    setRunning(false);
+    setComposer("");
     setFailedPrompt(null);
     setAttachments([]);
     lastPrompt.current = "";
   }
 
   function applyThreadDetail(detail: ThreadDetail, availableModels: ModelOption[] = models): void {
+    const changedThread = selectedThreadIdRef.current !== detail.thread.id
+      || selectedProjectPathRef.current !== detail.thread.projectPath;
+    if (changedThread) {
+      saveComposerDraft();
+      restoreComposerDraft(detail.thread.projectPath, detail.thread.id);
+    }
     setWorkspaceProject(detail.thread.projectPath);
     setWorkspaceThread(detail.thread.id);
     if (detail.thread.projectPath) rememberProject(detail.thread.projectPath);
     setMessages(detail.messages);
     setActivities(detail.timeline.map(activityFromTimeline));
     const active = isActiveThreadStatus(detail.thread.status);
-    setRunning(active);
     markThreadActive(detail.thread.id, active);
     const previousPrompt = [...detail.messages].reverse()
       .find((message) => message.role === "user")?.content || "";
@@ -466,6 +499,7 @@ export function App() {
   async function selectProject(path: string): Promise<void> {
     const revision = ++navigationRevisionRef.current;
     setProjectMenuOpen(false);
+    saveComposerDraft();
     setWorkspaceProject(path);
     rememberProject(path);
     resetConversation();
@@ -508,6 +542,8 @@ export function App() {
     setProjectMenuOpen(false);
     closeThreadActions();
     setOpeningThreadId(null);
+    saveComposerDraft();
+    composerDraftsRef.current.delete(composerDraftKey(selectedProjectPathRef.current, null));
     resetConversation();
   }
 
@@ -629,6 +665,14 @@ export function App() {
 
   async function openThread(selectedThreadId: string) {
     const revision = ++navigationRevisionRef.current;
+    if (selectedThreadIdRef.current !== selectedThreadId) {
+      saveComposerDraft();
+      restoreComposerDraft(selectedProjectPathRef.current, selectedThreadId);
+    }
+    setWorkspaceThread(selectedThreadId);
+    setMessages([]);
+    setActivities([]);
+    setFailedPrompt(null);
     await loadThreadDetail(selectedThreadId, revision);
   }
 
@@ -645,12 +689,13 @@ export function App() {
     const submissionRevision = navigationRevisionRef.current;
     const existingThreadId = threadId;
     let submittedThreadId = existingThreadId;
+    composerDraftsRef.current.delete(composerDraftKey(submissionProject, existingThreadId));
     setComposer("");
     setAttachments([]);
     setFailedPrompt(null);
     followConversationRef.current = true;
     lastPrompt.current = text;
-    setRunning(true);
+    setSubmittingTurn(true);
     setMessages((current) => [
       ...current,
       {
@@ -730,11 +775,12 @@ export function App() {
         ? selectedThreadIdRef.current === submittedThreadId
         : submissionRevision === navigationRevisionRef.current && selectedThreadIdRef.current === null;
       if (stillSelected) {
-        setRunning(false);
         setFailedPrompt(text);
         if (retryText == null) setAttachments(selectedAttachments);
         upsertActivity(`turn-error-${Date.now()}`, "Turn failed", getErrorMessage(error), "error");
       }
+    } finally {
+      setSubmittingTurn(false);
     }
   }
 
@@ -747,10 +793,8 @@ export function App() {
       setThreads((current) => current.map((thread) => thread.id === interruptedThreadId
         ? { ...thread, status: "interrupted", updatedAt: new Date().toISOString() }
         : thread));
-      if (selectedThreadIdRef.current === interruptedThreadId) setRunning(false);
     } catch (error) {
       if (selectedThreadIdRef.current === interruptedThreadId) {
-        setRunning(false);
         upsertActivity(`interrupt-error-${Date.now()}`, "Stop failed", getErrorMessage(error), "error");
       }
     }
@@ -859,7 +903,6 @@ export function App() {
 
     if (method === "turn/started" && eventThreadId) {
       markThreadActive(eventThreadId, true);
-      if (isSelectedThread) setRunning(true);
     }
 
     if (method === "turn/completed" && eventThreadId) {
@@ -881,7 +924,6 @@ export function App() {
     }
 
     if (method === "turn/completed") {
-      setRunning(false);
       const turn = (params.turn || {}) as Record<string, unknown>;
       const status = String(turn.status || "completed");
       if (/fail/i.test(status)) {
@@ -948,7 +990,6 @@ export function App() {
       );
       if (!willRetry) {
         if (eventThreadId) markThreadActive(eventThreadId, false);
-        setRunning(false);
         setFailedPrompt(lastPrompt.current || null);
       }
     }
@@ -990,7 +1031,6 @@ export function App() {
     if (event.type === "thread.updated") {
       const active = isActiveThreadStatus(event.thread.status);
       markThreadActive(event.thread.id, active);
-      if (event.thread.id === selectedThreadIdRef.current) setRunning(active);
       const searchTerm = threadSearchRef.current.trim().toLowerCase();
       const belongsInCurrentList = event.thread.projectPath === selectedProjectPathRef.current
         && (!searchTerm || event.thread.title.toLowerCase().includes(searchTerm));

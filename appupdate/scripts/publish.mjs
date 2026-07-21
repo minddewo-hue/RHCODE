@@ -51,6 +51,7 @@ console.log(`Published Android ${channel.android.version} (${channel.android.ver
 
 function copyRequired(source, destination) {
   if (!fs.existsSync(source)) throw new Error(`Required update artifact is missing: ${source}`);
+  if (path.resolve(source) === path.resolve(destination)) return;
   fs.copyFileSync(source, destination);
 }
 

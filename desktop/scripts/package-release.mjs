@@ -13,9 +13,11 @@ const signingRequired = process.env.RHZYCODE_REQUIRE_SIGNING === "1";
 const signingConfigured = Boolean(
   process.env.CSC_LINK || process.env.WIN_CSC_LINK || process.env.CSC_NAME,
 );
-const updateUrl = process.env.RHZYCODE_UPDATE_URL?.trim() || "";
-const unsignedLocalUpdatesAllowed = process.env.RHZYCODE_ALLOW_UNSIGNED_LOCAL_UPDATES === "1"
-  && isPrivateNetworkUpdateUrl(updateUrl);
+const defaultUpdateUrl = "http://192.168.11.103:8791/desktop";
+const configuredUpdateUrl = process.env.RHZYCODE_UPDATE_URL?.trim() || "";
+const updateUrl = configuredUpdateUrl || defaultUpdateUrl;
+const unsignedLocalUpdatesAllowed = isPrivateNetworkUpdateUrl(updateUrl)
+  && (process.env.RHZYCODE_ALLOW_UNSIGNED_LOCAL_UPDATES === "1" || !configuredUpdateUrl);
 const electronDist = resolveElectronDist(desktopPackage.devDependencies.electron);
 if (signingRequired && !signingConfigured) {
   throw new Error(

@@ -41,7 +41,12 @@ test("selects protocol separately for every discovered provider model", async (c
   const routeCalls = [];
   const upstream = http.createServer(async (request, response) => {
     if (request.url === "/v1/models") {
-      writeJson(response, 200, { data: [{ id: "native-model" }, { id: "chat-model" }] });
+      writeJson(response, 200, {
+        data: [
+          { id: "native-model" },
+          { id: "chat-model", context_length: 65_536 },
+        ],
+      });
       return;
     }
     const body = await readJson(request);
@@ -104,6 +109,7 @@ test("selects protocol separately for every discovered provider model", async (c
 
   assert.equal(nativeResponse.status, 200);
   assert.equal(chatResponse.status, 200);
+  assert.equal(gateway.models.find((model) => model.id === "mixed/chat-model")?.contextWindow, 65_536);
   assert.deepEqual(routeCalls.filter((call) => call.model === "native-model").map((call) => call.path), [
     "/v1/chat/completions",
     "/v1/responses",

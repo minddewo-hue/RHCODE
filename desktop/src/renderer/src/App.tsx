@@ -58,6 +58,7 @@ import type {
   SyncStatus,
   UpdateStatus,
 } from "../../shared/desktop-api";
+import { isGemma31bBf16Model } from "../../../model-gateway/src/gemma-31b-policy.js";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import {
   activityFromTimeline,
@@ -557,6 +558,27 @@ export function App() {
     saveComposerDraft();
     composerDraftsRef.current.delete(composerDraftKey(selectedProjectPathRef.current, null));
     resetConversation();
+  }
+
+  function changeSelectedModel(nextModel: string) {
+    const recoverFailedTask = Boolean(
+      failedPrompt
+      && selectedThreadIdRef.current
+      && isGemma31bBf16Model(selectedModelRef.current)
+      && nextModel !== selectedModelRef.current,
+    );
+    if (recoverFailedTask) {
+      const retryText = composer.trim() ? composer : failedPrompt || "";
+      const retryAttachments = [...attachments];
+      navigationRevisionRef.current += 1;
+      setOpeningThreadId(null);
+      resetConversation();
+      setComposer(retryText);
+      setAttachments(retryAttachments);
+    }
+    selectedModelRef.current = nextModel;
+    setSelectedModel(nextModel);
+    localStorage.setItem("rhzycode.selectedModel", nextModel);
   }
 
   async function chooseAttachments() {
@@ -1272,7 +1294,7 @@ export function App() {
           <div className="header-actions">
             <label className="model-select" title="Model for the next turn">
               <Bot size={15} />
-              <select value={selectedModel} onChange={(event) => { selectedModelRef.current = event.target.value; setSelectedModel(event.target.value); localStorage.setItem("rhzycode.selectedModel", event.target.value); }} disabled={!models.length} aria-label="Model for next turn">
+              <select value={selectedModel} onChange={(event) => changeSelectedModel(event.target.value)} disabled={!models.length} aria-label="Model for next turn">
                 {!models.length && <option value="">Loading models</option>}
                 {modelGroups.map((group) => (
                   <optgroup key={group.key} label={group.source}>

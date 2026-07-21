@@ -29,6 +29,12 @@ test("multi-model gateway integration", async (t) => {
     calls.push({ path: req.url, body, authorization: req.headers.authorization });
 
     if (req.url === "/primary/v1/responses") {
+      if (body.input === "error-400-detail") {
+        writeJson(res, 400, {
+          detail: [{ loc: ["body", "tool_choice"], msg: "tools must be set" }],
+        });
+        return;
+      }
       const errorStatus = /^error-(401|403|404|429|500)$/.exec(body.input)?.[1];
       if (errorStatus) {
         const status = Number(errorStatus);
@@ -1017,6 +1023,13 @@ test("multi-model gateway integration", async (t) => {
       assert.doesNotMatch(error.error.message, /secret-value/);
       if (status === 401) assert.match(error.error.message, /\[redacted\]/);
     }
+
+    const detailResponse = await gatewayFetch(baseUrl, "/v1/responses", {
+      body: { model: "native/model", input: "error-400-detail" },
+    });
+    assert.equal(detailResponse.status, 400);
+    const detailError = await detailResponse.json();
+    assert.match(detailError.error.message, /body\.tool_choice: tools must be set/);
   });
 });
 

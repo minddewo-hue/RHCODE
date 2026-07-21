@@ -131,8 +131,16 @@ async function discoverProviderModels(config, timeoutMs) {
           object: "model",
           created: Number.isInteger(item.created) ? item.created : 0,
           ownedBy: rule?.ownedBy || provider.modelDiscovery.ownedBy,
-          contextWindow: null,
-          maxOutputTokens: null,
+          contextWindow: discoveredPositiveInteger(item, [
+            "context_window",
+            "context_length",
+            "max_context_length",
+            "max_model_len",
+          ]),
+          maxOutputTokens: discoveredPositiveInteger(item, [
+            "max_output_tokens",
+            "max_completion_tokens",
+          ]),
           capabilities: {},
           forceSerialToolCalls: false,
           bufferChatStream: false,
@@ -155,6 +163,14 @@ async function discoverProviderModels(config, timeoutMs) {
       clearTimeout(timeout);
     }
   }));
+}
+
+function discoveredPositiveInteger(item, keys) {
+  for (const key of keys) {
+    const value = Number(item?.[key]);
+    if (Number.isInteger(value) && value > 0) return value;
+  }
+  return null;
 }
 
 function addAutomaticModelProtocolRoutes(config) {

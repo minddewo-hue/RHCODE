@@ -135,7 +135,18 @@ async function handleResponses({
   });
 
   if (selected.error) {
+    const upstreamMessage = extractUpstreamErrorMessage(selected.error.status, selected.error.body);
     writeNormalizedUpstreamError(res, selected.error.status, selected.error.body, selected.route.provider.id);
+    log(config, "warn", {
+      event: "upstream_rejected",
+      request_id: requestId,
+      provider: selected.route.provider.id,
+      public_model: model.id,
+      upstream_model: selected.route.upstreamModel,
+      protocol: selected.route.protocol,
+      status: selected.error.status,
+      reason: upstreamMessage,
+    });
     logRequest(config, {
       requestId,
       model,
@@ -1027,6 +1038,17 @@ function makeHealth(config, state) {
 }
 
 function writeNormalizedUpstreamError(res, status, body, providerId) {
+  const rawMessage = extractUpstreamErrorMessage(status, body);
+  writeJson(res, status, {
+    error: {
+      message: `Provider ${providerId}: ${rawMessage}`,
+      type: errorTypeForStatus(status),
+      code: errorCodeForStatus(status),
+    },
+  });
+}
+
+function extractUpstreamErrorMessage(status, body) {
   let parsed;
   try {
     parsed = JSON.parse(body.toString("utf8"));
@@ -1037,14 +1059,23 @@ function writeNormalizedUpstreamError(res, status, body, providerId) {
   const rawMessage =
     (typeof upstreamError === "string" ? upstreamError : upstreamError?.message) ||
     parsed?.message ||
+    formatValidationDetail(upstreamError?.detail || parsed?.detail) ||
     `HTTP ${status}`;
-  writeJson(res, status, {
-    error: {
-      message: `Provider ${providerId}: ${sanitizeMessage(rawMessage)}`,
-      type: errorTypeForStatus(status),
-      code: errorCodeForStatus(status),
-    },
-  });
+  return sanitizeMessage(rawMessage);
+}
+
+function formatValidationDetail(detail) {
+  if (typeof detail === "string") return detail;
+  if (!Array.isArray(detail)) return "";
+  return detail.slice(0, 5).map((entry) => {
+    if (typeof entry === "string") return entry;
+    if (!entry || typeof entry !== "object") return "";
+    const location = Array.isArray(entry.loc) ? entry.loc.map(String).join(".") : "";
+    const message = typeof entry.msg === "string"
+      ? entry.msg
+      : typeof entry.message === "string" ? entry.message : "";
+    return [location, message].filter(Boolean).join(": ");
+  }).filter(Boolean).join("; ");
 }
 
 function errorTypeForStatus(status) {

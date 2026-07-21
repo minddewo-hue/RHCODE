@@ -581,6 +581,23 @@ test("supports core desktop workflows at the minimum window size", async () => {
     mask: [page.locator(".project-picker small")],
   });
 
+  await modelSelect.selectOption("provider-2/gemma-4-31b-it-uncensored-bf16");
+  await failNextTurn(electronApp);
+  await taskPrompt.fill("Recover this prompt with another model");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+  const failedCall = (await ipcCalls(electronApp, "agent:turn:start")).at(-1);
+  await modelSelect.selectOption("ui/model");
+  await expect(page.getByText("Start a new task", { exact: true })).toBeVisible();
+  await expect(taskPrompt).toHaveValue("Recover this prompt with another model");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect.poll(() => ipcCalls(electronApp, "agent:turn:start").then((calls) => {
+    const latest = calls.at(-1)?.args[0] as { threadId?: string; model?: string } | undefined;
+    const failed = failedCall?.args[0] as { threadId?: string } | undefined;
+    return { model: latest?.model, changedThread: latest?.threadId !== failed?.threadId };
+  })).toEqual({ model: "ui/model", changedThread: true });
+  await page.locator(".send-button.stop").click();
+
   await getThreadRow(page, "Run deterministic verification").click();
   const previousProjectMessage = page.getByText(
     "I will inspect the project structure, trace the main workflows, and report concrete findings.",
@@ -867,6 +884,13 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
           displayName: "UI second model",
           description: "Second model for selector coverage",
           defaultReasoningEffort: "low",
+        },
+        {
+          id: "ui-gemma-model",
+          model: "provider-2/gemma-4-31b-it-uncensored-bf16",
+          displayName: "FakerModel - gemma-4-31b-it-uncensored-bf16",
+          description: "Targeted Gemma recovery model",
+          defaultReasoningEffort: "none",
         },
       ],
     }));

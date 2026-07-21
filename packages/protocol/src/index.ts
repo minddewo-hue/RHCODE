@@ -195,6 +195,8 @@ export const remoteModelOptionSchema = z.object({
   id: z.string().min(1).max(500),
   model: z.string().min(1).max(500),
   displayName: z.string().min(1).max(500),
+  source: z.string().min(1).max(500).optional(),
+  sourceModelName: z.string().min(1).max(500).optional(),
   description: z.string().max(10_000),
   defaultReasoningEffort: z.string().max(500),
   reasoningEfforts: z.array(remoteReasoningEffortSchema).max(20).optional(),

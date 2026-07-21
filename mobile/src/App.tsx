@@ -893,7 +893,6 @@ function AppContent() {
         approvalOperations={control.approvalOperations}
         approvals={control.snapshot.approvals}
         canApprove={canApprove}
-        canCreateThread={canWrite}
         canWrite={canWrite && !selectedIsArchived}
         connectionNotice={control.notice}
         connectionStatus={control.status}
@@ -905,7 +904,6 @@ function AppContent() {
         onAttach={(source) => void chooseAttachments(source)}
         onDraftChange={setDraft}
         onInterrupt={() => void interruptTurn()}
-        onNewThread={openNewThread}
         onNoticePress={() => {
           if (control.status === "needs_configuration") {
             setEditingConnectionId(session?.id || null);
@@ -975,6 +973,7 @@ function AppContent() {
           }
         }}
         onOpenProjects={openProjectPicker}
+        onNewThread={openNewThread}
         onPageChange={changeDrawerPage}
         onKeyChange={setDraftKey}
         onSaveConnection={() => void saveConnection()}

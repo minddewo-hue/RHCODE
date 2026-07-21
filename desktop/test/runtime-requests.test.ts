@@ -550,8 +550,36 @@ test("executes remote commands through desktop authority with safe defaults", as
     requests.push({ method, params: params as Record<string, unknown> });
     if (method === "thread/start") return { thread: { id: "thread-remote" } } as never;
     if (method === "turn/start") return { turn: { id: "turn-remote" } } as never;
+    if (method === "model/list") return {
+      data: [{
+        id: "sub2api/gpt-test",
+        model: "sub2api/gpt-test",
+        displayName: "Codex - GPT Test",
+        description: "Test model",
+        defaultReasoningEffort: "high",
+      }],
+    } as never;
     return {} as never;
   };
+  runtime.gateway.getStatus = () => ({
+    state: "running",
+    transport: "internal",
+    providerCount: 1,
+    modelCount: 1,
+    configSource: "test",
+    providers: [],
+    models: [{
+      id: "sub2api/gpt-test",
+      ownedBy: "sub2api",
+      capabilities: {},
+      providerId: "sub2api",
+      upstreamModel: "gpt-test",
+      protocol: "responses",
+      contextWindow: null,
+      runtimeInstructions: null,
+    }],
+    error: null,
+  });
   const commands = runtime.remoteCommandHandlers();
   const context = {
     client: {
@@ -578,7 +606,18 @@ test("executes remote commands through desktop authority with safe defaults", as
   internals.activeTurns.set("thread-remote", "turn-remote");
   const interrupted = await commands.interruptTurn("thread-remote", context);
   assert.equal(interrupted.threadId, "thread-remote");
-  assert.deepEqual(await commands.listModels?.(context), { models: [] });
+  assert.deepEqual(await commands.listModels?.(context), {
+    models: [{
+      id: "sub2api/gpt-test",
+      model: "sub2api/gpt-test",
+      displayName: "Codex - GPT Test",
+      source: "Sub2API",
+      sourceModelName: "gpt-test",
+      description: "Test model",
+      defaultReasoningEffort: "high",
+      reasoningEfforts: ["high"],
+    }],
+  });
 
   assert.deepEqual(requests[0], {
     method: "thread/start",

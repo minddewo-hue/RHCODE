@@ -230,6 +230,8 @@ test("loads the model catalog from the selected desktop", async () => {
           id: "model-test",
           model: "sub2api/gpt-test",
           displayName: "GPT Test",
+          source: "Sub2API",
+          sourceModelName: "gpt-test",
           description: "Test model",
           defaultReasoningEffort: "medium",
           reasoningEfforts: ["low", "medium", "high", "xhigh"],
@@ -241,6 +243,8 @@ test("loads the model catalog from the selected desktop", async () => {
 
   const model = (await client.listModels()).models[0];
   assert.equal(model?.displayName, "GPT Test");
+  assert.equal(model?.source, "Sub2API");
+  assert.equal(model?.sourceModelName, "gpt-test");
   assert.deepEqual(model?.reasoningEfforts, ["low", "medium", "high", "xhigh"]);
   assert.equal(requestedUrl, "http://192.168.1.20:8790/v1/commands/models");
 });

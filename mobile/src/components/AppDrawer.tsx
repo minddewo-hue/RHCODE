@@ -53,6 +53,7 @@ interface AppDrawerProps {
   onClose: () => void;
   onPageChange: (page: DrawerPage) => void;
   onOpenProjects: () => void;
+  onNewThread: () => void;
   onSelectThread: (thread: ThreadSummary) => void;
   onThreadActions: (thread: ThreadSummary, archived: boolean) => void;
   onSearchChange: (value: string) => void;
@@ -206,7 +207,25 @@ function ThreadList(props: AppDrawerProps) {
       )}
 
       <ScrollView style={styles.threadScroll} contentContainerStyle={styles.threadList} keyboardShouldPersistTaps="handled">
-        <Text style={styles.sectionLabel}>{searching ? "搜索结果" : "对话"}</Text>
+        <View style={styles.threadSectionHeader}>
+          <Text style={[styles.sectionLabel, styles.threadSectionLabel]}>{searching ? "搜索结果" : "对话"}</Text>
+          {!searching && (
+            <Pressable
+              accessibilityLabel="新建对话"
+              accessibilityRole="button"
+              disabled={!props.canManageThreads || props.connectionStatus !== "online"}
+              hitSlop={8}
+              onPress={props.onNewThread}
+              style={({ pressed }) => [
+                styles.newThreadButton,
+                (!props.canManageThreads || props.connectionStatus !== "online") && styles.disabled,
+                pressed && styles.morePressed,
+              ]}
+            >
+              <Ionicons color={colors.ink} name="add" size={20} />
+            </Pressable>
+          )}
+        </View>
         {filtered.length === 0 ? (
           <Text style={styles.emptyLabel}>{searching && props.search ? "没有匹配的对话" : "还没有对话"}</Text>
         ) : filtered.map((thread) => (
@@ -744,6 +763,9 @@ const styles = StyleSheet.create({
   threadScroll: { flex: 1 },
   threadList: { paddingHorizontal: 8, paddingTop: 17, paddingBottom: 18 },
   sectionLabel: { color: colors.inkMuted, fontSize: 11, lineHeight: 15, fontWeight: "600", letterSpacing: 0, marginHorizontal: 8, marginBottom: 7, textTransform: "uppercase" },
+  threadSectionHeader: { height: 30, marginHorizontal: 8, marginBottom: 3, flexDirection: "row", alignItems: "center" },
+  threadSectionLabel: { flex: 1, minWidth: 0, marginHorizontal: 0, marginBottom: 0 },
+  newThreadButton: { width: 30, height: 30, borderRadius: 6, alignItems: "center", justifyContent: "center" },
   emptyLabel: { color: colors.inkMuted, fontSize: 13, lineHeight: 19, paddingHorizontal: 8, paddingVertical: 12, letterSpacing: 0 },
   threadRow: { minHeight: 56, borderRadius: 7, paddingLeft: 10, paddingRight: 5, paddingVertical: 8, flexDirection: "row", alignItems: "center" },
   threadRowCurrent: { backgroundColor: "#e3e3df" },

@@ -1026,11 +1026,22 @@ export class DesktopRuntime extends EventEmitter {
       const response = await this.listModels<{ data?: Array<RemoteModelListResult["models"][number] & {
         supportedReasoningEfforts?: Array<{ reasoningEffort?: string }>;
       }> }>();
+      const gatewayModels = new Map(this.gateway.getStatus().models.flatMap((model) => [
+        [model.id, model] as const,
+        [model.upstreamModel, model] as const,
+      ]));
       return {
-        models: (response.data || []).map((model) => ({
-          ...model,
-          reasoningEfforts: supportedReasoningEfforts(model),
-        })),
+        models: (response.data || []).map((model) => {
+          const gatewayModel = gatewayModels.get(model.model) || gatewayModels.get(model.id);
+          return {
+            ...model,
+            ...(gatewayModel ? {
+              source: gatewayModelSourceName(gatewayModel),
+              sourceModelName: gatewayModel.upstreamModel,
+            } : {}),
+            reasoningEfforts: supportedReasoningEfforts(model),
+          };
+        }),
       };
     } catch {
       throw new ControlCommandError("unavailable");
@@ -1283,6 +1294,13 @@ export class DesktopRuntime extends EventEmitter {
 }
 
 const reasoningEffortValues = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+
+function gatewayModelSourceName(model: { ownedBy: string; providerId: string }): string {
+  const ownedBy = model.ownedBy.trim();
+  if (ownedBy && ownedBy.toLocaleLowerCase() !== model.providerId.toLocaleLowerCase()) return ownedBy;
+  if (model.providerId === "sub2api") return "Sub2API";
+  return ownedBy || model.providerId;
+}
 
 function supportedReasoningEfforts(model: {
   defaultReasoningEffort: string;

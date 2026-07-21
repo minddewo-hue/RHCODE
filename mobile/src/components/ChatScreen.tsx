@@ -1,4 +1,4 @@
-import { Feather, Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { Feather, Ionicons } from "@expo/vector-icons";
 import type {
   ApprovalRequest,
   ThreadSummary,
@@ -52,7 +52,6 @@ interface ChatScreenProps {
   connectionNotice: string | null;
   refreshing: boolean;
   canWrite: boolean;
-  canCreateThread: boolean;
   canApprove: boolean;
   newThreadDraft: boolean;
   draft: string;
@@ -63,7 +62,6 @@ interface ChatScreenProps {
   approvalOperations: Record<string, ApprovalOperation>;
   onOpenDrawer: () => void;
   onOpenModelPicker: () => void;
-  onNewThread: () => void;
   onApprovalPolicyChange: (value: RemoteApprovalPolicy) => void;
   onReasoningEffortChange: (value: RemoteReasoningEffort) => void;
   onSandboxModeChange: (value: RemoteSandboxMode) => void;
@@ -170,20 +168,6 @@ export function ChatScreen(props: ChatScreenProps) {
             running={threadRunning}
             onPress={() => selectPage("activity")}
           />
-          <Pressable
-            accessibilityLabel={props.selectedModelLabel ? `切换模型，当前 ${props.selectedModelLabel}` : "切换模型"}
-            accessibilityRole="button"
-            disabled={!props.modelPickerEnabled}
-            hitSlop={8}
-            onPress={props.onOpenModelPicker}
-            style={({ pressed }) => [
-              styles.iconButton,
-              !props.modelPickerEnabled && styles.iconDisabled,
-              pressed && props.modelPickerEnabled && styles.iconPressed,
-            ]}
-          >
-            <MaterialCommunityIcons color={colors.ink} name="robot-outline" size={22} />
-          </Pressable>
           <IconButton
             accessibilityLabel="打开任务菜单"
             icon="ellipsis-horizontal"
@@ -194,15 +178,16 @@ export function ChatScreen(props: ChatScreenProps) {
 
       <TaskMenu
         approvalPolicy={props.approvalPolicy}
-        canCreateThread={props.canCreateThread && props.connectionStatus === "online"}
+        modelPickerEnabled={props.modelPickerEnabled}
         onApprovalPolicyChange={props.onApprovalPolicyChange}
         onClose={() => setTaskMenuVisible(false)}
-        onNewThread={props.onNewThread}
+        onOpenModelPicker={props.onOpenModelPicker}
         onReasoningEffortChange={props.onReasoningEffortChange}
         onSandboxModeChange={props.onSandboxModeChange}
         reasoningEffort={props.reasoningEffort}
         reasoningEfforts={props.reasoningEfforts}
         sandboxMode={props.sandboxMode}
+        selectedModelLabel={props.selectedModelLabel}
         visible={taskMenuVisible}
       />
 

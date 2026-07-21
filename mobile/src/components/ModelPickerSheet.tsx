@@ -1,16 +1,18 @@
 import { Feather, Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import type { RemoteModelOption } from "@rhzycode/protocol";
+import { useMemo } from "react";
 import {
   ActivityIndicator,
   Modal,
   Pressable,
-  ScrollView,
+  SectionList,
   StyleSheet,
   Text,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors } from "../ui/theme";
+import { groupRemoteModels } from "./model-picker-model";
 
 interface ModelPickerSheetProps {
   visible: boolean;
@@ -25,6 +27,7 @@ interface ModelPickerSheetProps {
 
 export function ModelPickerSheet(props: ModelPickerSheetProps) {
   const insets = useSafeAreaInsets();
+  const modelGroups = useMemo(() => groupRemoteModels(props.models), [props.models]);
   return (
     <Modal
       animationType="slide"
@@ -65,8 +68,10 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
               </Pressable>
             </View>
           ) : (
-            <ScrollView contentContainerStyle={styles.list}>
-              {props.models.map((model) => {
+            <SectionList
+              contentContainerStyle={styles.list}
+              keyExtractor={(model) => model.id}
+              renderItem={({ item: model }) => {
                 const selected = model.model === props.selectedModel;
                 return (
                   <Pressable
@@ -79,7 +84,7 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
                     <View style={styles.modelText}>
                       <View style={styles.modelTitleRow}>
                         <Text numberOfLines={1} style={[styles.modelName, selected && styles.modelNameSelected]}>
-                          {model.displayName}
+                          {model.sourceModelName}
                         </Text>
                         {model.isDefault && <Text style={styles.defaultLabel}>默认</Text>}
                       </View>
@@ -87,8 +92,21 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
                     {selected && <Feather color={colors.accent} name="check" size={18} />}
                   </Pressable>
                 );
-              })}
-            </ScrollView>
+              }}
+              renderSectionHeader={({ section }) => (
+                <View style={styles.groupHeader}>
+                  <Text numberOfLines={1} style={styles.groupTitle}>{section.source}</Text>
+                  <Text style={styles.groupCount}>{section.data.length}</Text>
+                </View>
+              )}
+              sections={modelGroups.map((group) => ({
+                key: group.key,
+                source: group.source,
+                data: group.models,
+              }))}
+              stickySectionHeadersEnabled
+              style={styles.modelList}
+            />
           )}
         </View>
       </View>
@@ -106,6 +124,10 @@ const styles = StyleSheet.create({
   title: { flex: 1, color: colors.ink, fontSize: 15, lineHeight: 20, fontWeight: "600", letterSpacing: 0 },
   closeButton: { width: 38, height: 38, borderRadius: 6, alignItems: "center", justifyContent: "center" },
   list: { paddingHorizontal: 12, paddingBottom: 8 },
+  modelList: { flexShrink: 1 },
+  groupHeader: { height: 34, paddingHorizontal: 10, flexDirection: "row", alignItems: "center", gap: 7, backgroundColor: colors.canvas, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  groupTitle: { flex: 1, minWidth: 0, color: colors.inkMuted, fontSize: 11, lineHeight: 15, fontWeight: "600", letterSpacing: 0 },
+  groupCount: { minWidth: 20, color: colors.inkFaint, fontSize: 10, lineHeight: 14, textAlign: "right", letterSpacing: 0 },
   row: { minHeight: 52, paddingHorizontal: 10, paddingVertical: 9, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, borderRadius: 6, flexDirection: "row", alignItems: "center" },
   rowSelected: { backgroundColor: colors.accentSoft },
   modelText: { flex: 1, minWidth: 0, marginRight: 10 },

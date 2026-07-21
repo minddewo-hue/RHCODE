@@ -147,7 +147,7 @@ GET /v1/snapshot
 | `POST` | `/v1/commands/threads/:id/unarchive` | 恢复 |
 | `DELETE` | `/v1/commands/threads/:id` | 永久删除 |
 
-所有写命令都必须携带唯一 `Idempotency-Key`。移动端只允许服务端协议声明的 sandbox 和 approval policy，不能请求 `danger-full-access` 或 `never`。
+所有写命令都必须携带唯一 `Idempotency-Key`。移动端支持与桌面端一致的 sandbox 和 approval policy，包括 `danger-full-access` 与 `never`；默认使用 `danger-full-access + never`。
 
 模型切换遵循桌面端相同行为：模型目录由当前电脑动态返回，选择结果用于新任务或下一轮 `turn/start`。任务处于运行中时不能切换；不同电脑分别使用各自的模型目录和当前选择。
 

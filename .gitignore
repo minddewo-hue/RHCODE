@@ -12,7 +12,6 @@ test-results/
 # Local credentials and generated gateway state
 *.env
 desktop/.env
-desktop/model-gateway/gateway.config.json
 desktop/model-gateway/.proxy.pid
 desktop/model-gateway/proxy.out.log
 desktop/model-gateway/proxy.err.log
@@ -24,6 +23,9 @@ desktop/release/
 appupdate/artifacts/
 mobile/releases/
 mobile/dist-*/
+mobile/android/.kotlin/
+mobile/*.png
+mobile/*.xml
 
 # Generated validation output and local end-to-end driver state
 /validation/

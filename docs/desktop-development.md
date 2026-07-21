@@ -346,7 +346,7 @@ new WebSocket(
 
 推荐重连顺序：携带 Bearer 获取快照，原子替换本地状态，记录 `snapshot.lastSequence`，再以 `after=lastSequence` 建立 WSS。收到事件后按 `sequence` 单调推进；事件重复时按 ID/upsert 语义处理，不能假定序号连续，因为非耐久事件在重启后不会回放。
 
-远程写命令的 `Idempotency-Key` 为 8-200 位字母、数字或 `._:-`。同一移动客户端和 key 的相同成功请求在 10 分钟内返回同一结果；不同请求复用 key 为 `409`；只读归档列表不要求该 header。远程缺省策略是 `read-only + on-request`，只允许 `read-only|workspace-write` 和 `on-request|untrusted`，不接受 `danger-full-access`、`never` 或附件。答案正文只在当前调用中交给 App Server；幂等缓存只保存 SHA-256 指纹和非敏感响应，事件/审计只含 request ID。活跃、待审批或待输入线程不能被远程归档或永久删除。
+远程写命令的 `Idempotency-Key` 为 8-200 位字母、数字或 `._:-`。同一移动客户端和 key 的相同成功请求在 10 分钟内返回同一结果；不同请求复用 key 为 `409`；只读归档列表不要求该 header。远程协议支持 `read-only|workspace-write|danger-full-access` 和 `on-request|untrusted|never`；手机版默认使用 `danger-full-access + never`。附件必须使用协议内的受限上传数据，不能提交手机本地路径。答案正文只在当前调用中交给 App Server；幂等缓存只保存 SHA-256 指纹和非敏感响应，事件/审计只含 request ID。活跃、待审批或待输入线程不能被远程归档或永久删除。
 
 HTTP 语义：无效或已更换 KEY 为 `401`；审批/线程/项目不存在为 `404`；状态或幂等冲突为 `409`；桌面 Agent 不可用为 `503`；请求结构错误为 `400`。重新生成 KEY 会立即以 `4001` 关闭现有 WSS，旧 KEY 的 HTTP 和重连返回 `401`。
 

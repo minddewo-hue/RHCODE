@@ -86,7 +86,6 @@ async function launch() {
       RHZYCODE_STARTUP_TRACE: "1",
       RHZYCODE_USER_DATA_DIR: dataDir,
       RHZYCODE_GATEWAY_HOME: "",
-      FAKER_API_KEY: "",
       SUB2API_API_KEY: "",
     },
     windowsHide: true,

@@ -53,8 +53,8 @@
 | `DELETE /v1/commands/threads/:threadId` | 空对象 | `200 { threadId, acceptedAt }` |
 
 - 写命令的 `Idempotency-Key` 为 8-200 位字母、数字或 `._:-`；同设备同 key 的相同请求在十分钟内返回同一结果，不重复执行，不同请求复用 key 返回 `409`。
-- 远程策略只允许 `approvalPolicy=on-request|untrusted` 和 `sandboxMode=read-only|workspace-write`；缺省为 `on-request + read-only`。
-- 不支持远程 `danger-full-access`、`never` 或附件路径；跨设备附件必须另行设计上传协议。
+- 远程策略允许 `approvalPolicy=on-request|untrusted|never` 和 `sandboxMode=read-only|workspace-write|danger-full-access`；手机版缺省为 `never + danger-full-access`。
+- 远程请求不接受附件路径；跨设备附件使用受大小限制的上传数据。
 - `projectPath` 必须来自桌面已知线程，未知项目返回 `404`。线程忙、无活跃 Turn 或 key 冲突返回 `409`，Agent 不可用返回 `503`。
 - 结构化答案只交给当前待处理 App Server RPC；答案值不进入事件、审计或持久化。归档列表实时查询 App Server 且不进入活动 snapshot。
 - 活跃、待审批或待输入线程不能远程归档或永久删除；删除不可恢复，成功审计只记录 thread ID。

@@ -1,28 +1,12 @@
 {
   "providers": {
-    "faker": {
-      "base_url": "https://faker-model.rhzy.ai/v1",
-      "protocol": "chat_completions",
-      "api_key_env": "FAKER_API_KEY"
-    },
     "sub2api": {
       "base_url": "https://model.rhzy.ai/v1",
       "protocol": "responses",
       "api_key_env": "SUB2API_API_KEY"
-    },
-    "local_vllm": {
-      "base_url": "http://127.0.0.1:8002/v1",
-      "protocol": "chat_completions",
-      "timeout_ms": 600000
     }
   },
   "models": {
-    "faker/kimi-for-coding": {
-      "provider": "faker",
-      "upstream_model": "kimi-for-coding",
-      "context_window": 131072,
-      "capabilities": {}
-    },
     "sub2api/gpt-codex": {
       "provider": "sub2api",
       "upstream_model": "gpt-5.5",
@@ -33,23 +17,12 @@
         "reasoning": true,
         "streaming": true
       }
-    },
-    "local/gemma": {
-      "provider": "local_vllm",
-      "upstream_model": "gemma-4-26b-a4b-it-uncensored",
-      "capabilities": {
-        "function_tools": true,
-        "parallel_tool_calls": false,
-        "image_input": false,
-        "reasoning": false,
-        "streaming": true
-      }
     }
   },
   "access": [
     {
       "api_key_env": "RHZY_GATEWAY_API_KEY",
-      "models": ["faker/*", "sub2api/*", "local/*"]
+      "models": ["sub2api/*"]
     }
   ],
   "upstream_timeout_ms": 600000,

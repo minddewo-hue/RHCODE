@@ -64,6 +64,7 @@ test("validates turn content, policies, and attachment metadata", () => {
     model: "faker/kimi-for-coding",
     approvalPolicy: "never",
     sandboxMode: "read-only",
+    reasoningEffort: "xhigh",
     attachments: [{ path: imagePath, name: "screen.png", kind: "image", size: 12 }],
   }), {
     threadId: "thread-1",
@@ -71,6 +72,7 @@ test("validates turn content, policies, and attachment metadata", () => {
     model: "faker/kimi-for-coding",
     approvalPolicy: "never",
     sandboxMode: "read-only",
+    reasoningEffort: "xhigh",
     attachments: [{ path: imagePath, name: "screen.png", kind: "image", size: 12 }],
   });
 
@@ -81,6 +83,10 @@ test("validates turn content, policies, and attachment metadata", () => {
   assert.throws(
     () => validateStartTurn({ threadId: "thread-1", text: "Inspect", model: " " }),
     /model must not be blank/,
+  );
+  assert.throws(
+    () => validateStartTurn({ threadId: "thread-1", text: "Inspect", reasoningEffort: "extreme" }),
+    /reasoningEffort is unsupported/,
   );
   assert.throws(
     () => validateStartTurn({

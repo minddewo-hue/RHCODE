@@ -1,4 +1,4 @@
-import type { ProjectDirectory, RemoteDirectoryBrowseResult, RemoteModelOption, RemoteTurnAttachment, ThreadSummary, UserInputAnswers } from "@rhzycode/protocol";
+import type { ProjectDirectory, RemoteApprovalPolicy, RemoteDirectoryBrowseResult, RemoteModelOption, RemoteReasoningEffort, RemoteSandboxMode, RemoteTurnAttachment, ThreadSummary, UserInputAnswers } from "@rhzycode/protocol";
 import Constants from "expo-constants";
 import * as Crypto from "expo-crypto";
 import * as DocumentPicker from "expo-document-picker";
@@ -20,7 +20,6 @@ import {
   ControlClient,
   ControlClientError,
   verifyControlAccess,
-  type ThreadStartInput,
 } from "./api/control-client";
 import {
   buildControlUrl,
@@ -52,6 +51,7 @@ const defaultControlPort = Number.isInteger(configuredControlPort) ? configuredC
 const currentAppVersion = Constants.expoConfig?.version || "0.0.0";
 const updateManifestUrl = process.env.EXPO_PUBLIC_UPDATE_URL
   || String(Constants.expoConfig?.extra?.updateManifestUrl || defaultUpdateManifestUrl);
+const reasoningEffortValues: RemoteReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 function isImageAttachment(name: string, mimeType?: string): boolean {
   if (mimeType?.toLowerCase().startsWith("image/")) return true;
@@ -91,6 +91,7 @@ function AppContent() {
   const [drawerSearch, setDrawerSearch] = useState("");
   const [selectedProjectPath, setSelectedProjectPath] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  const [newThreadDraft, setNewThreadDraft] = useState(false);
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<RemoteTurnAttachment[]>([]);
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
@@ -103,6 +104,9 @@ function AppContent() {
   const [projectDirectories, setProjectDirectories] = useState<ProjectDirectory[]>([]);
   const [models, setModels] = useState<RemoteModelOption[]>([]);
   const [selectedModel, setSelectedModel] = useState("");
+  const [approvalPolicy, setApprovalPolicy] = useState<RemoteApprovalPolicy>("never");
+  const [sandboxMode, setSandboxMode] = useState<RemoteSandboxMode>("danger-full-access");
+  const [reasoningEffort, setReasoningEffort] = useState<RemoteReasoningEffort>("high");
   const [modelPickerVisible, setModelPickerVisible] = useState(false);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
@@ -247,6 +251,7 @@ function AppContent() {
 
   useEffect(() => {
     setSelectedThreadId(null);
+    setNewThreadDraft(false);
     setSelectedProjectPath(null);
     setProjectDirectories([]);
     setModels([]);
@@ -302,14 +307,14 @@ function AppContent() {
   }, [control.status, loadModels, loadProjects]);
 
   useEffect(() => {
-    if (selectedThreadId || !control.snapshot.threads.length) return;
+    if (selectedThreadId || newThreadDraft || !control.snapshot.threads.length) return;
     const preferred = [...control.snapshot.threads].sort((left, right) => {
       const activeDifference = Number(isActive(right)) - Number(isActive(left));
       return activeDifference || right.updatedAt.localeCompare(left.updatedAt);
     })[0];
     if (preferred) setSelectedThreadId(preferred.id);
     if (preferred) setSelectedProjectPath(preferred.projectPath);
-  }, [control.snapshot.threads, selectedThreadId]);
+  }, [control.snapshot.threads, newThreadDraft, selectedThreadId]);
 
   const modelCatalogKey = useMemo(() => models.map((model) => model.model).join("\n"), [models]);
 
@@ -352,6 +357,18 @@ function AppContent() {
     () => models.find((model) => model.model === selectedModel) || null,
     [models, selectedModel],
   );
+  const reasoningEfforts = useMemo(() => {
+    const declared = selectedModelOption?.reasoningEfforts || [];
+    if (declared.length) return declared;
+    const fallback = selectedModelOption?.defaultReasoningEffort;
+    return reasoningEffortValues.includes(fallback as RemoteReasoningEffort)
+      ? [fallback as RemoteReasoningEffort]
+      : ["high" as const];
+  }, [selectedModelOption]);
+
+  useEffect(() => {
+    setReasoningEffort((current) => reasoningEfforts.includes(current) ? current : reasoningEfforts[0] || "high");
+  }, [reasoningEfforts]);
 
   const openProjectDirectory = useCallback(async (projectPath: string, create = false): Promise<string | null> => {
     if (!taskClient || newThreadBusy) return null;
@@ -396,32 +413,14 @@ function AppContent() {
     }
   }, [rejectCredentials, session, taskClient]);
 
-  const createThread = useCallback(async (input: ThreadStartInput) => {
-    if (!taskClient || newThreadBusy) return;
-    setNewThreadBusy(true);
-    setNewThreadError(null);
-    try {
-      const request = selectedModel ? { ...input, model: selectedModel } : input;
-      const result = await taskClient.startThread(request);
-      setSelectedThreadId(result.threadId);
-      setSelectedProjectPath(request.projectPath);
-      setDraft("");
-      setProjectPickerVisible(false);
-      await control.refresh();
-    } catch (error) {
-      if (error instanceof ControlClientError && error.code === "not_found") {
-        setNewThreadError("电脑上不存在该工程目录，请重新选择目录。");
-        setProjectPickerVisible(true);
-      } else if (error instanceof ControlClientError && error.code === "invalid_request") {
-        setNewThreadError("请选择电脑上的绝对工程目录路径。");
-        setProjectPickerVisible(true);
-      } else {
-        Alert.alert("无法创建对话", describeControlError(error));
-      }
-    } finally {
-      setNewThreadBusy(false);
-    }
-  }, [control, newThreadBusy, selectedModel, taskClient]);
+  const createThreadDraft = useCallback((projectPath: string) => {
+    setSelectedThreadId(null);
+    setSelectedProjectPath(projectPath);
+    setNewThreadDraft(true);
+    setDraft("");
+    setAttachments([]);
+    setProjectPickerVisible(false);
+  }, []);
 
   const openNewThread = useCallback(() => {
     setDrawerVisible(false);
@@ -442,16 +441,16 @@ function AppContent() {
     }
     const projectPath = selectedProjectPath || selectedThread?.projectPath || recentProjects[0];
     if (!projectPath) {
+      setSelectedThreadId(null);
+      setNewThreadDraft(true);
+      setDraft("");
+      setAttachments([]);
       void loadProjects();
       setProjectPickerVisible(true);
       return;
     }
-    void createThread({
-      projectPath,
-      sandboxMode: "workspace-write",
-      approvalPolicy: "on-request",
-    });
-  }, [canWrite, createThread, loadProjects, recentProjects, selectedProjectPath, selectedThread?.projectPath, session]);
+    createThreadDraft(projectPath);
+  }, [canWrite, createThreadDraft, loadProjects, recentProjects, selectedProjectPath, selectedThread?.projectPath, session]);
 
   const openProjectPicker = useCallback(() => {
     setNewThreadError(null);
@@ -462,48 +461,76 @@ function AppContent() {
 
   const sendMessage = useCallback(async () => {
     const content = draft.trim();
-    if (!taskClient || !selectedThreadId || (!content && !attachments.length) || sending || selectedIsArchived) return;
+    if (
+      !taskClient
+      || (!selectedThreadId && (!newThreadDraft || !selectedProjectPath))
+      || (!content && !attachments.length)
+      || sending
+      || selectedIsArchived
+    ) return;
     const submittedAttachments = attachments;
     const submittedText = content || "Review the attached files.";
     const id = Crypto.randomUUID();
-    const pending: PendingMessage = {
-      id,
-      threadId: selectedThreadId,
-      content: submittedText,
-      createdAt: new Date().toISOString(),
-      state: "sending",
-      images: submittedAttachments
-        .filter((attachment) => attachment.kind === "image")
-        .map((attachment) => ({
-          name: attachment.name,
-          uri: `data:${imageMimeType(attachment.name)};base64,${attachment.dataBase64}`,
-        })),
-    };
-    setPendingMessages((current) => [...current, pending]);
-    setDraft("");
-    setAttachments([]);
+    let targetThreadId = selectedThreadId;
+    let pendingAdded = false;
     setSending(true);
     try {
-      await taskClient.startTurn(selectedThreadId, {
+      if (!targetThreadId) {
+        const result = await taskClient.startThread({
+          projectPath: selectedProjectPath!,
+          ...(selectedModel ? { model: selectedModel } : {}),
+          approvalPolicy,
+          sandboxMode,
+        });
+        targetThreadId = result.threadId;
+        setSelectedThreadId(targetThreadId);
+        setNewThreadDraft(false);
+      }
+
+      const pending: PendingMessage = {
+        id,
+        threadId: targetThreadId,
+        content: submittedText,
+        createdAt: new Date().toISOString(),
+        state: "sending",
+        images: submittedAttachments
+          .filter((attachment) => attachment.kind === "image")
+          .map((attachment) => ({
+            name: attachment.name,
+            uri: `data:${imageMimeType(attachment.name)};base64,${attachment.dataBase64}`,
+          })),
+      };
+      pendingAdded = true;
+      setPendingMessages((current) => [...current, pending]);
+      setDraft("");
+      setAttachments([]);
+      await taskClient.startTurn(targetThreadId, {
         text: submittedText,
         attachments: submittedAttachments,
         ...(selectedModel ? { model: selectedModel } : {}),
+        approvalPolicy,
+        sandboxMode,
+        reasoningEffort,
       });
       setPendingMessages((current) => current.map((message) => (
         message.id === id ? { ...message, state: "sent" } : message
       )));
       await control.refresh();
     } catch (error) {
-      setPendingMessages((current) => current.map((message) => (
-        message.id === id ? { ...message, state: "failed" } : message
-      )));
+      if (pendingAdded) {
+        setPendingMessages((current) => current.map((message) => (
+          message.id === id ? { ...message, state: "failed" } : message
+        )));
+      } else {
+        Alert.alert("无法创建对话", describeControlError(error));
+      }
       setDraft((current) => current || content);
       setAttachments((current) => current.length ? current : submittedAttachments);
       if (isUnauthorized(error) && session) rejectCredentials(session.id);
     } finally {
       setSending(false);
     }
-  }, [attachments, control, draft, rejectCredentials, selectedIsArchived, selectedModel, selectedThreadId, sending, session, taskClient]);
+  }, [approvalPolicy, attachments, control, draft, newThreadDraft, reasoningEffort, rejectCredentials, sandboxMode, selectedIsArchived, selectedModel, selectedProjectPath, selectedThreadId, sending, session, taskClient]);
 
   const chooseAttachments = useCallback(async () => {
     try {
@@ -584,6 +611,7 @@ function AppContent() {
 
   const selectThread = useCallback((thread: ThreadSummary) => {
     setSelectedThreadId(thread.id);
+    setNewThreadDraft(false);
     setSelectedProjectPath(thread.projectPath);
     setDraft("");
     setDrawerVisible(false);
@@ -753,10 +781,12 @@ function AppContent() {
     <SafeAreaFrame>
       <StatusBar style="dark" />
       <ChatScreen
+        approvalPolicy={approvalPolicy}
         attachments={attachments}
         approvalOperations={control.approvalOperations}
         approvals={control.snapshot.approvals}
         canApprove={canApprove}
+        canCreateThread={canWrite}
         canWrite={canWrite && !selectedIsArchived}
         connectionNotice={control.notice}
         connectionStatus={control.status}
@@ -764,6 +794,7 @@ function AppContent() {
         inputBusyId={inputBusyId}
         interrupting={interrupting}
         onApproval={(id, decision) => void control.resolveApproval(id, decision)}
+        onApprovalPolicyChange={setApprovalPolicy}
         onAttach={() => void chooseAttachments()}
         onDraftChange={setDraft}
         onInterrupt={() => void interruptTurn()}
@@ -789,10 +820,16 @@ function AppContent() {
         onRefresh={() => void control.refresh()}
         onSend={() => void sendMessage()}
         onRemoveAttachment={(index) => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+        onReasoningEffortChange={setReasoningEffort}
+        onSandboxModeChange={setSandboxMode}
         onSubmitInput={(id, answers) => void submitUserInput(id, answers)}
         pendingMessages={pendingMessages}
         modelPickerEnabled={Boolean(taskClient && control.status === "online")}
+        newThreadDraft={newThreadDraft && Boolean(selectedProjectPath)}
         refreshing={control.refreshing}
+        reasoningEffort={reasoningEffort}
+        reasoningEfforts={reasoningEfforts}
+        sandboxMode={sandboxMode}
         selectedModelLabel={selectedModelOption?.displayName || null}
         selectedThreadId={selectedThreadId}
         sending={sending}

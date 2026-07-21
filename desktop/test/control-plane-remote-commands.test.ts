@@ -93,17 +93,17 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
   const taskToken = mobileAccess.rotateAccessKey().key;
   const controlPlane = await createControlPlane({ logLevel: "silent", mobileAccess, commands });
 
-  const unsafe = await controlPlane.app.inject({
+  const invalidPolicy = await controlPlane.app.inject({
     method: "POST",
     url: "/v1/commands/threads/start",
     headers: { authorization: `Bearer ${taskToken}` },
     payload: {
       projectPath: "D:\\work",
-      sandboxMode: "danger-full-access",
-      approvalPolicy: "never",
+      sandboxMode: "unsupported",
+      approvalPolicy: "unsupported",
     },
   });
-  assert.equal(unsafe.statusCode, 400);
+  assert.equal(invalidPolicy.statusCode, 400);
   assert.equal(calls.length, 0);
 
   const projects = await controlPlane.app.inject({
@@ -149,7 +149,12 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
       authorization: `Bearer ${taskToken}`,
       "idempotency-key": "thread-start-0001",
     },
-    payload: { projectPath: "D:\\work", model: "sub2api/gpt-test" },
+    payload: {
+      projectPath: "D:\\work",
+      model: "sub2api/gpt-test",
+      sandboxMode: "danger-full-access",
+      approvalPolicy: "never",
+    },
   });
   assert.equal(startedThread.statusCode, 201);
   assert.equal(startedThread.json().threadId, "thread-remote");
@@ -162,7 +167,12 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
       authorization: `Bearer ${taskToken}`,
       "idempotency-key": "thread-start-0001",
     },
-    payload: { projectPath: "D:\\work", model: "sub2api/gpt-test" },
+    payload: {
+      projectPath: "D:\\work",
+      model: "sub2api/gpt-test",
+      sandboxMode: "danger-full-access",
+      approvalPolicy: "never",
+    },
   });
   assert.equal(replayedThread.statusCode, 201);
   assert.deepEqual(replayedThread.json(), startedThread.json());

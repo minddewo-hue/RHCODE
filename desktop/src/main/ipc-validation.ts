@@ -3,6 +3,7 @@ import type { UserInputAnswers } from "@rhzycode/protocol";
 import type {
   ApprovalPolicy,
   ComposerAttachment,
+  ReasoningEffort,
   SandboxMode,
   StartThreadParams,
   StartTurnParams,
@@ -17,6 +18,9 @@ const SANDBOX_MODES = new Set<SandboxMode>([
   "read-only",
   "workspace-write",
   "danger-full-access",
+]);
+const REASONING_EFFORTS = new Set<ReasoningEffort>([
+  "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ]);
 const ATTACHMENT_KINDS = new Set<ComposerAttachment["kind"]>(["file", "image"]);
 const RESERVED_ANSWER_KEYS = new Set(["__proto__", "constructor", "prototype"]);
@@ -82,7 +86,7 @@ export function validateStartTurn(value: unknown): StartTurnParams {
   const input = requireObject(value, "turn start request");
   assertOnlyKeys(
     input,
-    ["threadId", "text", "model", "approvalPolicy", "sandboxMode", "attachments"],
+    ["threadId", "text", "model", "approvalPolicy", "sandboxMode", "reasoningEffort", "attachments"],
     "turn start request",
   );
   const text = requireString(input.text, "text", 1_000_000, true);
@@ -104,6 +108,9 @@ export function validateStartTurn(value: unknown): StartTurnParams {
     ...(input.sandboxMode === undefined
       ? {}
       : { sandboxMode: requireSandboxMode(input.sandboxMode) }),
+    ...(input.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: requireReasoningEffort(input.reasoningEffort) }),
     ...(attachments === undefined ? {} : { attachments }),
   };
 }
@@ -289,6 +296,13 @@ function requireSandboxMode(value: unknown): SandboxMode {
     invalid("sandboxMode", "is unsupported");
   }
   return value as SandboxMode;
+}
+
+function requireReasoningEffort(value: unknown): ReasoningEffort {
+  if (typeof value !== "string" || !REASONING_EFFORTS.has(value as ReasoningEffort)) {
+    invalid("reasoningEffort", "is unsupported");
+  }
+  return value as ReasoningEffort;
 }
 
 function invalid(field: string, reason: string): never {

@@ -1,6 +1,7 @@
 import {
   Activity,
   Bot,
+  Brain,
   Check,
   ChevronDown,
   CircleStop,
@@ -38,7 +39,6 @@ import type {
   ConversationMessage,
   ThreadDetail,
   ThreadSummary,
-  TimelineItem,
   UserInputAnswers,
   UserInputRequest,
 } from "@rhzycode/protocol";
@@ -51,23 +51,43 @@ import type {
   ModelOption,
   MobileAccessStatus,
   PersistenceStatus,
+  ReasoningEffort,
   RpcNotification,
   SandboxMode,
   SyncStatus,
   UpdateStatus,
 } from "../../shared/desktop-api";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  activityFromTimeline,
+  activityLabel,
+  approvalKindLabel,
+  basename,
+  credentialSourceLabel,
+  describeItem,
+  formatFileChanges,
+  formatFileSize,
+  getErrorMessage,
+  isActiveThreadStatus,
+  modelReasoningEfforts,
+  notificationThreadId,
+  providerCredentialPresentation,
+  storedApprovalPolicy,
+  storedLastProject,
+  storedLastThread,
+  storedRecentProjects,
+  storedReasoningEffort,
+  storedSandboxMode,
+  storedSelectedModel,
+  storeLastThread,
+  summarizePrompt,
+  updateStateLabel,
+  type ActivityEntry,
+} from "./app-utils";
 
 interface ChatMessage extends ConversationMessage {
   streaming?: boolean;
   images?: Array<{ path: string; name: string }>;
-}
-
-interface ActivityEntry {
-  id: string;
-  label: string;
-  detail: string;
-  state: "running" | "done" | "error";
 }
 
 const emptyGateway: GatewayStatus = {
@@ -147,6 +167,7 @@ export function App() {
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [approvalPolicy, setApprovalPolicy] = useState<ApprovalPolicy>(() => storedApprovalPolicy());
   const [sandboxMode, setSandboxMode] = useState<SandboxMode>(() => storedSandboxMode());
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(() => storedReasoningEffort());
   const [failedPrompt, setFailedPrompt] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [activeThreadIds, setActiveThreadIds] = useState<Set<string>>(() => new Set());
@@ -273,6 +294,15 @@ export function App() {
     () => models.find((model) => model.model === selectedModel),
     [models, selectedModel],
   );
+  const reasoningEfforts = useMemo(() => modelReasoningEfforts(activeModel), [activeModel]);
+
+  useEffect(() => {
+    const next = reasoningEfforts.includes(reasoningEffort)
+      ? reasoningEffort
+      : reasoningEfforts[0] || "high";
+    if (next !== reasoningEffort) setReasoningEffort(next);
+    localStorage.setItem("rhzycode.reasoningEffort", next);
+  }, [reasoningEffort, reasoningEfforts]);
 
   const hasActiveTurns = activeThreadIds.size > 0;
 
@@ -686,6 +716,7 @@ export function App() {
         ...(selectedModel ? { model: selectedModel } : {}),
         approvalPolicy,
         sandboxMode,
+        reasoningEffort,
         attachments: selectedAttachments,
       });
     } catch (error) {
@@ -1266,6 +1297,24 @@ export function App() {
                     <option value="never">Never ask</option>
                   </select>
                 </label>
+                <label className="approval-mode" title="Reasoning effort">
+                  <Brain size={14} />
+                  <select
+                    aria-label="Reasoning effort"
+                    value={reasoningEffort}
+                    onChange={(event) => {
+                      const next = event.target.value as ReasoningEffort;
+                      setReasoningEffort(next);
+                      localStorage.setItem("rhzycode.reasoningEffort", next);
+                    }}
+                  >
+                    {reasoningEfforts.map((effort) => (
+                      <option key={effort} value={effort}>
+                        {effort === "xhigh" ? "XHigh" : effort.charAt(0).toUpperCase() + effort.slice(1)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 {failedPrompt && !running && (
                   <button className="retry-turn" title="Retry last turn" onClick={() => void sendTurn(failedPrompt)}>
                     <RotateCcw size={14} /> Retry
@@ -1782,168 +1831,4 @@ function ConnectionField({
       </div>
     </div>
   );
-}
-
-function basename(path: string): string {
-  return path.split(/[\\/]/).filter(Boolean).at(-1) || path;
-}
-
-function credentialSourceLabel(source: CredentialStatus["providers"][number]["source"]): string {
-  if (source === "secure_store") return "Encrypted on this device";
-  if (source === "environment") return "Environment or .env";
-  return "Not configured";
-}
-
-function providerCredentialPresentation(providerId: string): { label: string; domain: string; prefix: string } {
-  if (providerId === "faker") {
-    return { label: "Faker Model API key", domain: "faker-model.rhzy.ai", prefix: "fm_" };
-  }
-  if (providerId === "sub2api") {
-    return { label: "Sub2API API key", domain: "model.rhzy.ai", prefix: "sk-" };
-  }
-  return { label: `${providerId} API key`, domain: providerId, prefix: "provider" };
-}
-
-function updateStateLabel(status: UpdateStatus): string {
-  if (!status.enabled) return "No signed update channel configured";
-  if (status.state === "checking") return "Checking";
-  if (status.state === "available") return `${status.version || "Update"} available`;
-  if (status.state === "not_available") return "Up to date";
-  if (status.state === "downloading") return `Downloading ${Math.round(status.percent || 0)}%`;
-  if (status.state === "downloaded") return `${status.version || "Update"} ready`;
-  if (status.state === "error") return "Update check failed";
-  return "Ready";
-}
-
-function activityLabel(type: string): string {
-  if (/command|exec/i.test(type)) return "Command";
-  if (/file|patch/i.test(type)) return "File change";
-  if (/reason/i.test(type)) return "Analysis";
-  return "Agent activity";
-}
-
-function describeItem(item: Record<string, unknown>): string {
-  if (Array.isArray(item.changes)) return formatFileChanges(item.changes);
-  if (item.type === "commandExecution") {
-    return [item.command, item.aggregatedOutput].filter(Boolean).join("\n");
-  }
-  if (item.type === "reasoning") {
-    const summary = Array.isArray(item.summary) ? item.summary.map(String) : [];
-    const content = Array.isArray(item.content) ? item.content.map(String) : [];
-    return [...summary, ...content].join("\n") || "Analysis";
-  }
-  return String(item.command || item.path || item.text || item.type || "Working");
-}
-
-function formatFileChanges(value: unknown): string {
-  if (!Array.isArray(value) || value.length === 0) return "Waiting for diff";
-  return value
-    .map((rawChange) => {
-      const change = (rawChange || {}) as Record<string, unknown>;
-      return [[change.kind, change.path].filter(Boolean).join(" "), change.diff]
-        .flat()
-        .filter(Boolean)
-        .join("\n");
-    })
-    .filter(Boolean)
-    .join("\n\n")
-    .slice(0, 12_000);
-}
-
-function activityFromTimeline(item: TimelineItem): ActivityEntry {
-  return {
-    id: item.id,
-    label: item.title,
-    detail: item.content,
-    state: item.status === "failed" ? "error" : item.status === "completed" ? "done" : "running",
-  };
-}
-
-function approvalKindLabel(kind: ApprovalRequest["kind"]): string {
-  if (kind === "file_change") return "File change";
-  if (kind === "permission") return "Permission";
-  if (kind === "external_tool") return "External tool";
-  return "Command";
-}
-
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function storedApprovalPolicy(): ApprovalPolicy {
-  const stored = localStorage.getItem("rhzycode.approvalPolicy");
-  return stored === "untrusted" || stored === "never" ? stored : "on-request";
-}
-
-function storedSelectedModel(): string {
-  return localStorage.getItem("rhzycode.selectedModel") || "";
-}
-
-function storedLastProject(): string {
-  return localStorage.getItem("rhzycode.lastProject") || "";
-}
-
-function storedLastThread(projectPath: string): string | null {
-  try {
-    const entries = JSON.parse(localStorage.getItem("rhzycode.lastThreads") || "{}") as Record<string, unknown>;
-    return typeof entries[projectPath] === "string" ? entries[projectPath] : null;
-  } catch {
-    return null;
-  }
-}
-
-function storeLastThread(projectPath: string, threadId: string): void {
-  let entries: Record<string, string> = {};
-  try {
-    const stored = JSON.parse(localStorage.getItem("rhzycode.lastThreads") || "{}") as Record<string, unknown>;
-    entries = Object.fromEntries(Object.entries(stored).filter((entry): entry is [string, string] => (
-      typeof entry[1] === "string"
-    )));
-  } catch {
-    entries = {};
-  }
-  entries[projectPath] = threadId;
-  localStorage.setItem("rhzycode.lastThreads", JSON.stringify(entries));
-}
-
-function isActiveThreadStatus(status: ThreadSummary["status"]): boolean {
-  return status === "running" || status === "waiting_for_approval" || status === "waiting_for_input";
-}
-
-function notificationThreadId(params: Record<string, unknown>): string | null {
-  if (typeof params.threadId === "string") return params.threadId;
-  if (typeof params.conversationId === "string") return params.conversationId;
-  const thread = params.thread as Record<string, unknown> | undefined;
-  if (typeof thread?.id === "string") return thread.id;
-  const turn = params.turn as Record<string, unknown> | undefined;
-  return typeof turn?.threadId === "string" ? turn.threadId : null;
-}
-
-function summarizePrompt(text: string): string {
-  const title = text.replace(/\s+/g, " ").trim();
-  return title.length > 60 ? `${title.slice(0, 57)}...` : title || "New task";
-}
-
-function storedSandboxMode(): SandboxMode {
-  const stored = localStorage.getItem("rhzycode.sandboxMode");
-  return stored === "read-only" || stored === "danger-full-access"
-    ? stored
-    : "workspace-write";
-}
-
-function storedRecentProjects(): string[] {
-  try {
-    const value = JSON.parse(localStorage.getItem("rhzycode.recentProjects") || "[]");
-    return Array.isArray(value)
-      ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0).slice(0, 50)
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-function formatFileSize(size: number): string {
-  if (size < 1_024) return `${size} B`;
-  if (size < 1_048_576) return `${Math.round(size / 1_024)} KB`;
-  return `${(size / 1_048_576).toFixed(1)} MB`;
 }

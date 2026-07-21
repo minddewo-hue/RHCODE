@@ -162,11 +162,23 @@ export const createTurnRequestSchema = z.object({
 });
 export type CreateTurnRequest = z.infer<typeof createTurnRequestSchema>;
 
-export const remoteApprovalPolicySchema = z.enum(["on-request", "untrusted"]);
+export const remoteApprovalPolicySchema = z.enum(["on-request", "untrusted", "never"]);
 export type RemoteApprovalPolicy = z.infer<typeof remoteApprovalPolicySchema>;
 
-export const remoteSandboxModeSchema = z.enum(["read-only", "workspace-write"]);
+export const remoteSandboxModeSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
 export type RemoteSandboxMode = z.infer<typeof remoteSandboxModeSchema>;
+
+export const remoteReasoningEffortSchema = z.enum([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+]);
+export type RemoteReasoningEffort = z.infer<typeof remoteReasoningEffortSchema>;
 
 export const projectDirectorySchema = z.object({
   path: z.string().min(1).max(32_768),
@@ -185,6 +197,7 @@ export const remoteModelOptionSchema = z.object({
   displayName: z.string().min(1).max(500),
   description: z.string().max(10_000),
   defaultReasoningEffort: z.string().max(500),
+  reasoningEfforts: z.array(remoteReasoningEffortSchema).max(20).optional(),
   isDefault: z.boolean().optional(),
 });
 export type RemoteModelOption = z.infer<typeof remoteModelOptionSchema>;
@@ -248,6 +261,7 @@ export const remoteTurnStartRequestSchema = z.object({
   model: z.string().min(1).max(500).optional(),
   approvalPolicy: remoteApprovalPolicySchema.optional(),
   sandboxMode: remoteSandboxModeSchema.optional(),
+  reasoningEffort: remoteReasoningEffortSchema.optional(),
   attachments: z.array(remoteTurnAttachmentSchema).max(20).optional(),
 }).strict().superRefine((request, context) => {
   if (!request.text.trim() && !request.attachments?.length) {

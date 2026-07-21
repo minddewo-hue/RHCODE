@@ -16,9 +16,9 @@ const workspaceRoot = path.resolve(desktopRoot, "..");
 const gatewayRoot = process.env.RHZYCODE_GATEWAY_HOME || path.join(workspaceRoot, "desktop", "model-gateway");
 const codexHome = process.env.RHZYCODE_SMOKE_CODEX_HOME ||
   path.join(os.tmpdir(), "rhzycode-smoke-codex-home");
-const model = process.env.RHZYCODE_SMOKE_MODEL || "faker/kimi-for-coding";
+const model = process.env.RHZYCODE_SMOKE_MODEL || "sub2api/gpt-5.4";
 const switchFromModel = process.env.RHZYCODE_SMOKE_FROM_MODEL || "sub2api/gpt-5.6-terra";
-const switchToModel = process.env.RHZYCODE_SMOKE_TO_MODEL || "faker/kimi-for-coding";
+const switchToModel = process.env.RHZYCODE_SMOKE_TO_MODEL || "sub2api/gpt-5.4";
 const mode = parseMode(process.argv.slice(2));
 
 const runtime = new DesktopRuntime(gatewayRoot, codexHome, "127.0.0.1", 0);

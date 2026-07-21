@@ -26,11 +26,7 @@ const fallbackTemplates = [
   [/^gpt-5\.6-terra/, "gpt-5.6-terra"],
 ];
 
-const displayNames = {
-  "faker/kimi-for-coding": "Faker - Kimi for Coding",
-  "vllm/gemma-4-31b-it-uncensored": "vLLM - Gemma 4 31B",
-  "vllm/gemma-4-31b-it-uncensored-bf16": "vLLM - Gemma 4 31B BF16",
-};
+const displayNames = {};
 
 const models = [...config.models.values()].map((model, index) => {
   const route = model.routes[0];
@@ -102,7 +98,6 @@ function requireTemplate(slug) {
 
 function providerLabel(providerId) {
   if (providerId === "sub2api") return "Sub2API";
-  if (providerId === "faker") return "Faker";
   return providerId;
 }
 

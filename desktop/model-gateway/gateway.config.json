@@ -1,0 +1,34 @@
+{
+  "providers": {
+    "sub2api": {
+      "base_url": "https://model.rhzy.ai/v1",
+      "protocol": "responses",
+      "api_key_env": "SUB2API_API_KEY"
+    }
+  },
+  "disabled_models": {
+    "sub2api/gpt-5.2": { "reason": "Repeated upstream 503 during project stability validation.", "verified_at": "2026-07-17" },
+    "sub2api/gpt-5.2-2025-12-11": { "reason": "Repeated upstream 503 during project stability validation.", "verified_at": "2026-07-17" },
+    "sub2api/gpt-5.2-chat-latest": { "reason": "Repeated upstream 503 during project stability validation.", "verified_at": "2026-07-17" },
+    "sub2api/gpt-5.2-pro": { "reason": "Repeated upstream 502 and 503 during project stability validation.", "verified_at": "2026-07-17" },
+    "sub2api/gpt-5.2-pro-2025-12-11": { "reason": "Repeated upstream 503 during project stability validation.", "verified_at": "2026-07-17" }
+  },
+  "models": {
+    "sub2api/gpt-5.2": { "provider": "sub2api", "upstream_model": "gpt-5.2" },
+    "sub2api/gpt-5.2-2025-12-11": { "provider": "sub2api", "upstream_model": "gpt-5.2-2025-12-11" },
+    "sub2api/gpt-5.2-chat-latest": { "provider": "sub2api", "upstream_model": "gpt-5.2-chat-latest" },
+    "sub2api/gpt-5.2-pro": { "provider": "sub2api", "upstream_model": "gpt-5.2-pro" },
+    "sub2api/gpt-5.2-pro-2025-12-11": { "provider": "sub2api", "upstream_model": "gpt-5.2-pro-2025-12-11" },
+    "sub2api/gpt-5.3-codex-spark": { "provider": "sub2api", "upstream_model": "gpt-5.3-codex-spark" },
+    "sub2api/gpt-5.4": { "provider": "sub2api", "upstream_model": "gpt-5.4" },
+    "sub2api/gpt-5.4-2026-03-05": { "provider": "sub2api", "upstream_model": "gpt-5.4-2026-03-05" },
+    "sub2api/gpt-5.4-mini": { "provider": "sub2api", "upstream_model": "gpt-5.4-mini" },
+    "sub2api/gpt-5.5": { "provider": "sub2api", "upstream_model": "gpt-5.5" },
+    "sub2api/gpt-5.6-luna": { "provider": "sub2api", "upstream_model": "gpt-5.6-luna" },
+    "sub2api/gpt-5.6-sol": { "provider": "sub2api", "upstream_model": "gpt-5.6-sol" },
+    "sub2api/gpt-5.6-terra": { "provider": "sub2api", "upstream_model": "gpt-5.6-terra" }
+  },
+  "upstream_timeout_ms": 600000,
+  "sticky_ttl_ms": 3600000,
+  "circuit_breaker": { "failure_threshold": 3, "cooldown_ms": 30000 }
+}

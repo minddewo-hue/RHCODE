@@ -33,7 +33,7 @@ const api: RhzycodeDesktopApi = {
   unarchiveThread: (threadId: string) => ipcRenderer.invoke("agent:thread:unarchive", threadId),
   renameThread: (threadId: string, name: string) => ipcRenderer.invoke("agent:thread:rename", threadId, name),
   deleteThread: (threadId: string) => ipcRenderer.invoke("agent:thread:delete", threadId),
-  startTurn: (params: { threadId: string; text: string; approvalPolicy?: "on-request" | "untrusted" | "never"; sandboxMode?: "read-only" | "workspace-write" | "danger-full-access"; attachments?: Array<{ path: string; name: string; kind: "file" | "image"; size: number }> }) =>
+  startTurn: (params: { threadId: string; text: string; model?: string; approvalPolicy?: "on-request" | "untrusted" | "never"; sandboxMode?: "read-only" | "workspace-write" | "danger-full-access"; reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"; attachments?: Array<{ path: string; name: string; kind: "file" | "image"; size: number }> }) =>
     ipcRenderer.invoke("agent:turn:start", params),
   interruptTurn: (threadId: string) => ipcRenderer.invoke("agent:turn:interrupt", threadId),
   getGatewayStatus: () => ipcRenderer.invoke("gateway:status"),

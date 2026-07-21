@@ -18,6 +18,7 @@ import {
   type RemoteModelListResult,
   type RemoteProjectCreateResult,
   type RemoteProjectListResult,
+  type RemoteReasoningEffort,
   type RemoteDirectoryBrowseResult,
   type RemoteSandboxMode,
   type RemoteTurnAttachment,
@@ -85,6 +86,7 @@ export interface TurnStartInput {
   model?: string;
   approvalPolicy?: RemoteApprovalPolicy;
   sandboxMode?: RemoteSandboxMode;
+  reasoningEffort?: RemoteReasoningEffort;
   attachments?: RemoteTurnAttachment[];
 }
 

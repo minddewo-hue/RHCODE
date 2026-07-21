@@ -10,6 +10,7 @@ import type {
 export type Unsubscribe = () => void;
 export type ApprovalPolicy = "on-request" | "untrusted" | "never";
 export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export interface ComposerAttachment {
   path: string;
@@ -43,6 +44,7 @@ export interface StartTurnParams {
   model?: string;
   approvalPolicy?: ApprovalPolicy;
   sandboxMode?: SandboxMode;
+  reasoningEffort?: ReasoningEffort;
   attachments?: ComposerAttachment[];
 }
 
@@ -180,6 +182,10 @@ export interface ModelOption {
   displayName: string;
   description: string;
   defaultReasoningEffort: string;
+  supportedReasoningEfforts?: Array<{
+    reasoningEffort: string;
+    description: string;
+  }>;
   isDefault?: boolean;
 }
 

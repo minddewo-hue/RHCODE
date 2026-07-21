@@ -1,5 +1,5 @@
 model_provider = "rhzy_gateway"
-model = "faker/kimi-for-coding"
+model = "sub2api/gpt-5.4"
 
 [model_providers.rhzy_gateway]
 name = "RHZY Unified Gateway"

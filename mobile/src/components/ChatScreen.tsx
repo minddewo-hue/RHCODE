@@ -6,6 +6,9 @@ import type {
   UserInputAnswers,
   UserInputRequest,
   RemoteTurnAttachment,
+  RemoteApprovalPolicy,
+  RemoteReasoningEffort,
+  RemoteSandboxMode,
 } from "@rhzycode/protocol";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -26,15 +29,16 @@ import {
 } from "react-native";
 import type { ApprovalOperation, ConnectionStatus } from "../hooks/use-control-plane";
 import { colors } from "../ui/theme";
+import { TaskMenu } from "./TaskMenu";
+import {
+  buildChatEntries,
+  countActivityEntries,
+  isResultEntry,
+  type ChatEntry,
+  type PendingMessage,
+} from "./chat-screen-model";
 
-export interface PendingMessage {
-  id: string;
-  threadId: string;
-  content: string;
-  createdAt: string;
-  state: "sending" | "sent" | "failed";
-  images?: Array<{ name: string; uri: string }>;
-}
+export type { PendingMessage } from "./chat-screen-model";
 
 interface ChatScreenProps {
   thread: ThreadSummary | null;
@@ -47,7 +51,9 @@ interface ChatScreenProps {
   connectionNotice: string | null;
   refreshing: boolean;
   canWrite: boolean;
+  canCreateThread: boolean;
   canApprove: boolean;
+  newThreadDraft: boolean;
   draft: string;
   sending: boolean;
   attachments: RemoteTurnAttachment[];
@@ -57,8 +63,15 @@ interface ChatScreenProps {
   onOpenDrawer: () => void;
   onOpenModelPicker: () => void;
   onNewThread: () => void;
+  onApprovalPolicyChange: (value: RemoteApprovalPolicy) => void;
+  onReasoningEffortChange: (value: RemoteReasoningEffort) => void;
+  onSandboxModeChange: (value: RemoteSandboxMode) => void;
   modelPickerEnabled: boolean;
   selectedModelLabel: string | null;
+  approvalPolicy: RemoteApprovalPolicy;
+  reasoningEffort: RemoteReasoningEffort;
+  reasoningEfforts: RemoteReasoningEffort[];
+  sandboxMode: RemoteSandboxMode;
   onNoticePress: () => void;
   onRefresh: () => void;
   onDraftChange: (value: string) => void;
@@ -70,12 +83,6 @@ interface ChatScreenProps {
   onSubmitInput: (id: string, answers: UserInputAnswers) => void;
 }
 
-type ChatEntry =
-  | { type: "timeline"; id: string; createdAt: string; item: TimelineItem }
-  | { type: "approval"; id: string; createdAt: string; approval: ApprovalRequest }
-  | { type: "input"; id: string; createdAt: string; request: UserInputRequest }
-  | { type: "pending"; id: string; createdAt: string; message: PendingMessage };
-
 type ConversationPage = "result" | "activity";
 
 const conversationPages: ConversationPage[] = ["result", "activity"];
@@ -86,7 +93,8 @@ export function ChatScreen(props: ChatScreenProps) {
   const activityListRef = useRef<FlatList<ChatEntry>>(null);
   const { width: pageWidth } = useWindowDimensions();
   const [activePage, setActivePage] = useState<ConversationPage>("result");
-  const entries = useMemo(() => buildEntries(props, activePage === "activity"), [
+  const [taskMenuVisible, setTaskMenuVisible] = useState(false);
+  const entries = useMemo(() => buildChatEntries(props, activePage === "activity"), [
     activePage,
     props.approvals,
     props.pendingMessages,
@@ -104,7 +112,7 @@ export function ChatScreen(props: ChatScreenProps) {
   ]);
   const threadRunning = props.thread?.status === "running";
   const composerEnabled = Boolean(
-    props.selectedThreadId
+    (props.selectedThreadId || props.newThreadDraft)
     && props.canWrite
     && props.connectionStatus === "online",
   );
@@ -175,12 +183,26 @@ export function ChatScreen(props: ChatScreenProps) {
             <MaterialCommunityIcons color={colors.ink} name="robot-outline" size={22} />
           </Pressable>
           <IconButton
-            accessibilityLabel="新建对话"
-            icon="add"
-            onPress={props.onNewThread}
+            accessibilityLabel="打开任务菜单"
+            icon="ellipsis-horizontal"
+            onPress={() => setTaskMenuVisible(true)}
           />
         </View>
       </View>
+
+      <TaskMenu
+        approvalPolicy={props.approvalPolicy}
+        canCreateThread={props.canCreateThread && props.connectionStatus === "online"}
+        onApprovalPolicyChange={props.onApprovalPolicyChange}
+        onClose={() => setTaskMenuVisible(false)}
+        onNewThread={props.onNewThread}
+        onReasoningEffortChange={props.onReasoningEffortChange}
+        onSandboxModeChange={props.onSandboxModeChange}
+        reasoningEffort={props.reasoningEffort}
+        reasoningEfforts={props.reasoningEfforts}
+        sandboxMode={props.sandboxMode}
+        visible={taskMenuVisible}
+      />
 
       {props.connectionNotice && (
         <Pressable
@@ -212,9 +234,10 @@ export function ChatScreen(props: ChatScreenProps) {
               activityListRef={activityListRef}
               activePage={page}
               entries={page === "result" ? resultEntries : activityEntries}
-              hasThread={Boolean(props.selectedThreadId)}
+              hasThread={Boolean(props.selectedThreadId || props.newThreadDraft)}
               props={props}
               resultListRef={resultListRef}
+              visible={activePage === page}
             />
           </View>
         )}
@@ -293,7 +316,7 @@ export function ChatScreen(props: ChatScreenProps) {
             >
               {props.sending
                 ? <ActivityIndicator color={colors.inverse} size="small" />
-                : <Ionicons color={colors.inverse} name="arrow-up" size={18} />}
+                : <Feather color={colors.inverse} name="send" size={17} />}
             </Pressable>
           </View>
         </View>
@@ -369,13 +392,14 @@ function ActivityWaveIcon({ active, running }: { active: boolean; running: boole
   );
 }
 
-function ConversationList({ activityListRef, activePage, entries, hasThread, props, resultListRef }: {
+function ConversationList({ activityListRef, activePage, entries, hasThread, props, resultListRef, visible }: {
   activityListRef: React.RefObject<FlatList<ChatEntry> | null>;
   activePage: ConversationPage;
   entries: ChatEntry[];
   hasThread: boolean;
   props: ChatScreenProps;
   resultListRef: React.RefObject<FlatList<ChatEntry> | null>;
+  visible: boolean;
 }) {
   const listRef = activePage === "result" ? resultListRef : activityListRef;
   const [visibleCount, setVisibleCount] = useState(10);
@@ -399,6 +423,12 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
     previousEntryCount.current = entries.length;
   }, [activePage, props.selectedThreadId]);
 
+  useEffect(() => {
+    if (!visible || activePage !== "activity" || !entries.length) return;
+    nearBottom.current = true;
+    scrollToLatest(didInitialScroll.current);
+  }, [activePage, entries.length, visible]);
+
   return (
     <FlatList
       ref={listRef}
@@ -416,7 +446,7 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
         if (!didInitialScroll.current) {
           didInitialScroll.current = true;
           scrollToLatest(false);
-        } else if (entries.length > previousEntryCount.current && nearBottom.current) {
+        } else if (entries.length > previousEntryCount.current && ((activePage === "activity" && visible) || nearBottom.current)) {
           scrollToLatest(true);
         }
         previousEntryCount.current = entries.length;
@@ -462,76 +492,6 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
       }}
     />
   );
-}
-
-function isResultEntry(entry: ChatEntry): boolean {
-  if (entry.type === "pending") return true;
-  if (entry.type !== "timeline") return false;
-  return entry.item.kind === "user"
-    || entry.item.kind === "assistant";
-}
-
-function buildEntries(props: Pick<
-  ChatScreenProps,
-  "selectedThreadId" | "timeline" | "approvals" | "userInputs" | "pendingMessages"
->, includeActivity: boolean): ChatEntry[] {
-  if (!props.selectedThreadId) return [];
-  const timeline = props.timeline.filter((item) => item.threadId === props.selectedThreadId);
-  const imageMessages = props.pendingMessages.filter((message) => message.images?.length);
-  const visiblePending = props.pendingMessages.filter((message) => (
-    message.threadId === props.selectedThreadId
-    && (message.images?.length
-      || !timeline.some((item) => item.kind === "user" && item.content.trim() === message.content.trim()))
-  ));
-  return [
-    ...timeline.filter((item) => (
-      (includeActivity || item.kind === "user" || item.kind === "assistant")
-      && !(item.kind === "user" && imageMessages.some((message) => (
-        message.threadId === item.threadId && message.content.trim() === item.content.trim()
-      )))
-    )).map((item): ChatEntry => ({
-      type: "timeline",
-      id: `timeline:${item.id}`,
-      createdAt: item.createdAt,
-      item,
-    })),
-    ...visiblePending.map((message): ChatEntry => ({
-      type: "pending",
-      id: `pending:${message.id}`,
-      createdAt: message.createdAt,
-      message,
-    })),
-    ...(includeActivity ? props.approvals
-      .filter((approval) => approval.threadId === props.selectedThreadId)
-      .map((approval): ChatEntry => ({
-        type: "approval",
-        id: `approval:${approval.id}`,
-        createdAt: approval.createdAt,
-        approval,
-      })) : []),
-    ...(includeActivity ? props.userInputs
-      .filter((request) => request.threadId === props.selectedThreadId)
-      .map((request): ChatEntry => ({
-        type: "input",
-        id: `input:${request.id}`,
-        createdAt: request.createdAt,
-        request,
-      })) : []),
-  ].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-}
-
-function countActivityEntries(props: Pick<
-  ChatScreenProps,
-  "selectedThreadId" | "timeline" | "approvals" | "userInputs"
->): number {
-  if (!props.selectedThreadId) return 0;
-  return props.timeline.filter((item) => (
-    item.threadId === props.selectedThreadId
-    && item.kind !== "user"
-    && item.kind !== "assistant"
-  )).length
-    + props.approvals.filter((item) => item.threadId === props.selectedThreadId).length
-    + props.userInputs.filter((item) => item.threadId === props.selectedThreadId).length;
 }
 
 function IconButton({
@@ -796,8 +756,8 @@ function UserInputRow({
   );
 }
 
-function composerPlaceholder(props: Pick<ChatScreenProps, "selectedThreadId" | "canWrite" | "connectionStatus">): string {
-  if (!props.selectedThreadId) return "点击右上角 + 新建对话";
+function composerPlaceholder(props: Pick<ChatScreenProps, "selectedThreadId" | "newThreadDraft" | "canWrite" | "connectionStatus">): string {
+  if (!props.selectedThreadId && !props.newThreadDraft) return "点击右上角 + 新建对话";
   if (!props.canWrite) return "当前设备只有查看权限";
   if (props.connectionStatus !== "online") return "电脑连接后可发送消息";
   return "给 Codex 发送消息";

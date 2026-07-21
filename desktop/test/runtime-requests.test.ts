@@ -330,7 +330,7 @@ test("grants requested permissions for one turn and denies with an empty profile
   });
 });
 
-test("overrides the model and approval policy on an existing thread", async () => {
+test("overrides the model, approval policy, and reasoning effort on an existing thread", async () => {
   const { runtime, internals, store } = createRuntimeHarness();
   let request: { method: string; params: Record<string, unknown> } | null = null;
   runtime.agent.request = async (method, params) => {
@@ -343,11 +343,13 @@ test("overrides the model and approval policy on an existing thread", async () =
     text: "Run the task",
     model: "faker/kimi-for-coding",
     approvalPolicy: "untrusted",
+    reasoningEffort: "xhigh",
   });
 
   assert.equal(request?.method, "turn/start");
   assert.equal(request?.params.model, "faker/kimi-for-coding");
   assert.equal(request?.params.approvalPolicy, "untrusted");
+  assert.equal(request?.params.effort, "xhigh");
   assert.equal(internals.activeTurns.get("thread-1"), "turn-1");
   assert.equal(internals.threads.get("thread-1")?.model, "faker/kimi-for-coding");
   assert.equal(store.snapshot().threads[0]?.model, "faker/kimi-for-coding");
@@ -472,7 +474,7 @@ test("executes remote commands through desktop authority with safe defaults", as
   assert.equal(startedThread.threadId, "thread-remote");
   const startedTurn = await commands.startTurn(
     "thread-remote",
-    { text: "Run from the mobile client", model: "sub2api/gpt-test" },
+    { text: "Run from the mobile client", model: "sub2api/gpt-test", reasoningEffort: "xhigh" },
     context,
   );
   assert.equal(startedTurn.turnId, "turn-remote");
@@ -492,6 +494,7 @@ test("executes remote commands through desktop authority with safe defaults", as
   assert.equal(requests[1]?.method, "turn/start");
   assert.equal(requests[1]?.params.model, "sub2api/gpt-test");
   assert.equal(requests[1]?.params.approvalPolicy, "on-request");
+  assert.equal(requests[1]?.params.effort, "xhigh");
   assert.deepEqual(requests[1]?.params.sandboxPolicy, {
     type: "readOnly",
     networkAccess: false,

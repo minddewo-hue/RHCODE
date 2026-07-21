@@ -49,7 +49,7 @@ import {
   ProjectDirectoryError,
   ProjectDirectoryRegistry,
 } from "./project-directories";
-import type { ApprovalPolicy, ComposerAttachment, SandboxMode } from "../shared/desktop-api";
+import type { ApprovalPolicy, ComposerAttachment, ReasoningEffort, SandboxMode } from "../shared/desktop-api";
 import { saveRemoteAttachments } from "./remote-attachment-store";
 
 interface RpcMessage {
@@ -481,6 +481,7 @@ export class DesktopRuntime extends EventEmitter {
     model?: string;
     approvalPolicy?: ApprovalPolicy;
     sandboxMode?: SandboxMode;
+    reasoningEffort?: ReasoningEffort;
     attachments?: ComposerAttachment[];
   }): Promise<{ turn?: { id?: string } }> {
     const current = this.threads.get(params.threadId);
@@ -522,6 +523,7 @@ export class DesktopRuntime extends EventEmitter {
         input,
         ...(params.model ? { model: params.model } : {}),
         ...(params.approvalPolicy ? { approvalPolicy: params.approvalPolicy } : {}),
+        ...(params.reasoningEffort ? { effort: params.reasoningEffort } : {}),
         sandboxPolicy: sandboxPolicyFor(params.sandboxMode || "workspace-write", projectPath),
       });
       if (params.model && current?.model !== params.model) {
@@ -997,8 +999,15 @@ export class DesktopRuntime extends EventEmitter {
 
   private async listRemoteModels(): Promise<RemoteModelListResult> {
     try {
-      const response = await this.listModels<{ data?: RemoteModelListResult["models"] }>();
-      return { models: response.data || [] };
+      const response = await this.listModels<{ data?: Array<RemoteModelListResult["models"][number] & {
+        supportedReasoningEfforts?: Array<{ reasoningEffort?: string }>;
+      }> }>();
+      return {
+        models: (response.data || []).map((model) => ({
+          ...model,
+          reasoningEfforts: supportedReasoningEfforts(model),
+        })),
+      };
     } catch {
       throw new ControlCommandError("unavailable");
     }
@@ -1045,6 +1054,7 @@ export class DesktopRuntime extends EventEmitter {
         ...(request.model ? { model: request.model } : {}),
         approvalPolicy: request.approvalPolicy || "on-request",
         sandboxMode: request.sandboxMode || "read-only",
+        ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
         attachments: saveRemoteAttachments(
           path.join(this.codexHome, "temp", "mobile-attachments"),
           request.attachments || [],
@@ -1240,6 +1250,20 @@ export class DesktopRuntime extends EventEmitter {
       this.publishTimeline({ ...item, status: failed ? "failed" : "completed" });
     }
   }
+}
+
+const reasoningEffortValues = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+
+function supportedReasoningEfforts(model: {
+  defaultReasoningEffort: string;
+  reasoningEfforts?: string[];
+  supportedReasoningEfforts?: Array<{ reasoningEffort?: string }>;
+}): Array<"none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"> {
+  const values = model.reasoningEfforts?.length
+    ? model.reasoningEfforts
+    : model.supportedReasoningEfforts?.map((option) => option.reasoningEffort || "") || [];
+  const withDefault = values.length ? values : [model.defaultReasoningEffort];
+  return [...new Set(withDefault)].filter((value): value is "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" => reasoningEffortValues.has(value));
 }
 
 function extractThreadId(params: Record<string, unknown>): string | null {

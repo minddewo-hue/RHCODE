@@ -55,9 +55,9 @@ function makeLegacyConfig() {
   return {
     providers: {
       legacy: {
-        base_url: process.env.UPSTREAM_BASE_URL || "https://faker-model.rhzy.ai/v1",
-        protocol: "chat_completions",
-        path: process.env.UPSTREAM_CHAT_PATH || "/chat/completions",
+        base_url: process.env.UPSTREAM_BASE_URL || "https://model.rhzy.ai/v1",
+        protocol: "responses",
+        path: process.env.UPSTREAM_RESPONSES_PATH || "/responses",
         api_key_env: process.env.UPSTREAM_API_KEY ? "UPSTREAM_API_KEY" : undefined,
         forward_client_authorization: !process.env.UPSTREAM_API_KEY,
       },

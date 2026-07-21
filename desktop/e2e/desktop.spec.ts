@@ -43,7 +43,6 @@ test.beforeAll(async () => {
       RHZYCODE_GATEWAY_HOME: path.join(workspaceDir, "desktop", "model-gateway"),
       RHZYCODE_SYNC_HOST: "127.0.0.1",
       RHZYCODE_SYNC_PORT: "0",
-      FAKER_API_KEY: "",
       SUB2API_API_KEY: "",
     },
     timeout: 30_000,
@@ -403,15 +402,12 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(page.getByText("Mobile connection", { exact: true })).toBeVisible();
   await expect(page.getByText("Local state protection", { exact: true })).toHaveCount(0);
   await assertVisibleControlsHaveNames(page);
-  const fakerCredential = page.locator(".credential-row").filter({ hasText: "Faker Model API key" });
-  const sub2apiCredential = page.locator(".credential-row").filter({ hasText: "Sub2API API key" });
-  await expect(fakerCredential).toContainText("faker-model.rhzy.ai");
-  await expect(fakerCredential).toContainText("KEY starts with fm_");
+  const sub2apiCredential = page.locator(".credential-row").filter({ hasText: "model.rhzy.ai API key" });
+  await expect(page.locator(".credential-row")).toHaveCount(1);
   await expect(sub2apiCredential).toContainText("model.rhzy.ai");
   await expect(sub2apiCredential).toContainText("KEY starts with sk-");
-  await expect(page.getByLabel("Faker Model API key for faker-model.rhzy.ai")).toHaveAttribute("placeholder", "Configured | paste new fm_ KEY");
-  await expect(page.getByLabel("Sub2API API key for model.rhzy.ai")).toHaveAttribute("placeholder", "Configured | paste new sk- KEY");
-  const clearCredential = fakerCredential.getByRole("button", { name: "Clear KEY", exact: true });
+  await expect(page.getByLabel("model.rhzy.ai API key for model.rhzy.ai")).toHaveAttribute("placeholder", "Configured | paste new sk- KEY");
+  const clearCredential = sub2apiCredential.getByRole("button", { name: "Clear KEY", exact: true });
   const credentialCallsBefore = (await ipcCalls(electronApp, "credentials:set")).length;
   await Promise.all([
     page.waitForEvent("dialog").then((dialog) => dialog.dismiss()),
@@ -423,12 +419,12 @@ test("supports core desktop workflows at the minimum window size", async () => {
     clearCredential.click(),
   ]);
   await expect(clearCredential).toBeHidden();
-  const credentialInput = page.getByLabel("Faker Model API key for faker-model.rhzy.ai");
+  const credentialInput = page.getByLabel("model.rhzy.ai API key for model.rhzy.ai");
   await credentialInput.fill("ui-test-key");
-  await fakerCredential.getByRole("button", { name: "Save KEY", exact: true }).click();
+  await sub2apiCredential.getByRole("button", { name: "Save KEY", exact: true }).click();
   await expect(clearCredential).toBeVisible();
   await expect.poll(() => ipcCalls(electronApp, "credentials:set").then((calls) => calls.at(-1)?.args)).toEqual([
-    "faker",
+    "sub2api",
     "ui-test-key",
   ]);
   await page.locator(".settings-view").evaluate((element) => { element.scrollTop = 0; });
@@ -726,8 +722,7 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
     let credentialStatus = {
       encryptionAvailable: true,
       providers: [
-        { providerId: "faker", configured: true, source: "secure_store" },
-        { providerId: "sub2api", configured: true, source: "environment" },
+        { providerId: "sub2api", configured: true, source: "secure_store" },
       ],
     };
     let mobileAccessStatus = {

@@ -119,17 +119,35 @@ test("sends remote task commands with bearer auth and idempotency keys", async (
     () => `command-${++sequence}`,
   );
 
-  assert.equal((await client.startThread({ projectPath: "D:\\work" })).threadId, "thread-new");
-  assert.equal((await client.startTurn("thread-new", { text: "Run the tests", model: "sub2api/gpt-test" })).turnId, "turn-1");
+  assert.equal((await client.startThread({
+    projectPath: "D:\\work",
+    approvalPolicy: "never",
+    sandboxMode: "danger-full-access",
+  })).threadId, "thread-new");
+  assert.equal((await client.startTurn("thread-new", {
+    text: "Run the tests",
+    model: "sub2api/gpt-test",
+    approvalPolicy: "never",
+    sandboxMode: "danger-full-access",
+    reasoningEffort: "xhigh",
+  })).turnId, "turn-1");
   assert.equal(calls.length, 2);
   assert.equal(calls[0]?.url, "http://192.168.1.20:8790/v1/commands/threads/start");
   assert.equal(calls[1]?.url, "http://192.168.1.20:8790/v1/commands/threads/thread-new/turns/start");
   assert.equal((calls[0]?.init?.headers as Record<string, string>)["Idempotency-Key"], "command-1");
   assert.equal((calls[1]?.init?.headers as Record<string, string>)["Idempotency-Key"], "command-2");
   assert.match(String((calls[0]?.init?.headers as Record<string, string>).Authorization), /^Bearer /);
+  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), {
+    projectPath: "D:\\work",
+    approvalPolicy: "never",
+    sandboxMode: "danger-full-access",
+  });
   assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), {
     text: "Run the tests",
     model: "sub2api/gpt-test",
+    approvalPolicy: "never",
+    sandboxMode: "danger-full-access",
+    reasoningEffort: "xhigh",
   });
 });
 
@@ -214,13 +232,16 @@ test("loads the model catalog from the selected desktop", async () => {
           displayName: "GPT Test",
           description: "Test model",
           defaultReasoningEffort: "medium",
+          reasoningEfforts: ["low", "medium", "high", "xhigh"],
           isDefault: true,
         }],
       });
     },
   );
 
-  assert.equal((await client.listModels()).models[0]?.displayName, "GPT Test");
+  const model = (await client.listModels()).models[0];
+  assert.equal(model?.displayName, "GPT Test");
+  assert.deepEqual(model?.reasoningEfforts, ["low", "medium", "high", "xhigh"]);
   assert.equal(requestedUrl, "http://192.168.1.20:8790/v1/commands/models");
 });
 

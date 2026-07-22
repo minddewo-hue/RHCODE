@@ -1,0 +1,328 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-07-22",
+  "default": {
+    "context_window": 131072,
+    "max_context_window": 131072,
+    "effective_context_window_percent": 90,
+    "verification": "conservative_fallback"
+  },
+  "models": {
+    "gemma-4-31b-it-uncensored-bf16": {
+      "context_window": 131072,
+      "max_context_window": 131072,
+      "verification": "deployment_owner"
+    },
+    "gemma4-31b-uncensored-bf16-256k": {
+      "context_window": 262144,
+      "max_context_window": 262144,
+      "verification": "deployment_owner"
+    },
+    "MiniMax-M2": {
+      "context_window": 204800,
+      "max_context_window": 204800,
+      "verification": "official",
+      "reference": "https://platform.minimax.io/docs/guides/text-generation"
+    },
+    "MiniMax-M2.1": {
+      "context_window": 204800,
+      "max_context_window": 204800,
+      "verification": "official",
+      "reference": "https://platform.minimax.io/docs/guides/text-generation"
+    },
+    "MiniMax-M2.1-highspeed": {
+      "context_window": 204800,
+      "max_context_window": 204800,
+      "verification": "official",
+      "reference": "https://platform.minimax.io/docs/guides/text-generation"
+    },
+    "MiniMax-M2.5": {
+      "context_window": 204800,
+      "max_context_window": 204800,
+      "verification": "official",
+      "reference": "https://platform.minimax.io/docs/guides/text-generation"
+    },
+    "MiniMax-M2.5-highspeed": {
+      "context_window": 204800,
+      "max_context_window": 204800,
+      "verification": "official",
+      "reference": "https://platform.minimax.io/docs/guides/text-generation"
+    },
+    "MiniMax-M2.7": {
+      "context_window": 204800,
+      "max_context_window": 204800,
+      "verification": "official",
+      "reference": "https://platform.minimax.io/docs/guides/text-generation"
+    },
+    "MiniMax-M2.7-highspeed": {
+      "context_window": 204800,
+      "max_context_window": 204800,
+      "verification": "official",
+      "reference": "https://platform.minimax.io/docs/guides/text-generation"
+    },
+    "MiniMax-M3": {
+      "context_window": 524288,
+      "max_context_window": 1048576,
+      "verification": "official_guaranteed_minimum",
+      "reference": "https://www.minimax.io/models/text/m3"
+    },
+    "k3": {
+      "context_window": 262144,
+      "max_context_window": 1048576,
+      "verification": "official_plan_minimum",
+      "reference": "https://www.kimi.com/code/docs/en/kimi-code/models.html"
+    },
+    "kimi-for-coding": {
+      "context_window": 262144,
+      "max_context_window": 262144,
+      "verification": "official",
+      "reference": "https://www.kimi.com/code/docs/en/kimi-code/models.html"
+    },
+    "kimi-for-coding-highspeed": {
+      "context_window": 262144,
+      "max_context_window": 262144,
+      "verification": "official",
+      "reference": "https://www.kimi.com/code/docs/en/kimi-code/models.html"
+    },
+    "codex-auto-review": {
+      "context_window": 272000,
+      "max_context_window": 272000,
+      "verification": "codex_runtime"
+    },
+    "gpt-4o-audio-preview": {
+      "context_window": 128000,
+      "max_context_window": 128000,
+      "verification": "official",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-4o-audio-preview"
+    },
+    "gpt-4o-realtime-preview": {
+      "context_window": 32000,
+      "max_context_window": 32000,
+      "verification": "official",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-4o-realtime-preview"
+    },
+    "gpt-5.2": {
+      "context_window": 272000,
+      "max_context_window": 400000,
+      "verification": "official_with_codex_runtime_limit",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-5.2"
+    },
+    "gpt-5.2-2025-12-11": {
+      "context_window": 272000,
+      "max_context_window": 400000,
+      "verification": "official_with_codex_runtime_limit",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-5.2"
+    },
+    "gpt-5.2-chat-latest": {
+      "context_window": 128000,
+      "max_context_window": 128000,
+      "verification": "official",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-5.2-chat-latest"
+    },
+    "gpt-5.2-pro": {
+      "context_window": 272000,
+      "max_context_window": 400000,
+      "verification": "official_with_codex_runtime_limit",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-5.2-pro"
+    },
+    "gpt-5.2-pro-2025-12-11": {
+      "context_window": 272000,
+      "max_context_window": 400000,
+      "verification": "official_with_codex_runtime_limit",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-5.2-pro"
+    },
+    "gpt-5.3-codex-spark": {
+      "context_window": 272000,
+      "max_context_window": 400000,
+      "verification": "codex_family_runtime",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-5.3-codex"
+    },
+    "gpt-5.4": {
+      "context_window": 272000,
+      "max_context_window": 1050000,
+      "verification": "official_with_codex_runtime_limit",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-5.4"
+    },
+    "gpt-5.4-2026-03-05": {
+      "context_window": 272000,
+      "max_context_window": 1050000,
+      "verification": "official_with_codex_runtime_limit",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-5.4"
+    },
+    "gpt-5.4-mini": {
+      "context_window": 272000,
+      "max_context_window": 400000,
+      "verification": "official_with_codex_runtime_limit",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-5.4-mini"
+    },
+    "gpt-5.5": {
+      "context_window": 272000,
+      "max_context_window": 1050000,
+      "verification": "official_with_codex_runtime_limit",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-5.5"
+    },
+    "gpt-5.6": {
+      "context_window": 272000,
+      "max_context_window": 1050000,
+      "verification": "official_with_codex_runtime_limit",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-5.6-sol"
+    },
+    "gpt-5.6-luna": {
+      "context_window": 272000,
+      "max_context_window": 1050000,
+      "verification": "official_with_codex_runtime_limit",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-5.6-luna"
+    },
+    "gpt-5.6-sol": {
+      "context_window": 272000,
+      "max_context_window": 1050000,
+      "verification": "official_with_codex_runtime_limit",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-5.6-sol"
+    },
+    "gpt-5.6-terra": {
+      "context_window": 272000,
+      "max_context_window": 1050000,
+      "verification": "official_with_codex_runtime_limit",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-5.6-terra"
+    },
+    "gpt-image-1": {
+      "context_window": 32768,
+      "max_context_window": 32768,
+      "verification": "conservative_fallback",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-image-1"
+    },
+    "gpt-image-1.5": {
+      "context_window": 32768,
+      "max_context_window": 32768,
+      "verification": "conservative_fallback",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-image-1.5"
+    },
+    "gpt-image-2": {
+      "context_window": 32768,
+      "max_context_window": 32768,
+      "verification": "conservative_fallback"
+    },
+    "composer-2.5": {
+      "context_window": 131072,
+      "max_context_window": 131072,
+      "verification": "conservative_fallback"
+    },
+    "grok": {
+      "context_window": 131072,
+      "max_context_window": 1000000,
+      "verification": "intermediary_safe_limit"
+    },
+    "grok-4.20-0309-non-reasoning": {
+      "context_window": 1000000,
+      "max_context_window": 1000000,
+      "verification": "official",
+      "reference": "https://docs.x.ai/developers/models/grok-4.20-0309-non-reasoning"
+    },
+    "grok-4.20-0309-reasoning": {
+      "context_window": 1000000,
+      "max_context_window": 1000000,
+      "verification": "official",
+      "reference": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning"
+    },
+    "grok-4.20-multi-agent-0309": {
+      "context_window": 1000000,
+      "max_context_window": 1000000,
+      "verification": "official",
+      "reference": "https://docs.x.ai/developers/models/grok-4.20-multi-agent-0309"
+    },
+    "grok-4.20-non-reasoning": {
+      "context_window": 1000000,
+      "max_context_window": 1000000,
+      "verification": "official",
+      "reference": "https://docs.x.ai/developers/models/grok-4.20-0309-non-reasoning"
+    },
+    "grok-4.20-reasoning": {
+      "context_window": 1000000,
+      "max_context_window": 1000000,
+      "verification": "official",
+      "reference": "https://docs.x.ai/developers/models/grok-4.20-0309-reasoning"
+    },
+    "grok-4.3": {
+      "context_window": 1000000,
+      "max_context_window": 1000000,
+      "verification": "official",
+      "reference": "https://docs.x.ai/developers/models/grok-4.3"
+    },
+    "grok-4.5": {
+      "context_window": 500000,
+      "max_context_window": 500000,
+      "verification": "official",
+      "reference": "https://docs.x.ai/developers/models/grok-4.5"
+    },
+    "grok-4.5-latest": {
+      "context_window": 500000,
+      "max_context_window": 500000,
+      "verification": "official",
+      "reference": "https://docs.x.ai/developers/models/grok-4.5"
+    },
+    "grok-build": {
+      "context_window": 256000,
+      "max_context_window": 256000,
+      "verification": "official_alias",
+      "reference": "https://docs.x.ai/developers/models/grok-build-0.1"
+    },
+    "grok-build-0.1": {
+      "context_window": 256000,
+      "max_context_window": 256000,
+      "verification": "official",
+      "reference": "https://docs.x.ai/developers/models/grok-build-0.1"
+    },
+    "grok-build-latest": {
+      "context_window": 256000,
+      "max_context_window": 256000,
+      "verification": "official_alias",
+      "reference": "https://docs.x.ai/developers/models/grok-build-0.1"
+    },
+    "grok-composer": {
+      "context_window": 131072,
+      "max_context_window": 131072,
+      "verification": "conservative_fallback"
+    },
+    "grok-composer-2.5-fast": {
+      "context_window": 131072,
+      "max_context_window": 131072,
+      "verification": "conservative_fallback"
+    },
+    "grok-imagine": {
+      "context_window": 32768,
+      "max_context_window": 32768,
+      "verification": "conservative_fallback"
+    },
+    "grok-imagine-edit": {
+      "context_window": 32768,
+      "max_context_window": 32768,
+      "verification": "conservative_fallback"
+    },
+    "grok-imagine-image": {
+      "context_window": 32768,
+      "max_context_window": 32768,
+      "verification": "conservative_fallback"
+    },
+    "grok-imagine-image-quality": {
+      "context_window": 32768,
+      "max_context_window": 32768,
+      "verification": "conservative_fallback"
+    },
+    "grok-imagine-video": {
+      "context_window": 32768,
+      "max_context_window": 32768,
+      "verification": "conservative_fallback"
+    },
+    "grok-imagine-video-1.5": {
+      "context_window": 32768,
+      "max_context_window": 32768,
+      "verification": "conservative_fallback"
+    },
+    "grok-latest": {
+      "context_window": 131072,
+      "max_context_window": 1000000,
+      "verification": "runtime_observed_intermediary",
+      "reference": "https://docs.x.ai/developers/models/grok-4.3"
+    }
+  }
+}

@@ -293,6 +293,15 @@ function normalizeModel(id, value, providers) {
     created: Number.isInteger(value.created) ? value.created : 0,
     ownedBy: value.owned_by || availableRoutes[0].provider.id,
     contextWindow: optionalPositiveInteger(value.context_window, `models.${id}.context_window`),
+    maxContextWindow: optionalPositiveInteger(
+      value.max_context_window,
+      `models.${id}.max_context_window`,
+    ),
+    effectiveContextWindowPercent: optionalPositiveInteger(
+      value.effective_context_window_percent,
+      `models.${id}.effective_context_window_percent`,
+    ) || 90,
+    contextWindowSource: value.context_window ? "gateway_config" : null,
     maxOutputTokens: optionalPositiveInteger(
       value.max_output_tokens,
       `models.${id}.max_output_tokens`,

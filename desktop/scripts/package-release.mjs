@@ -67,6 +67,10 @@ const extraResources = [
     to: "gateway/codex-model-catalog.json",
   },
   {
+    from: path.join(desktopDir, "model-context-windows.json"),
+    to: "gateway/model-context-windows.json",
+  },
+  {
     from: codexPath,
     to: "codex/codex.exe",
   },

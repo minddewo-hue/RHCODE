@@ -108,7 +108,7 @@ Electron Main
 - Node.js 20 或更高版本。
 - npm 11.x；仓库声明为 `npm@11.6.2`。
 - Windows 桌面发行路径依赖 PowerShell、Electron 43.1.1、electron-builder 26.15.3。
-- 打包时要求可执行的 Codex CLI 0.144.6，版本由 `desktop/codex-version.json` 固定。
+- 打包时要求可执行的 Codex CLI 0.145.0，版本由 `desktop/codex-version.json` 固定。
 
 在仓库根目录安装依赖：
 
@@ -221,7 +221,7 @@ renderer 只能通过 `window.rhzycode` 调用 preload。增加或修改 IPC 时
 
 `approvalPolicy` 允许 `on-request`、`untrusted`、`never`。`sandboxMode` 允许 `read-only`、`workspace-write`、`danger-full-access`。
 
-当前固定的 Codex CLI 0.144.6 在 Windows Code Mode 文件工具上仍需关注该上游限制：即使 session `cwd` 与 `writable_roots` 正确，`workspace-write` 的 `apply_patch` 和写文件命令仍可能被误判为 `writing outside of the project`。桌面不得自动升级为 Full access；需要写入的本机测试必须由用户显式选择 `danger-full-access`，并把项目范围写入任务提示。升级 Codex 后应先运行 `validation/workspace-write-smoke` 回归，再移除此限制说明。
+当前固定的 Codex CLI 0.145.0 在 Windows Code Mode 文件工具上仍需关注该上游限制：即使 session `cwd` 与 `writable_roots` 正确，`workspace-write` 的 `apply_patch` 和写文件命令仍可能被误判为 `writing outside of the project`。桌面不得自动升级为 Full access；需要写入的本机测试必须由用户显式选择 `danger-full-access`，并把项目范围写入任务提示。升级 Codex 后应先运行 `validation/workspace-write-smoke` 回归，再移除此限制说明。
 
 附件格式为：
 
@@ -469,7 +469,7 @@ npm run dist:desktop
 - `RHZYCODE_REQUIRE_SIGNING=1` 但无签名身份时打包必须失败。
 - 配置 `RHZYCODE_UPDATE_URL` 但无签名身份时也必须失败。
 - 更新源来自打包生成的 `app-update.yml`，运行时环境变量不能替换已签名构建的源。
-- 发布前验证 Codex 二进制版本严格为 0.144.6。
+- 发布前验证 Codex 二进制版本严格为 0.145.0。
 - 检查安装包和 `app.asar` 不含敏感配置、用户状态、TLS 文件或密钥。
 
 ## 12. 可并行继续开发的桌面待办

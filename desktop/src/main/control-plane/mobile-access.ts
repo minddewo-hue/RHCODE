@@ -20,10 +20,12 @@ export interface MobileAccessAuditEntry {
   action:
     | "approval.resolved"
     | "project.created"
+    | "project.removed"
     | "task.thread_started"
     | "task.turn_started"
     | "task.turn_interrupted"
     | "task.user_input_submitted"
+    | "task.thread_model_changed"
     | "task.thread_renamed"
     | "task.thread_archived"
     | "task.thread_unarchived"
@@ -109,6 +111,11 @@ export class MobileAccessManager extends EventEmitter {
 
   recordProjectCreated(clientId: string): void {
     this.record(clientId, "project.created", "project");
+    this.persistAndPublish();
+  }
+
+  recordProjectRemoved(clientId: string): void {
+    this.record(clientId, "project.removed", "project");
     this.persistAndPublish();
   }
 
@@ -201,10 +208,12 @@ function restoreAuditEntry(value: unknown): MobileAccessAuditEntry | null {
 function isAuditAction(value: unknown): value is MobileAccessAuditEntry["action"] {
   return value === "approval.resolved"
     || value === "project.created"
+    || value === "project.removed"
     || value === "task.thread_started"
     || value === "task.turn_started"
     || value === "task.turn_interrupted"
     || value === "task.user_input_submitted"
+    || value === "task.thread_model_changed"
     || value === "task.thread_renamed"
     || value === "task.thread_archived"
     || value === "task.thread_unarchived"

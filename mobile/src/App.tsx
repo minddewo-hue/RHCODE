@@ -1,9 +1,11 @@
-import type { ProjectDirectory, RemoteApprovalPolicy, RemoteDirectoryBrowseResult, RemoteModelOption, RemoteReasoningEffort, RemoteSandboxMode, RemoteTurnAttachment, ThreadSummary, UserInputAnswers } from "@rhzycode/protocol";
+import type { ConversationFile, ProjectDirectory, RemoteApprovalPolicy, RemoteDirectoryBrowseResult, RemoteModelOption, RemoteReasoningEffort, RemoteSandboxMode, RemoteTurnAttachment, ThreadSummary, UserInputAnswers } from "@rhzycode/protocol";
 import Constants from "expo-constants";
 import * as Crypto from "expo-crypto";
 import * as DocumentPicker from "expo-document-picker";
-import { File } from "expo-file-system";
+import { Directory, File, Paths } from "expo-file-system";
 import * as ImagePicker from "expo-image-picker";
+import { Asset, requestPermissionsAsync } from "expo-media-library";
+import * as Sharing from "expo-sharing";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -32,11 +34,13 @@ import {
 } from "./auth/control-access";
 import { AppDrawer, type DrawerPage } from "./components/AppDrawer";
 import { ChatScreen, type PendingMessage } from "./components/ChatScreen";
+import { remoteModelReasoningEfforts } from "./components/model-picker-model";
 import { ModelPickerSheet } from "./components/ModelPickerSheet";
 import { ProjectPickerSheet, ThreadActionsSheet } from "./components/TaskSheets";
 import { describeControlError, useControlPlane } from "./hooks/use-control-plane";
 import { createNativeSecureSessionStore } from "./storage/native-secure-session";
 import type { MobileSession, MobileSessionState, SecureSessionStore } from "./storage/secure-session";
+import { isRegisteredProject, registeredProjectPaths } from "./state/project-list";
 import { colors } from "./ui/theme";
 import {
   defaultUpdateManifestUrl,
@@ -54,7 +58,6 @@ const defaultControlPort = Number.isInteger(configuredControlPort) ? configuredC
 const currentAppVersion = Constants.expoConfig?.version || "0.0.0";
 const updateManifestUrl = process.env.EXPO_PUBLIC_UPDATE_URL
   || String(Constants.expoConfig?.extra?.updateManifestUrl || defaultUpdateManifestUrl);
-const reasoningEffortValues: RemoteReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 function isImageAttachment(name: string, mimeType?: string): boolean {
   if (mimeType?.toLowerCase().startsWith("image/")) return true;
@@ -99,11 +102,13 @@ function AppContent() {
   });
   const [booting, setBooting] = useState(true);
   const [bootError, setBootError] = useState<string | null>(null);
+  const [navigationReady, setNavigationReady] = useState(false);
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [drawerPage, setDrawerPage] = useState<DrawerPage>("threads");
   const [drawerSearch, setDrawerSearch] = useState("");
   const [selectedProjectPath, setSelectedProjectPath] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  const [openingThreadId, setOpeningThreadId] = useState<string | null>(null);
   const [newThreadDraft, setNewThreadDraft] = useState(false);
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<RemoteTurnAttachment[]>([]);
@@ -115,6 +120,7 @@ function AppContent() {
   const [newThreadBusy, setNewThreadBusy] = useState(false);
   const [newThreadError, setNewThreadError] = useState<string | null>(null);
   const [projectDirectories, setProjectDirectories] = useState<ProjectDirectory[]>([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [models, setModels] = useState<RemoteModelOption[]>([]);
   const [selectedModel, setSelectedModel] = useState("");
   const [approvalPolicy, setApprovalPolicy] = useState<RemoteApprovalPolicy>("never");
@@ -141,6 +147,7 @@ function AppContent() {
   const installPermissionScreenOpened = useRef(false);
   const modelsLoadingRef = useRef(false);
   const modelSelectionContext = useRef("");
+  const navigationSessionIdRef = useRef<string | null>(null);
   const session = useMemo(
     () => sessionState.connections.find((connection) => connection.id === sessionState.activeConnectionId) || null,
     [sessionState],
@@ -314,10 +321,15 @@ function AppContent() {
   const canApprove = Boolean(session?.accessKey);
 
   useEffect(() => {
+    let active = true;
+    navigationSessionIdRef.current = null;
     setSelectedThreadId(null);
+    setOpeningThreadId(null);
     setNewThreadDraft(false);
     setSelectedProjectPath(null);
+    setNavigationReady(false);
     setProjectDirectories([]);
+    setProjectsLoaded(false);
     setModels([]);
     setSelectedModel("");
     setModelPickerVisible(false);
@@ -327,17 +339,51 @@ function AppContent() {
     setPendingMessages([]);
     setDraft("");
     setThreadAction(null);
-  }, [session?.id]);
+    if (session?.id) {
+      void sessionStore.loadNavigation(session.id).then((navigation) => {
+        if (!active) return;
+        setSelectedProjectPath(navigation.projectPath);
+        setSelectedThreadId(navigation.threadId);
+        setNewThreadDraft(navigation.newThreadDraft);
+        navigationSessionIdRef.current = session.id;
+        setNavigationReady(true);
+      }).catch(() => {
+        if (active) {
+          navigationSessionIdRef.current = session.id;
+          setNavigationReady(true);
+        }
+      });
+    } else {
+      setNavigationReady(true);
+    }
+    return () => { active = false; };
+  }, [session?.id, sessionStore]);
+
+  useEffect(() => {
+    if (!navigationReady || !session?.id || navigationSessionIdRef.current !== session.id) return;
+    void sessionStore.saveNavigation(session.id, {
+      projectPath: selectedProjectPath,
+      threadId: selectedThreadId,
+      newThreadDraft,
+    });
+  }, [navigationReady, newThreadDraft, selectedProjectPath, selectedThreadId, session?.id, sessionStore]);
 
   const loadProjects = useCallback(async () => {
     if (!taskClient) return;
     try {
       const result = await taskClient.listProjects();
       setProjectDirectories(result.projects);
+      setProjectsLoaded(true);
     } catch (error) {
       if (isUnauthorized(error) && session) rejectCredentials(session.id);
     }
   }, [rejectCredentials, session, taskClient]);
+
+  useEffect(() => {
+    if (!control.snapshot.projects) return;
+    setProjectDirectories(control.snapshot.projects);
+    setProjectsLoaded(true);
+  }, [control.snapshot.projects]);
 
   const loadModels = useCallback(async () => {
     if (!taskClient || modelsLoadingRef.current) return;
@@ -371,14 +417,18 @@ function AppContent() {
   }, [control.status, loadModels, loadProjects]);
 
   useEffect(() => {
-    if (selectedThreadId || newThreadDraft || !control.snapshot.threads.length) return;
-    const preferred = [...control.snapshot.threads].sort((left, right) => {
+    if (!navigationReady || newThreadDraft || !control.snapshot.threads.length) return;
+    if (selectedThreadId && control.snapshot.threads.some((thread) => thread.id === selectedThreadId)) return;
+    if (selectedThreadId && control.status !== "online") return;
+    const ordered = [...control.snapshot.threads].sort((left, right) => {
       const activeDifference = Number(isActive(right)) - Number(isActive(left));
       return activeDifference || right.updatedAt.localeCompare(left.updatedAt);
-    })[0];
+    });
+    const preferred = ordered.find((thread) => thread.projectPath === selectedProjectPath) || ordered[0];
     if (preferred) setSelectedThreadId(preferred.id);
     if (preferred) setSelectedProjectPath(preferred.projectPath);
-  }, [control.snapshot.threads, newThreadDraft, selectedThreadId]);
+    if (preferred) setNewThreadDraft(false);
+  }, [control.snapshot.threads, control.status, navigationReady, newThreadDraft, selectedProjectPath, selectedThreadId]);
 
   const modelCatalogKey = useMemo(() => models.map((model) => model.model).join("\n"), [models]);
 
@@ -414,21 +464,46 @@ function AppContent() {
   );
   const selectedIsArchived = Boolean(archivedThreads.some((thread) => thread.id === selectedThreadId));
   const recentProjects = useMemo(
-    () => uniqueProjects(control.snapshot.threads, projectDirectories.map((project) => project.path)),
-    [control.snapshot.threads, projectDirectories],
+    () => registeredProjectPaths(projectDirectories.map((project) => project.path)),
+    [projectDirectories],
   );
+
+  useEffect(() => {
+    if (!selectedThreadId || selectedIsArchived || !taskClient || control.status !== "online") {
+      setOpeningThreadId(null);
+      return undefined;
+    }
+    let cancelled = false;
+    const threadId = selectedThreadId;
+    setOpeningThreadId(threadId);
+    void taskClient.openThread(threadId).then((result) => {
+      if (cancelled) return;
+      control.hydrateThread(result);
+    }).catch((error) => {
+      if (cancelled) return;
+      Alert.alert("\u65e0\u6cd5\u52a0\u8f7d\u5bf9\u8bdd", describeControlError(error));
+      if (isUnauthorized(error) && session) rejectCredentials(session.id);
+    }).finally(() => {
+      if (!cancelled) setOpeningThreadId((current) => current === threadId ? null : current);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [control.hydrateThread, control.status, rejectCredentials, selectedIsArchived, selectedThreadId, session, taskClient]);
+
+  useEffect(() => {
+    if (!projectsLoaded || !selectedProjectPath || isRegisteredProject(selectedProjectPath, recentProjects)) return;
+    setSelectedProjectPath(null);
+    setNewThreadDraft(false);
+  }, [projectsLoaded, recentProjects, selectedProjectPath]);
   const selectedModelOption = useMemo(
     () => models.find((model) => model.model === selectedModel) || null,
     [models, selectedModel],
   );
-  const reasoningEfforts = useMemo(() => {
-    const declared = selectedModelOption?.reasoningEfforts || [];
-    if (declared.length) return declared;
-    const fallback = selectedModelOption?.defaultReasoningEffort;
-    return reasoningEffortValues.includes(fallback as RemoteReasoningEffort)
-      ? [fallback as RemoteReasoningEffort]
-      : ["high" as const];
-  }, [selectedModelOption]);
+  const reasoningEfforts = useMemo(
+    () => remoteModelReasoningEfforts(selectedModelOption),
+    [selectedModelOption],
+  );
 
   useEffect(() => {
     setReasoningEffort((current) => reasoningEfforts.includes(current) ? current : reasoningEfforts[0] || "high");
@@ -576,7 +651,7 @@ function AppContent() {
         ...(selectedModel ? { model: selectedModel } : {}),
         approvalPolicy,
         sandboxMode,
-        reasoningEffort,
+        ...(reasoningEfforts.length ? { reasoningEffort } : {}),
       });
       setPendingMessages((current) => current.map((message) => (
         message.id === id ? { ...message, state: "sent" } : message
@@ -596,7 +671,7 @@ function AppContent() {
     } finally {
       setSending(false);
     }
-  }, [approvalPolicy, attachments, control, draft, newThreadDraft, reasoningEffort, rejectCredentials, sandboxMode, selectedIsArchived, selectedModel, selectedProjectPath, selectedThreadId, sending, session, taskClient]);
+  }, [approvalPolicy, attachments, control, draft, newThreadDraft, reasoningEffort, reasoningEfforts, rejectCredentials, sandboxMode, selectedIsArchived, selectedModel, selectedProjectPath, selectedThreadId, sending, session, taskClient]);
 
   const addPickedAttachments = useCallback(async (picked: PickedAttachment[]) => {
     const available = Math.max(0, 20 - attachments.length);
@@ -669,6 +744,78 @@ function AppContent() {
     }
   }, [addPickedAttachments, attachments.length]);
 
+  const openConversationFile = useCallback(async (file: ConversationFile) => {
+    if (!taskClient) return;
+    try {
+      const request = taskClient.managedFileRequest(file.id);
+      const directory = new Directory(Paths.document, "RHZYCODE");
+      directory.create({ idempotent: true, intermediates: true });
+      const destination = new File(directory, safeDownloadName(file.id, file.name));
+      const downloaded = await File.downloadFileAsync(request.url, destination, {
+        headers: request.headers,
+        idempotent: true,
+      });
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(downloaded.uri, {
+          dialogTitle: file.name,
+          ...(file.mimeType ? { mimeType: file.mimeType } : {}),
+        });
+      } else {
+        Alert.alert("文件已保存", downloaded.uri);
+      }
+    } catch (error) {
+      Alert.alert("无法下载文件", error instanceof Error ? error.message : "文件下载失败。");
+    }
+  }, [taskClient]);
+
+  const fetchGeneratedImage = useCallback(async (image: { id: string; name: string; managed?: boolean }) => {
+    if (!taskClient) throw new Error("尚未连接桌面端。");
+    const source = image.managed
+      ? (() => {
+          const request = taskClient.managedFileRequest(image.id);
+          return { uri: request.url, headers: request.headers };
+        })()
+      : taskClient.generatedImageSource(image.id);
+    const directory = new Directory(Paths.cache, "RHZYCODE", "generated-actions");
+    directory.create({ idempotent: true, intermediates: true });
+    const destination = new File(directory, safeDownloadName(image.id, image.name));
+    return File.downloadFileAsync(source.uri, destination, {
+      headers: source.headers,
+      idempotent: true,
+    });
+  }, [taskClient]);
+
+  const downloadGeneratedImage = useCallback(async (image: { id: string; name: string; managed?: boolean }) => {
+    try {
+      const permission = await requestPermissionsAsync(true, ["photo"]);
+      if (!permission.granted) {
+        Alert.alert("无法保存图片", "需要允许 RHZYCODE 将图片保存到系统相册。");
+        return;
+      }
+      const downloaded = await fetchGeneratedImage(image);
+      await Asset.create(downloaded.uri);
+      Alert.alert("下载完成", "图片已保存到系统相册。");
+    } catch (error) {
+      Alert.alert("无法保存图片", error instanceof Error ? error.message : "图片保存失败。");
+    }
+  }, [fetchGeneratedImage]);
+
+  const shareGeneratedImage = useCallback(async (image: { id: string; name: string; managed?: boolean }) => {
+    try {
+      if (!(await Sharing.isAvailableAsync())) {
+        Alert.alert("无法分享图片", "当前设备不支持系统分享。");
+        return;
+      }
+      const downloaded = await fetchGeneratedImage(image);
+      await Sharing.shareAsync(downloaded.uri, {
+        dialogTitle: image.name,
+        mimeType: imageMimeType(image.name),
+      });
+    } catch (error) {
+      Alert.alert("无法分享图片", error instanceof Error ? error.message : "图片分享失败。");
+    }
+  }, [fetchGeneratedImage]);
+
   const interruptTurn = useCallback(async () => {
     if (!taskClient || !selectedThreadId || interrupting) return;
     setInterrupting(true);
@@ -729,6 +876,32 @@ function AppContent() {
     setThreadActionError(null);
     setDrawerVisible(false);
   }, []);
+
+  const removeProject = useCallback(async (projectPath: string) => {
+    if (!taskClient || control.status !== "online") return;
+    try {
+      const result = await taskClient.removeProject(projectPath);
+      setProjectDirectories(result.projects);
+      if (selectedProjectPath === projectPath) {
+        setSelectedProjectPath(null);
+        setNewThreadDraft(false);
+      }
+    } catch (error) {
+      Alert.alert("无法移除项目", describeControlError(error));
+      if (isUnauthorized(error) && session) rejectCredentials(session.id);
+    }
+  }, [control.status, rejectCredentials, selectedProjectPath, session, taskClient]);
+
+  const confirmRemoveProject = useCallback((projectPath: string) => {
+    Alert.alert(
+      "移除这个项目？",
+      "只会从 RHZYCODE 项目列表中移除，不会删除电脑上的目录或历史对话。",
+      [
+        { text: "取消", style: "cancel" },
+        { text: "移除", style: "destructive", onPress: () => void removeProject(projectPath) },
+      ],
+    );
+  }, [removeProject]);
 
   const runThreadMutation = useCallback(async (
     action: "rename" | "archive" | "unarchive" | "delete",
@@ -897,6 +1070,7 @@ function AppContent() {
         connectionNotice={control.notice}
         connectionStatus={control.status}
         draft={draft}
+        historyLoading={openingThreadId === selectedThreadId}
         inputBusyId={inputBusyId}
         interrupting={interrupting}
         onApproval={(id, decision) => void control.resolveApproval(id, decision)}
@@ -922,6 +1096,9 @@ function AppContent() {
           setModelPickerVisible(true);
           if (!models.length || modelsError) void loadModels();
         }}
+        onOpenFile={openConversationFile}
+        onDownloadGeneratedImage={downloadGeneratedImage}
+        onShareGeneratedImage={shareGeneratedImage}
         onRefresh={() => void control.refresh()}
         onSend={() => void sendMessage()}
         onRemoveAttachment={(index) => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
@@ -932,6 +1109,12 @@ function AppContent() {
         modelPickerEnabled={Boolean(taskClient && control.status === "online")}
         newThreadDraft={newThreadDraft && Boolean(selectedProjectPath)}
         refreshing={control.refreshing}
+        resolveGeneratedImage={(imageId) => taskClient?.generatedImageSource(imageId) || null}
+        resolveManagedImage={(fileId) => {
+          if (!taskClient) return null;
+          const request = taskClient.managedFileRequest(fileId);
+          return { uri: request.url, headers: request.headers };
+        }}
         reasoningEffort={reasoningEffort}
         reasoningEfforts={reasoningEfforts}
         sandboxMode={sandboxMode}
@@ -980,6 +1163,7 @@ function AppContent() {
         onRefreshArchived={() => void loadArchived()}
         onSearchChange={setDrawerSearch}
         onSelectProject={setSelectedProjectPath}
+        onRemoveProject={confirmRemoveProject}
         onSelectThread={selectThread}
         onThreadActions={openThreadActions}
         onHostChange={setDraftHost}
@@ -1004,6 +1188,11 @@ function AppContent() {
         onSelect={(model) => {
           setSelectedModel(model);
           setModelPickerVisible(false);
+          if (taskClient && selectedThreadId) {
+            void taskClient.setThreadModel(selectedThreadId, model)
+              .then(() => control.refresh())
+              .catch((error) => Alert.alert("无法保存模型选择", describeControlError(error)));
+          }
         }}
         selectedModel={selectedModel}
         visible={modelPickerVisible}
@@ -1065,15 +1254,10 @@ function BootScreen({ message, error = false, onRetry }: { message: string; erro
   );
 }
 
-function uniqueProjects(threads: ThreadSummary[], additionalPaths: string[] = []): string[] {
-  return [...new Set(
-    [
-      ...additionalPaths,
-      ...[...threads]
-        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-        .map((thread) => thread.projectPath),
-    ].map((projectPath) => projectPath.trim()).filter(Boolean),
-  )].slice(0, 50);
+function safeDownloadName(id: string, name: string): string {
+  const safeId = id.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 48);
+  const safeName = name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-").slice(0, 160) || "attachment";
+  return `${safeId}-${safeName}`;
 }
 
 function isActive(thread: ThreadSummary): boolean {

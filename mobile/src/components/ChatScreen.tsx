@@ -1,6 +1,8 @@
 import { Feather, Ionicons } from "@expo/vector-icons";
+import { Directory, File, Paths } from "expo-file-system";
 import type {
   ApprovalRequest,
+  ConversationFile,
   ThreadSummary,
   TimelineItem,
   UserInputAnswers,
@@ -29,6 +31,8 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { ApprovalOperation, ConnectionStatus } from "../hooks/use-control-plane";
+import type { AuthenticatedImageSource } from "../api/control-client";
+import { retryGeneratedImageDownload } from "../api/generated-image-retry";
 import { colors } from "../ui/theme";
 import { TaskMenu } from "./TaskMenu";
 import {
@@ -51,6 +55,12 @@ interface ChatScreenProps {
   connectionStatus: ConnectionStatus;
   connectionNotice: string | null;
   refreshing: boolean;
+  historyLoading: boolean;
+  resolveGeneratedImage: (imageId: string) => AuthenticatedImageSource | null;
+  resolveManagedImage: (fileId: string) => AuthenticatedImageSource | null;
+  onOpenFile: (file: ConversationFile) => Promise<void>;
+  onDownloadGeneratedImage: (image: GeneratedImageAction) => Promise<void>;
+  onShareGeneratedImage: (image: GeneratedImageAction) => Promise<void>;
   canWrite: boolean;
   canApprove: boolean;
   newThreadDraft: boolean;
@@ -114,7 +124,8 @@ export function ChatScreen(props: ChatScreenProps) {
   const composerEnabled = Boolean(
     (props.selectedThreadId || props.newThreadDraft)
     && props.canWrite
-    && props.connectionStatus === "online",
+    && props.connectionStatus === "online"
+    && !props.historyLoading,
   );
   const sendDisabled = !composerEnabled || (!props.draft.trim() && !props.attachments.length) || props.sending;
 
@@ -475,7 +486,7 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
       refreshControl={(
         <RefreshControl refreshing={props.refreshing} onRefresh={props.onRefresh} tintColor={colors.ink} />
       )}
-      ListEmptyComponent={<EmptyConversation hasThread={hasThread} page={activePage} />}
+      ListEmptyComponent={<EmptyConversation hasThread={hasThread} loading={props.historyLoading} page={activePage} />}
       onContentSizeChange={() => {
         if (!visibleEntries.length) return;
         if (!didInitialScroll.current) {
@@ -504,7 +515,18 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
       maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
       scrollEventThrottle={100}
       renderItem={({ item }) => {
-        if (item.type === "timeline") return <TimelineRow item={item.item} />;
+        if (item.type === "timeline") {
+          return (
+            <TimelineRow
+              item={item.item}
+              onOpenFile={props.onOpenFile}
+              onDownloadGeneratedImage={props.onDownloadGeneratedImage}
+              onShareGeneratedImage={props.onShareGeneratedImage}
+              resolveGeneratedImage={props.resolveGeneratedImage}
+              resolveManagedImage={props.resolveManagedImage}
+            />
+          );
+        }
         if (item.type === "pending") return <PendingMessageRow message={item.message} />;
         if (item.type === "approval") {
           return (
@@ -554,7 +576,15 @@ function IconButton({
   );
 }
 
-function EmptyConversation({ hasThread, page }: { hasThread: boolean; page: ConversationPage }) {
+function EmptyConversation({ hasThread, loading, page }: { hasThread: boolean; loading: boolean; page: ConversationPage }) {
+  if (loading) {
+    return (
+      <View style={styles.emptyState}>
+        <ActivityIndicator color={colors.ink} size="small" />
+        <Text style={styles.emptyTitle}>{"\u6b63\u5728\u52a0\u8f7d\u5bf9\u8bdd"}</Text>
+      </View>
+    );
+  }
   return (
     <View style={styles.emptyState}>
       <View style={styles.codexMark}>
@@ -567,12 +597,46 @@ function EmptyConversation({ hasThread, page }: { hasThread: boolean; page: Conv
   );
 }
 
-function TimelineRow({ item }: { item: TimelineItem }) {
+interface GeneratedImageAction {
+  id: string;
+  name: string;
+  managed?: boolean;
+}
+
+function TimelineRow({ item, onDownloadGeneratedImage, onOpenFile, onShareGeneratedImage, resolveGeneratedImage, resolveManagedImage }: {
+  item: TimelineItem;
+  onOpenFile: (file: ConversationFile) => Promise<void>;
+  onDownloadGeneratedImage: (image: GeneratedImageAction) => Promise<void>;
+  onShareGeneratedImage: (image: GeneratedImageAction) => Promise<void>;
+  resolveGeneratedImage: (imageId: string) => AuthenticatedImageSource | null;
+  resolveManagedImage: (fileId: string) => AuthenticatedImageSource | null;
+}) {
+  const [imageAction, setImageAction] = useState<"download" | "share" | null>(null);
+  const [previewImage, setPreviewImage] = useState<{
+    id: string;
+    name: string;
+    managed?: boolean;
+    source: RenderableImageSource;
+  } | null>(null);
+  const generatedImages = (item.images || []).flatMap((image) => {
+    const source = resolveGeneratedImage(image.id);
+    return source ? [{ ...image, managed: false, source }] : [];
+  });
+  const files = item.files || [];
+  const managedImages = files.flatMap((file) => {
+    if (file.source !== "generated" || !file.mimeType?.startsWith("image/")) return [];
+    const source = resolveManagedImage(file.id);
+    return source ? [{ id: file.id, name: file.name, managed: true, source }] : [];
+  });
+  const images = [...generatedImages, ...managedImages];
+  const regularFiles = files.filter((file) =>
+    file.source !== "generated" || !file.mimeType?.startsWith("image/"));
   if (item.kind === "user") {
     return (
       <View style={styles.userRow}>
         <View style={styles.userBubble}>
           <Text selectable style={styles.userText}>{item.content || item.title}</Text>
+          {!!files.length && <TimelineFiles files={files} onOpenFile={onOpenFile} />}
           <View style={styles.userBubbleTail} />
         </View>
       </View>
@@ -581,8 +645,75 @@ function TimelineRow({ item }: { item: TimelineItem }) {
   if (item.kind === "assistant") {
     return (
       <View style={styles.assistantRow}>
-        <Text selectable style={styles.assistantText}>{item.content || item.title}</Text>
+        {!!(item.content || item.title) && (
+          <Text selectable style={styles.assistantText}>{item.content || item.title}</Text>
+        )}
+        {!!images.length && (
+          <View style={styles.generatedImages}>
+            {images.map((image) => (
+              <GeneratedImage
+                image={image}
+                key={image.id}
+                onOpen={(source) => setPreviewImage({ id: image.id, name: image.name, managed: image.managed, source })}
+              />
+            ))}
+          </View>
+        )}
+        {!!regularFiles.length && <TimelineFiles files={regularFiles} onOpenFile={onOpenFile} />}
         {item.status === "running" && <ActivityIndicator color={colors.inkMuted} size="small" style={styles.inlineSpinner} />}
+        <Modal
+          animationType="fade"
+          onRequestClose={() => setPreviewImage(null)}
+          statusBarTranslucent
+          transparent
+          visible={Boolean(previewImage)}
+        >
+          <Pressable accessibilityLabel="Close image preview" onPress={() => setPreviewImage(null)} style={styles.imagePreview}>
+            {previewImage && (
+              <Image
+                accessibilityLabel={previewImage.name}
+                resizeMode="contain"
+                source={previewImage.source}
+                style={styles.previewImage}
+              />
+            )}
+            {previewImage && (
+              <View style={styles.previewActions}>
+                <Pressable
+                  accessibilityLabel={`Download ${previewImage.name}`}
+                  accessibilityRole="button"
+                  disabled={imageAction !== null}
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    setImageAction("download");
+                    void onDownloadGeneratedImage(previewImage).finally(() => setImageAction(null));
+                  }}
+                  style={({ pressed }) => [styles.previewAction, pressed && styles.previewActionPressed]}
+                >
+                  {imageAction === "download"
+                    ? <ActivityIndicator color="#ffffff" size="small" />
+                    : <Ionicons color="#ffffff" name="download-outline" size={22} />}
+                </Pressable>
+                <Pressable
+                  accessibilityLabel={`Share ${previewImage.name}`}
+                  accessibilityRole="button"
+                  disabled={imageAction !== null}
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    setImageAction("share");
+                    void onShareGeneratedImage(previewImage).finally(() => setImageAction(null));
+                  }}
+                  style={({ pressed }) => [styles.previewAction, pressed && styles.previewActionPressed]}
+                >
+                  {imageAction === "share"
+                    ? <ActivityIndicator color="#ffffff" size="small" />
+                    : <Ionicons color="#ffffff" name="share-social-outline" size={22} />}
+                </Pressable>
+              </View>
+            )}
+            <Feather color="#ffffff" name="x" size={24} style={styles.previewClose} />
+          </Pressable>
+        </Modal>
       </View>
     );
   }
@@ -612,6 +743,121 @@ function TimelineRow({ item }: { item: TimelineItem }) {
     </View>
   );
 }
+
+function TimelineFiles({ files, onOpenFile }: {
+  files: ConversationFile[];
+  onOpenFile: (file: ConversationFile) => Promise<void>;
+}) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  return (
+    <View style={styles.messageFiles}>
+      {files.map((file) => (
+        <Pressable
+          accessibilityLabel={`Download ${file.name}`}
+          accessibilityRole="button"
+          disabled={busyId === file.id}
+          key={file.id}
+          onPress={() => {
+            setBusyId(file.id);
+            void onOpenFile(file).finally(() => setBusyId(null));
+          }}
+          style={({ pressed }) => [styles.messageFile, pressed && styles.messageFilePressed]}
+        >
+          <View style={styles.messageFileIcon}>
+            {busyId === file.id
+              ? <ActivityIndicator color={colors.inkMuted} size="small" />
+              : <Ionicons color={colors.inkMuted} name="document-outline" size={18} />}
+          </View>
+          <View style={styles.messageFileText}>
+            <Text numberOfLines={2} style={styles.messageFileName}>{file.name}</Text>
+            <Text style={styles.messageFileSize}>{formatFileSize(file.size)}</Text>
+          </View>
+          <Ionicons color={colors.inkMuted} name="download-outline" size={18} />
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
+interface RenderableImageSource {
+  uri: string;
+  headers?: { Authorization: string };
+}
+
+function GeneratedImage({ image, onOpen }: {
+  image: {
+    id: string;
+    name: string;
+    source: AuthenticatedImageSource;
+  };
+  onOpen: (source: RenderableImageSource) => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const [localSource, setLocalSource] = useState<RenderableImageSource | null>(null);
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setFailed(false);
+    setLocalSource(null);
+    const load = async () => {
+      const directory = new Directory(Paths.cache, "RHZYCODE", "generated-images");
+      directory.create({ idempotent: true, intermediates: true });
+      const destination = new File(directory, safeCachedImageName(image.id, image.name));
+      try {
+        const downloaded = await retryGeneratedImageDownload(() =>
+          File.downloadFileAsync(image.source.uri, destination, {
+            headers: image.source.headers,
+            idempotent: true,
+          }));
+        if (active) setLocalSource({ uri: downloaded.uri });
+      } catch {
+        if (!active) return;
+        setLoading(false);
+        setFailed(true);
+      }
+    };
+    void load();
+    return () => { active = false; };
+  }, [image.id, image.name, image.source.headers.Authorization, image.source.uri]);
+  return (
+    <Pressable
+      accessibilityLabel={`View generated image ${image.name}`}
+      accessibilityRole="button"
+      disabled={failed}
+      onPress={() => localSource && onOpen(localSource)}
+      style={({ pressed }) => [styles.generatedImageButton, pressed && !failed && styles.generatedImagePressed]}
+    >
+      {!failed && localSource && (
+        <Image
+          accessibilityLabel={image.name}
+          onError={() => {
+            setFailed(true);
+            setLoading(false);
+          }}
+          onLoadEnd={() => setLoading(false)}
+          resizeMode="contain"
+          source={localSource}
+          style={styles.generatedImage}
+        />
+      )}
+      {loading && <ActivityIndicator color={colors.inkMuted} size="small" style={styles.generatedImageStatus} />}
+      {failed && (
+        <View style={styles.generatedImageStatus}>
+          <Feather color={colors.inkMuted} name="image" size={22} />
+          <Text style={styles.generatedImageError}>图片加载失败</Text>
+        </View>
+      )}
+    </Pressable>
+  );
+}
+
+function safeCachedImageName(id: string, name: string): string {
+  const extension = name.match(/\.(?:gif|jpe?g|png|webp)$/i)?.[0] || ".png";
+  const safeId = id.replace(/\.[a-zA-Z0-9]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 120) || "generated-image";
+  return `${safeId}${extension}`;
+}
+
 
 function PendingMessageRow({ message }: { message: PendingMessage }) {
   const [previewImage, setPreviewImage] = useState<{ name: string; uri: string } | null>(null);
@@ -821,7 +1067,8 @@ function UserInputRow({
   );
 }
 
-function composerPlaceholder(props: Pick<ChatScreenProps, "selectedThreadId" | "newThreadDraft" | "canWrite" | "connectionStatus">): string {
+function composerPlaceholder(props: Pick<ChatScreenProps, "selectedThreadId" | "newThreadDraft" | "canWrite" | "connectionStatus" | "historyLoading">): string {
+  if (props.historyLoading) return "\u6b63\u5728\u52a0\u8f7d\u5bf9\u8bdd";
   if (!props.selectedThreadId && !props.newThreadDraft) return "点击右上角 + 新建对话";
   if (!props.canWrite) return "当前设备只有查看权限";
   if (props.connectionStatus !== "online") return "电脑连接后可发送消息";
@@ -942,17 +1189,27 @@ const styles = StyleSheet.create({
   messageImage: { width: 148, height: 108, borderRadius: 6, backgroundColor: colors.subtle },
   messageFiles: { gap: 6, marginTop: 8 },
   messageFile: { width: 240, maxWidth: "100%", minHeight: 48, flexDirection: "row", alignItems: "center", paddingHorizontal: 9, paddingVertical: 7, borderWidth: 1, borderColor: "#69bd43", borderRadius: 6, backgroundColor: "#ffffffaa" },
+  messageFilePressed: { opacity: 0.72 },
   messageFileIcon: { width: 30, height: 30, alignItems: "center", justifyContent: "center", borderRadius: 5, backgroundColor: colors.subtle },
   messageFileText: { flex: 1, minWidth: 0, marginLeft: 8 },
   messageFileName: { color: colors.ink, fontSize: 12, lineHeight: 16, fontWeight: "600", letterSpacing: 0 },
   messageFileSize: { color: colors.inkMuted, fontSize: 10, lineHeight: 14, marginTop: 1, letterSpacing: 0 },
   imagePreview: { flex: 1, alignItems: "center", justifyContent: "center", padding: 20, backgroundColor: "#101310ee" },
   previewImage: { width: "100%", height: "100%" },
+  previewActions: { position: "absolute", top: 38, right: 58, flexDirection: "row", gap: 8 },
+  previewAction: { width: 40, height: 40, alignItems: "center", justifyContent: "center", borderRadius: 6, backgroundColor: "#ffffff1f" },
+  previewActionPressed: { backgroundColor: "#ffffff38" },
   previewClose: { position: "absolute", top: 48, right: 20 },
   pendingLabel: { color: colors.inkFaint, fontSize: 10, lineHeight: 14, marginTop: 5, letterSpacing: 0 },
   failedLabel: { color: colors.danger },
   assistantRow: { minWidth: 0, marginBottom: 20 },
   assistantText: { color: colors.ink, fontSize: 15, lineHeight: 23, letterSpacing: 0 },
+  generatedImages: { width: "100%", marginTop: 8, gap: 8 },
+  generatedImageButton: { width: "100%", maxWidth: 420, aspectRatio: 4 / 3, overflow: "hidden", borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, borderRadius: 7, backgroundColor: colors.subtle },
+  generatedImagePressed: { opacity: 0.88 },
+  generatedImage: { width: "100%", height: "100%" },
+  generatedImageStatus: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0, alignItems: "center", justifyContent: "center", gap: 7 },
+  generatedImageError: { color: colors.inkMuted, fontSize: 11, lineHeight: 15, letterSpacing: 0 },
   inlineSpinner: { alignSelf: "flex-start", marginTop: 8 },
   activityRow: { marginBottom: 18 },
   activityHeader: { flexDirection: "row", alignItems: "flex-start" },

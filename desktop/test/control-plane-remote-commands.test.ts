@@ -31,6 +31,10 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
       calls.push({ command: "project.create", clientId: context.client.id, value: request });
       return { project: { path: request.path, name: "mobile-new" }, created: true };
     },
+    async forgetProject(request, context) {
+      calls.push({ command: "project.forget", clientId: context.client.id, value: request });
+      return { projects: [] };
+    },
     async browseProjects(request, context) {
       calls.push({ command: "project.browse", clientId: context.client.id, value: request });
       return { path: request.path || null, parentPath: null, directories: [{ path: "D:\\work", name: "work" }] };
@@ -56,6 +60,30 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
         acceptedAt: new Date().toISOString(),
       };
     },
+    async openThread(threadId, context) {
+      calls.push({ command: "thread.open", clientId: context.client.id, value: { threadId } });
+      const createdAt = new Date().toISOString();
+      return {
+        thread: {
+          id: threadId,
+          hostId: "local-desktop",
+          title: "Remote task",
+          projectPath: "D:\\work",
+          model: "test/model",
+          status: "completed",
+          updatedAt: createdAt,
+        },
+        timeline: [{
+          id: "timeline-remote",
+          threadId,
+          kind: "assistant",
+          status: "completed",
+          title: "RHZYCODE",
+          content: "Restored response",
+          createdAt,
+        }],
+      };
+    },
     async startTurn(threadId, request, context) {
       calls.push({ command: "turn.start", clientId: context.client.id, value: { threadId, request } });
       return {
@@ -71,6 +99,10 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
     async submitUserInput(requestId, request, context) {
       calls.push({ command: "user-input.submit", clientId: context.client.id, value: { requestId, request } });
       return { requestId, acceptedAt: new Date().toISOString() };
+    },
+    async setThreadModel(threadId, request, context) {
+      calls.push({ command: "thread.model", clientId: context.client.id, value: { threadId, request } });
+      return { threadId, acceptedAt: new Date().toISOString() };
     },
     async renameThread(threadId, request, context) {
       calls.push({ command: "thread.rename", clientId: context.client.id, value: { threadId, request } });
@@ -142,6 +174,18 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
   assert.equal(createdProject.statusCode, 201);
   assert.equal(createdProject.json().project.name, "mobile-new");
 
+  const removedProject = await controlPlane.app.inject({
+    method: "DELETE",
+    url: "/v1/commands/projects",
+    headers: {
+      authorization: `Bearer ${taskToken}`,
+      "idempotency-key": "project-forget-0001",
+    },
+    payload: { path: "D:\\work\\mobile-new" },
+  });
+  assert.equal(removedProject.statusCode, 200);
+  assert.deepEqual(removedProject.json(), { projects: [] });
+
   const startedThread = await controlPlane.app.inject({
     method: "POST",
     url: "/v1/commands/threads/start",
@@ -176,7 +220,7 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
   });
   assert.equal(replayedThread.statusCode, 201);
   assert.deepEqual(replayedThread.json(), startedThread.json());
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 6);
 
   const conflictingReplay = await controlPlane.app.inject({
     method: "POST",
@@ -188,7 +232,16 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
     payload: { projectPath: "D:\\other" },
   });
   assert.equal(conflictingReplay.statusCode, 409);
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 6);
+
+  const openedThread = await controlPlane.app.inject({
+    method: "GET",
+    url: "/v1/commands/threads/thread-remote",
+    headers: { authorization: `Bearer ${taskToken}` },
+  });
+  assert.equal(openedThread.statusCode, 200);
+  assert.equal(openedThread.json().thread.id, "thread-remote");
+  assert.equal(openedThread.json().timeline[0]?.content, "Restored response");
 
   const archivedThreads = await controlPlane.app.inject({
     method: "GET",
@@ -254,6 +307,17 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
   assert.equal(replayedInput.statusCode, 202);
   assert.deepEqual(replayedInput.json(), submittedInput.json());
 
+  const changedModel = await controlPlane.app.inject({
+    method: "POST",
+    url: "/v1/commands/threads/thread-remote/model",
+    headers: {
+      authorization: `Bearer ${taskToken}`,
+      "idempotency-key": "thread-model-0001",
+    },
+    payload: { model: "sub2api/gpt-switched" },
+  });
+  assert.equal(changedModel.statusCode, 200);
+
   const renamed = await controlPlane.app.inject({
     method: "POST",
     url: "/v1/commands/threads/thread-remote/rename",
@@ -297,11 +361,14 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
     "project.browse",
     "model.list",
     "project.create",
+    "project.forget",
     "thread.start",
+    "thread.open",
     "thread.list-archived",
     "turn.start",
     "turn.interrupt",
     "user-input.submit",
+    "thread.model",
     "thread.rename",
     "thread.archive",
     "thread.unarchive",
@@ -312,9 +379,11 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
   const audit = mobileAccess.status().audit;
   assert.equal(audit.some((entry) => entry.action === "task.thread_started"), true);
   assert.equal(audit.some((entry) => entry.action === "project.created"), true);
+  assert.equal(audit.some((entry) => entry.action === "project.removed"), true);
   assert.equal(audit.some((entry) => entry.action === "task.turn_started"), true);
   assert.equal(audit.some((entry) => entry.action === "task.turn_interrupted"), true);
   assert.equal(audit.some((entry) => entry.action === "task.user_input_submitted"), true);
+  assert.equal(audit.some((entry) => entry.action === "task.thread_model_changed"), true);
   assert.equal(audit.some((entry) => entry.action === "task.thread_renamed"), true);
   assert.equal(audit.some((entry) => entry.action === "task.thread_archived"), true);
   assert.equal(audit.some((entry) => entry.action === "task.thread_unarchived"), true);
@@ -353,6 +422,9 @@ test("maps unavailable and rejected desktop commands to stable HTTP errors", asy
       },
       async startThread() {
         throw new ControlCommandError("unavailable");
+      },
+      async openThread() {
+        throw new ControlCommandError("not_found");
       },
       async startTurn() {
         throw new ControlCommandError("not_found");

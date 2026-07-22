@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, safeStorage } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, safeStorage, shell } from "electron";
 import updaterPackage from "electron-updater";
 import {
   ControlStore,
@@ -8,14 +8,14 @@ import {
 } from "./control-plane/app";
 import fs from "node:fs";
 import os from "node:os";
-import { extname, isAbsolute, join, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { DesktopRuntime } from "./runtime";
 import {
   ProjectDirectoryRegistry,
   normalizeProjectDirectoryState,
   type ProjectDirectoryState,
 } from "./project-directories";
-import type { ComposerAttachment } from "../shared/desktop-api";
+import type { ComposerAttachment, SkillsStatus } from "../shared/desktop-api";
 import { ProviderCredentialStore } from "./credential-store";
 import { detectLlmProtocol } from "./llm-protocol";
 import { DesktopSettingsStore, isValidSyncPort } from "./desktop-settings";
@@ -25,10 +25,12 @@ import { UpdateManager, type UpdateAdapter } from "./update-manager";
 import { EncryptedControlPersistence, EncryptedStateFile, type PersistenceStatus } from "./control-persistence";
 import { AppServerClient } from "./app-server";
 import {
+  normalizeCodexSessionProviders,
   runFirstLaunchEnvironmentMigrations,
   type EnvironmentMigrationSource,
 } from "./environment-migration";
 import { selectGatewayRoot } from "./gateway-module";
+import { SkillsManager } from "./skills-manager";
 import {
   validateApprovalResolution,
   validateClipboardText,
@@ -36,6 +38,9 @@ import {
   validateIdentifier,
   validateLlmProviderConfiguration,
   validateProjectPath,
+  validateSkillEnabled,
+  validateSkillImportSource,
+  validateSkillPath,
   validateStartThread,
   validateStartTurn,
   validateSyncPort,
@@ -43,6 +48,7 @@ import {
   validateTerminalStart,
   validateTerminalWrite,
   validateThreadListOptions,
+  validateThreadModel,
   validateThreadRename,
   validateUserInputResolution,
 } from "./ipc-validation";
@@ -123,8 +129,21 @@ function registerIpc(
   updates: UpdateManager,
   mobileAccess: MobileAccessManager,
   desktopSettings: DesktopSettingsStore,
+  skillsManager: SkillsManager,
   getPersistenceStatus: () => PersistenceStatus,
 ): void {
+  const listSkills = async (forceReload = false): Promise<SkillsStatus> => {
+    const result = await activeRuntime.listSkills(forceReload);
+    return {
+      skills: result.skills.map((skill) => ({
+        ...skill,
+        canRemove: skill.scope === "user" && skillsManager.canRemove(skill.path),
+      })),
+      errors: result.errors,
+      sources: skillsManager.getSourceStatus(),
+    };
+  };
+
   ipcMain.handle("agent:status", () => activeRuntime.agent.getStatus());
   ipcMain.handle("agent:connect", async () => {
     await startupEnvironmentMigration;
@@ -146,6 +165,10 @@ function registerIpc(
   ipcMain.handle("agent:thread:unarchive", (_event, threadId: unknown) =>
     activeRuntime.unarchiveThread(validateIdentifier(threadId, "threadId")),
   );
+  ipcMain.handle("agent:thread:model", (_event, threadId: unknown, model: unknown) => {
+    const input = validateThreadModel(threadId, model);
+    return activeRuntime.setThreadModel(input.threadId, input.model);
+  });
   ipcMain.handle("agent:thread:rename", (_event, threadId: unknown, name: unknown) => {
     const input = validateThreadRename(threadId, name);
     return activeRuntime.renameThread(input.threadId, input.name);
@@ -235,6 +258,33 @@ function registerIpc(
       gateway: activeRuntime.gateway.getStatus(),
       gatewayError,
     };
+  });
+  ipcMain.handle("skills:list", (_event, forceReload: unknown) =>
+    listSkills(forceReload === undefined ? false : validateSkillEnabled(forceReload)));
+  ipcMain.handle("skills:install", async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      properties: ["openDirectory"],
+      title: "Choose a Skill directory",
+    });
+    if (result.canceled || !result.filePaths[0]) return null;
+    const installedName = skillsManager.install(result.filePaths[0]);
+    return { installedName, status: await listSkills(true) };
+  });
+  ipcMain.handle("skills:import", async (_event, source: unknown) => {
+    const summary = skillsManager.import(validateSkillImportSource(source));
+    return { ...summary, status: await listSkills(true) };
+  });
+  ipcMain.handle(
+    "skills:enabled:set",
+    async (_event, skillPath: unknown, enabled: unknown) => {
+      const path = validateSkillPath(skillPath);
+      await activeRuntime.setSkillEnabled(path, validateSkillEnabled(enabled));
+      return listSkills(true);
+    },
+  );
+  ipcMain.handle("skills:remove", async (_event, skillPath: unknown) => {
+    skillsManager.remove(validateSkillPath(skillPath));
+    return listSkills(true);
   });
   ipcMain.handle("updates:status", () => updates.getStatus());
   ipcMain.handle("updates:check", () => updates.check());
@@ -328,6 +378,27 @@ function registerIpc(
     if (bytes.byteLength > 25 * 1024 * 1024) throw new Error("Image is too large to preview.");
     return `data:${mimeType};base64,${bytes.toString("base64")}`;
   });
+  ipcMain.handle("project:open-local-file", async (_event, value: unknown) => {
+    const filePath = validateLocalFilePath(value);
+    const error = await shell.openPath(filePath);
+    if (error) throw new Error(error);
+  });
+  ipcMain.handle("project:reveal-local-file", (_event, value: unknown) => {
+    shell.showItemInFolder(validateLocalFilePath(value));
+  });
+  ipcMain.handle("project:save-local-file", async (_event, value: unknown, suggestedName: unknown) => {
+    const sourcePath = validateLocalFilePath(value);
+    const defaultName = typeof suggestedName === "string" && suggestedName.trim()
+      ? basename(suggestedName.trim())
+      : basename(sourcePath);
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      title: "Save generated file",
+      defaultPath: defaultName,
+    });
+    if (result.canceled || !result.filePath) return null;
+    if (resolve(result.filePath) !== resolve(sourcePath)) fs.copyFileSync(sourcePath, result.filePath);
+    return result.filePath;
+  });
 
   activeRuntime.on("agent:status", (status) => mainWindow?.webContents.send("agent:status", status));
   activeRuntime.on("agent:message", (message) => mainWindow?.webContents.send("agent:message", message));
@@ -368,6 +439,13 @@ async function chooseProjectDirectory(): Promise<string | null> {
 function isImagePath(filePath: string): boolean {
   return new Set([".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"])
     .has(extname(filePath).toLowerCase());
+}
+
+function validateLocalFilePath(value: unknown): string {
+  if (typeof value !== "string" || !isAbsolute(value)) throw new Error("File path is invalid.");
+  const stats = fs.statSync(value);
+  if (!stats.isFile()) throw new Error("File is no longer available.");
+  return value;
 }
 
 function pastedImageDirectory(): string {
@@ -540,6 +618,10 @@ app.whenReady().then(async () => {
   );
   traceStartup("project-directories-loaded");
   const codexHome = resolveCodexHome();
+  const skillsManager = new SkillsManager(join(codexHome, "skills"), {
+    codex: join(resolveUserCodexHome(), "skills"),
+    claude: join(os.homedir(), ".claude", "skills"),
+  });
   runtime = new DesktopRuntime(
     gatewayRoot,
     codexHome,
@@ -551,7 +633,7 @@ app.whenReady().then(async () => {
     runtimeGatewayConfigPath,
   );
   traceStartup("runtime-created");
-  registerIpc(runtime, credentials, updates, mobileAccess, desktopSettings, () => ({
+  registerIpc(runtime, credentials, updates, mobileAccess, desktopSettings, skillsManager, () => ({
     encryptionAvailable: encryption.isAvailable(),
     controlState: controlPersistence!.getLoadStatus(),
     mobileAccessState: mobileAccessState.getLoadStatus(),
@@ -570,6 +652,16 @@ app.whenReady().then(async () => {
   try {
     await runStartupEnvironmentMigrations(codexHome, projectDirectories, window);
     traceStartup("environment-migration-checked");
+    const providerNormalization = normalizeCodexSessionProviders(codexHome);
+    traceStartup(
+      `session-providers-normalized: ${providerNormalization.normalizedCount}/${providerNormalization.examinedCount}`,
+    );
+    if (providerNormalization.failedCount > 0) {
+      window.webContents.send(
+        "agent:diagnostic",
+        `${providerNormalization.failedCount} migrated conversation(s) could not be made compatible with the local model gateway.`,
+      );
+    }
     await runtime.start();
   } catch (error) {
     window.webContents.send("agent:diagnostic", String(error));

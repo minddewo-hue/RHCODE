@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   migrateCodexSessions,
+  normalizeCodexSessionProviders,
   planCodexSessionMigration,
   runFirstLaunchEnvironmentMigrations,
   type EnvironmentMigrationSource,
@@ -58,6 +59,53 @@ test("copies valid Codex conversations without overwriting local sessions", (con
   assert.equal(afterFirstLine(
     fs.readFileSync(path.join(destinationHome, "sessions", "2026", "07", "22", "rollout-active.jsonl")),
   ).equals(afterFirstLine(fs.readFileSync(active))), true);
+});
+
+test("normalizes imported provider metadata without changing conversation text", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-provider-normalization-"));
+  const active = path.join(root, "sessions", "2026", "07", "22", "rollout-provider.jsonl");
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.dirname(active), { recursive: true });
+  fs.writeFileSync(active, [
+    JSON.stringify({
+      timestamp: "2026-07-22T00:00:00.000Z",
+      type: "session_meta",
+      payload: { id: "provider-id", session_id: "provider-id", source: "vscode", model_provider: "openai" },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-22T00:00:01.000Z",
+      type: "event_msg",
+      payload: {
+        type: "thread_settings_applied",
+        thread_settings: { model_provider_id: "OpenAI", model: "gpt-test" },
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-22T00:00:02.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: 'Keep model_provider = "OpenAI" unchanged.' }],
+      },
+    }),
+    "",
+  ].join("\n"), "utf8");
+
+  assert.deepEqual(normalizeCodexSessionProviders(root), {
+    examinedCount: 1,
+    normalizedCount: 1,
+    failedCount: 0,
+  });
+  const records = fs.readFileSync(active, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(records[0].payload.model_provider, "rhzy_gateway");
+  assert.equal(records[1].payload.thread_settings.model_provider_id, "rhzy_gateway");
+  assert.equal(records[2].payload.content[0].text, 'Keep model_provider = "OpenAI" unchanged.');
+  assert.deepEqual(normalizeCodexSessionProviders(root), {
+    examinedCount: 1,
+    normalizedCount: 0,
+    failedCount: 0,
+  });
 });
 
 test("prompts for Codex and Claude separately and records the first-launch decision", async (context) => {

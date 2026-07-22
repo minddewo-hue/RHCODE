@@ -9,6 +9,7 @@ export const secureSessionKeys = {
 } as const;
 
 const connectionKeyPrefix = "rhzycode.connectionKey.v2.";
+const navigationKeyPrefix = "rhzycode.navigation.v1.";
 
 export interface SecureStorageAdapter {
   getItemAsync(key: string): Promise<string | null>;
@@ -28,6 +29,12 @@ export interface MobileSessionState {
   activeConnectionId: string | null;
 }
 
+export interface MobileNavigationState {
+  projectPath: string | null;
+  threadId: string | null;
+  newThreadDraft: boolean;
+}
+
 export interface SavedConnectionInput {
   id?: string;
   host: string;
@@ -43,6 +50,10 @@ interface StoredConnection {
 
 export function secureConnectionKey(id: string): string {
   return `${connectionKeyPrefix}${id}`;
+}
+
+export function mobileNavigationKey(id: string): string {
+  return `${navigationKeyPrefix}${id}`;
 }
 
 export class SecureSessionStore {
@@ -119,6 +130,25 @@ export class SecureSessionStore {
     };
   }
 
+  async loadNavigation(id: string): Promise<MobileNavigationState> {
+    const value = await this.storage.getItemAsync(mobileNavigationKey(id));
+    if (!value) return emptyNavigationState();
+    try {
+      const parsed = JSON.parse(value) as Partial<MobileNavigationState>;
+      return {
+        projectPath: typeof parsed.projectPath === "string" ? parsed.projectPath : null,
+        threadId: typeof parsed.threadId === "string" ? parsed.threadId : null,
+        newThreadDraft: parsed.newThreadDraft === true,
+      };
+    } catch {
+      return emptyNavigationState();
+    }
+  }
+
+  async saveNavigation(id: string, state: MobileNavigationState): Promise<void> {
+    await this.storage.setItemAsync(mobileNavigationKey(id), JSON.stringify(state));
+  }
+
   async removeConnection(id: string): Promise<MobileSessionState> {
     const current = await this.load();
     const connections = current.connections.filter((connection) => connection.id !== id);
@@ -128,6 +158,7 @@ export class SecureSessionStore {
     await Promise.all([
       this.writeConnectionMetadata(connections),
       this.storage.deleteItemAsync(secureConnectionKey(id)),
+      this.storage.deleteItemAsync(mobileNavigationKey(id)),
       activeConnectionId
         ? this.storage.setItemAsync(secureSessionKeys.activeConnectionId, activeConnectionId)
         : this.storage.deleteItemAsync(secureSessionKeys.activeConnectionId),
@@ -173,6 +204,10 @@ export class SecureSessionStore {
     const metadata: StoredConnection[] = connections.map(({ id, host, port }) => ({ id, host, port }));
     await this.storage.setItemAsync(secureSessionKeys.connections, JSON.stringify(metadata));
   }
+}
+
+function emptyNavigationState(): MobileNavigationState {
+  return { projectPath: null, threadId: null, newThreadDraft: false };
 }
 
 function parseConnections(value: string | null): StoredConnection[] {

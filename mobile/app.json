@@ -2,7 +2,7 @@
   "expo": {
     "name": "RHZYCODE",
     "slug": "rhzycode",
-    "version": "0.1.9",
+    "version": "0.1.10",
     "icon": "./assets/icon.png",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
@@ -12,7 +12,7 @@
     },
     "android": {
       "package": "ai.rhzy.code",
-      "versionCode": 10,
+      "versionCode": 11,
       "permissions": [
         "REQUEST_INSTALL_PACKAGES"
       ],
@@ -24,6 +24,16 @@
     "plugins": [
       "expo-secure-store",
       "expo-status-bar",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "允许 RHZYCODE 访问相册中的图片。",
+          "savePhotosPermission": "允许 RHZYCODE 将生成的图片保存到相册。",
+          "granularPermissions": [
+            "photo"
+          ]
+        }
+      ],
       [
         "expo-image-picker",
         {

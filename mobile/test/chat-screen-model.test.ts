@@ -41,6 +41,47 @@ test("builds result entries only for the selected thread", () => {
   assert.ok(entries.every(isResultEntry));
 });
 
+test("keeps generated image references in assistant result entries", () => {
+  const generated = {
+    ...timeline("generated-1", "thread-1", "assistant", ""),
+    images: [{
+      id: "generated-image-a1b2c3d4e5f60708.png",
+      name: "generated-image-a1b2c3d4e5f60708.png",
+      generated: true,
+    }],
+  } satisfies TimelineItem;
+  const entries = buildChatEntries({
+    selectedThreadId: "thread-1",
+    timeline: [generated],
+    pendingMessages: [],
+    ...emptyRequests,
+  }, false);
+
+  assert.equal(entries[0]?.type, "timeline");
+  if (entries[0]?.type === "timeline") assert.deepEqual(entries[0].item.images, generated.images);
+});
+
+test("keeps downloadable generated files in assistant result entries", () => {
+  const generated = {
+    ...timeline("generated-file-1", "thread-1", "assistant", ""),
+    files: [{
+      id: "file-report-1",
+      name: "report.pdf",
+      size: 42,
+      source: "generated" as const,
+    }],
+  } satisfies TimelineItem;
+  const entries = buildChatEntries({
+    selectedThreadId: "thread-1",
+    timeline: [generated],
+    pendingMessages: [],
+    ...emptyRequests,
+  }, false);
+
+  assert.equal(entries[0]?.type, "timeline");
+  if (entries[0]?.type === "timeline") assert.deepEqual(entries[0].item.files, generated.files);
+});
+
 test("keeps a pending message with attachments without duplicating its timeline message", () => {
   const pending: PendingMessage = {
     id: "pending-1",

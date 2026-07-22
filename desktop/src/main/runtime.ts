@@ -7,6 +7,7 @@ import path from "node:path";
 import type {
   AgentEvent,
   ApprovalRequest,
+  ConversationFile,
   ConversationMessage,
   ThreadDetail,
   ThreadStatus,
@@ -21,10 +22,13 @@ import type {
   ProjectDirectory,
   RemoteProjectCreateRequest,
   RemoteProjectCreateResult,
+  RemoteProjectForgetRequest,
   RemoteProjectListResult,
   RemoteDirectoryBrowseRequest,
   RemoteDirectoryBrowseResult,
   RemoteThreadMutationResult,
+  RemoteThreadOpenResult,
+  RemoteThreadModelRequest,
   RemoteThreadRenameRequest,
   RemoteThreadStartRequest,
   RemoteThreadStartResult,
@@ -49,8 +53,30 @@ import {
   ProjectDirectoryError,
   ProjectDirectoryRegistry,
 } from "./project-directories";
-import type { ApprovalPolicy, ComposerAttachment, ReasoningEffort, SandboxMode } from "../shared/desktop-api";
-import { saveRemoteAttachments } from "./remote-attachment-store";
+import type {
+  ApprovalPolicy,
+  ComposerAttachment,
+  ReasoningEffort,
+  SandboxMode,
+  SkillInfo,
+  SkillLoadError,
+  SkillScope,
+} from "../shared/desktop-api";
+import { removeRemoteAttachments, saveRemoteAttachments } from "./remote-attachment-store";
+import {
+  materializeGeneratedImage,
+  type StoredGeneratedImage,
+} from "./generated-image-store";
+import {
+  loadRolloutGeneratedImages,
+  type RolloutGeneratedImage,
+} from "./generated-image-rollout";
+import { loadRolloutThreadState } from "./rollout-thread-state";
+import {
+  ManagedFileStore,
+  resolveArtifactPaths,
+  type ManagedFileRecord,
+} from "./managed-file-store";
 
 interface RpcMessage {
   id?: number | string;
@@ -71,7 +97,14 @@ interface PendingUserInput {
   questions: UserInputQuestion[];
 }
 
+interface PendingCompaction {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
 const ROLLOUT_WRITE_RETRY_DELAYS_MS = [25, 50, 100, 200, 400] as const;
+const INTERNAL_MODEL_PROVIDER_ID = "rhzy_gateway";
 
 function isRolloutNotReadyMessage(message: string): boolean {
   return /no rollout found|rollout\b.*\bis empty/i.test(message);
@@ -99,6 +132,27 @@ interface ServerTurn {
   startedAt?: number | null;
   completedAt?: number | null;
   items?: Array<Record<string, unknown>>;
+}
+
+interface ServerSkill {
+  name: string;
+  description: string;
+  enabled: boolean;
+  path: string;
+  scope: SkillScope;
+  shortDescription?: string | null;
+  interface?: {
+    displayName?: string | null;
+    shortDescription?: string | null;
+  } | null;
+}
+
+interface ServerSkillsListResponse {
+  data: Array<{
+    cwd: string;
+    skills: ServerSkill[];
+    errors: SkillLoadError[];
+  }>;
 }
 
 export interface SyncModuleStatus {
@@ -131,11 +185,18 @@ export class DesktopRuntime extends EventEmitter {
   private streamingItems = new Set<string>();
   private activeTurns = new Map<string, string>();
   private pendingTurnStarts = new Set<string>();
+  private remoteAttachments = new Map<string, string[]>();
+  private loadedThreadIds = new Set<string>();
+  private threadLoadPromises = new Map<string, Promise<ThreadDetail>>();
+  private publishedGeneratedImageIds = new Set<string>();
+  private publishedManagedFileIds = new Set<string>();
   private pendingApprovals = new Map<string, PendingApproval>();
   private pendingUserInputs = new Map<string, PendingUserInput>();
+  private pendingCompactions = new Map<string, PendingCompaction>();
   private activeThreadId: string | null = null;
   private terminalSession: TerminalSessionStatus | null = null;
   private stopping = false;
+  private readonly managedFiles: ManagedFileStore;
 
   constructor(
     private readonly gatewayRoot: string,
@@ -149,6 +210,8 @@ export class DesktopRuntime extends EventEmitter {
   ) {
     super();
     this.gateway = new GatewayModule(gatewayRoot, undefined, gatewayConfigPath);
+    this.managedFiles = new ManagedFileStore(path.join(codexHome, "attachments"));
+    removeRemoteAttachments(path.join(codexHome, "temp", "mobile-attachments"));
     this.syncStatus = {
       state: "stopped",
       host: resolveAdvertisedSyncHost(syncHost),
@@ -165,11 +228,6 @@ export class DesktopRuntime extends EventEmitter {
         ? { ...restoredThread, status: "interrupted" as const, updatedAt: restoredAt }
         : restoredThread;
       this.threads.set(thread.id, thread);
-      try {
-        this.projectDirectories.remember(thread.projectPath);
-      } catch {
-        // Stale conversation paths remain visible but are not offered as available projects.
-      }
       if (wasActive) restoredControlStore?.upsertThread(thread);
     }
 
@@ -177,7 +235,10 @@ export class DesktopRuntime extends EventEmitter {
     this.agent.on("status", (status) => this.emit("agent:status", status));
     this.agent.on("diagnostic", (message) => this.emit("agent:diagnostic", message));
     this.agent.on("message", (message) => this.handleAgentMessage(message as RpcMessage));
-    this.projectDirectories.on("changed", (projects) => this.emit("projects:changed", projects));
+    this.projectDirectories.on("changed", (projects) => {
+      this.emit("projects:changed", projects);
+      this.controlPlane?.store.setProjects(projects);
+    });
   }
 
   async start(): Promise<void> {
@@ -190,6 +251,15 @@ export class DesktopRuntime extends EventEmitter {
     this.stopping = true;
     this.activeTurns.clear();
     this.pendingTurnStarts.clear();
+    for (const pending of this.pendingCompactions.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("Agent Host stopped during conversation compaction."));
+    }
+    this.pendingCompactions.clear();
+    this.loadedThreadIds.clear();
+    this.threadLoadPromises.clear();
+    this.publishedGeneratedImageIds.clear();
+    this.clearAllRemoteAttachments();
     this.cancelPendingRequests();
     this.agent.stop();
     this.terminalSession = null;
@@ -203,6 +273,7 @@ export class DesktopRuntime extends EventEmitter {
   async restartGateway(): Promise<void> {
     this.activeTurns.clear();
     this.pendingTurnStarts.clear();
+    this.clearAllRemoteAttachments();
     this.cancelPendingRequests();
     this.agent.stop();
     this.terminalSession = null;
@@ -214,6 +285,7 @@ export class DesktopRuntime extends EventEmitter {
   async stopGateway(): Promise<void> {
     this.activeTurns.clear();
     this.pendingTurnStarts.clear();
+    this.clearAllRemoteAttachments();
     this.cancelPendingRequests();
     this.agent.stop();
     this.terminalSession = null;
@@ -337,6 +409,7 @@ export class DesktopRuntime extends EventEmitter {
   getSnapshot() {
     return this.controlPlane?.store.snapshot() || this.restoredControlStore?.snapshot() || {
       hosts: [],
+      projects: this.projectDirectories.list(),
       threads: [],
       timeline: [],
       approvals: [],
@@ -347,6 +420,55 @@ export class DesktopRuntime extends EventEmitter {
 
   async listModels<T>(): Promise<T> {
     return this.agent.request<T>("model/list", { cursor: null, includeHidden: false, limit: 100 });
+  }
+
+  async listSkills(forceReload = false): Promise<{
+    skills: Array<Omit<SkillInfo, "canRemove">>;
+    errors: SkillLoadError[];
+  }> {
+    const projectPaths = this.projectDirectories.list().map((project) => project.path);
+    const response = await this.agent.request<ServerSkillsListResponse>("skills/list", {
+      cwds: projectPaths.length > 0 ? projectPaths : [path.resolve(process.cwd())],
+      forceReload,
+    });
+    const skills = new Map<string, Omit<SkillInfo, "canRemove">>();
+    const errors = new Map<string, SkillLoadError>();
+    for (const entry of response.data || []) {
+      for (const skill of entry.skills || []) {
+        const key = comparablePath(skill.path);
+        if (skills.has(key)) continue;
+        const shortDescription = skill.interface?.shortDescription
+          || skill.shortDescription
+          || null;
+        skills.set(key, {
+          name: skill.name,
+          displayName: skill.interface?.displayName || skill.name,
+          description: skill.description,
+          shortDescription,
+          enabled: skill.enabled,
+          path: skill.path,
+          scope: skill.scope,
+        });
+      }
+      for (const error of entry.errors || []) {
+        errors.set(`${comparablePath(error.path)}\0${error.message}`, error);
+      }
+    }
+    const scopeOrder: Record<SkillScope, number> = { user: 0, repo: 1, system: 2, admin: 3 };
+    return {
+      skills: [...skills.values()].sort((left, right) =>
+        scopeOrder[left.scope] - scopeOrder[right.scope]
+        || left.displayName.localeCompare(right.displayName)),
+      errors: [...errors.values()],
+    };
+  }
+
+  async setSkillEnabled(skillPath: string, enabled: boolean): Promise<boolean> {
+    const response = await this.agent.request<{ effectiveEnabled: boolean }>(
+      "skills/config/write",
+      { path: skillPath, enabled },
+    );
+    return response.effectiveEnabled;
   }
 
   async listThreads(options: {
@@ -417,6 +539,16 @@ export class DesktopRuntime extends EventEmitter {
     if (this.threads.has(threadId)) this.updateThread(threadId, { title: normalized });
   }
 
+  setThreadModel(threadId: string, model: string): ThreadSummary {
+    const normalized = model.trim();
+    if (!normalized || normalized.length > 500 || normalized.includes("\0")) {
+      throw new Error("Thread model is invalid.");
+    }
+    if (!this.threads.has(threadId)) throw new Error("Thread not found.");
+    this.updateThread(threadId, { model: normalized });
+    return this.threads.get(threadId)!;
+  }
+
   async deleteThread(threadId: string): Promise<void> {
     try {
       await this.agent.request("thread/delete", { threadId });
@@ -424,10 +556,26 @@ export class DesktopRuntime extends EventEmitter {
       const message = error instanceof Error ? error.message : String(error);
       if (!this.isEmptyLocalThread(threadId) || !isRolloutNotReadyMessage(message)) throw error;
     }
+    this.managedFiles.removeThread(threadId);
     this.removeRuntimeThread(threadId);
   }
 
   async openThread(threadId: string): Promise<ThreadDetail> {
+    const pending = this.threadLoadPromises.get(threadId);
+    if (pending) return pending;
+
+    const operation = this.resumeThread(threadId);
+    this.threadLoadPromises.set(threadId, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.threadLoadPromises.get(threadId) === operation) {
+        this.threadLoadPromises.delete(threadId);
+      }
+    }
+  }
+
+  private async resumeThread(threadId: string): Promise<ThreadDetail> {
     let response: {
       thread?: ServerThread;
       model?: string;
@@ -436,7 +584,10 @@ export class DesktopRuntime extends EventEmitter {
     let rolloutRetry = 0;
     while (true) {
       try {
-        response = await this.agent.request("thread/resume", { threadId });
+        response = await this.agent.request("thread/resume", {
+          threadId,
+          modelProvider: INTERNAL_MODEL_PROVIDER_ID,
+        });
         break;
       } catch (error) {
         const localThread = this.threads.get(threadId);
@@ -444,6 +595,7 @@ export class DesktopRuntime extends EventEmitter {
         if (!localThread || !isRolloutNotReadyMessage(message)) throw error;
         if (this.isEmptyLocalThread(threadId)) {
           this.activeThreadId = threadId;
+          this.loadedThreadIds.add(threadId);
           return { thread: localThread, messages: [], timeline: [] };
         }
         if (!/rollout\b.*\bis empty/i.test(message) || rolloutRetry >= ROLLOUT_WRITE_RETRY_DELAYS_MS.length) {
@@ -456,15 +608,51 @@ export class DesktopRuntime extends EventEmitter {
     if (!response.thread?.id) throw new Error("Agent Host did not return the resumed thread.");
 
     this.activeThreadId = response.thread.id;
+    this.loadedThreadIds.add(response.thread.id);
+    const storedModel = this.threads.get(response.thread.id)?.model;
     const summary = toThreadSummary(
       { ...response.thread, cwd: response.cwd || response.thread.cwd },
-      response.model || this.threads.get(response.thread.id)?.model || "previous",
+      preferredStoredModel(storedModel, response.model),
     );
     this.threads.set(summary.id, summary);
     this.controlPlane?.store.upsertThread(summary);
 
-    const detail = toThreadDetail(response.thread, summary);
+    const rolloutImages = loadRolloutGeneratedImages(this.codexHome, summary.id);
+    for (const image of rolloutImages) this.publishedGeneratedImageIds.add(generatedImageKey(summary.id, image.id));
+    for (const turn of response.thread.turns || []) {
+      const turnId = typeof turn.id === "string" ? turn.id : null;
+      for (const item of turn.items || []) {
+        if (item.type !== "agentMessage" && item.type !== "fileChange") continue;
+        const values: unknown[] = [item.text];
+        if (Array.isArray(item.changes)) values.push(...item.changes);
+        for (const filePath of resolveArtifactPaths(summary.projectPath, values)) {
+          this.managedFiles.storeGenerated(summary.id, turnId, filePath);
+        }
+      }
+    }
+    const managedFiles = this.managedFiles.listThread(summary.id);
+    for (const file of managedFiles) this.publishedManagedFileIds.add(file.id);
+    const detail = toThreadDetail(
+      response.thread,
+      summary,
+      path.join(this.codexHome, "generated_images"),
+      rolloutImages,
+      managedFiles,
+    );
     for (const item of detail.timeline) this.controlPlane?.store.publish({ type: "timeline.upserted", item });
+    for (const item of toGeneratedImageTimeline(
+      response.thread,
+      summary,
+      path.join(this.codexHome, "generated_images"),
+    )) {
+      this.controlPlane?.store.publish({ type: "timeline.upserted", item });
+    }
+    for (const image of rolloutImages) {
+      this.controlPlane?.store.publish({
+        type: "timeline.upserted",
+        item: generatedImageTimelineItem(image.id, summary.id, image.image, image.createdAt),
+      });
+    }
     return detail;
   }
 
@@ -477,6 +665,7 @@ export class DesktopRuntime extends EventEmitter {
     this.projectDirectories.remember(params.cwd);
     const response = await this.agent.request<{ thread?: { id?: string } }>("thread/start", {
       cwd: params.cwd,
+      modelProvider: INTERNAL_MODEL_PROVIDER_ID,
       ...(params.model ? { model: params.model } : {}),
       ...(params.approvalPolicy ? { approvalPolicy: params.approvalPolicy } : {}),
       sandbox: params.sandboxMode || "workspace-write",
@@ -484,6 +673,7 @@ export class DesktopRuntime extends EventEmitter {
     const threadId = response.thread?.id;
     if (threadId) {
       this.activeThreadId = threadId;
+      this.loadedThreadIds.add(threadId);
       const thread: ThreadSummary = {
         id: threadId,
         hostId: "local-desktop",
@@ -507,15 +697,28 @@ export class DesktopRuntime extends EventEmitter {
     sandboxMode?: SandboxMode;
     reasoningEffort?: ReasoningEffort;
     attachments?: ComposerAttachment[];
-  }): Promise<{ turn?: { id?: string } }> {
+  }): Promise<{ turn?: { id?: string }; files?: ConversationFile[] }> {
+    if (!this.loadedThreadIds.has(params.threadId)) {
+      await this.openThread(params.threadId);
+    }
     const current = this.threads.get(params.threadId);
     this.activeThreadId = params.threadId;
+    if (params.model) {
+      try {
+        await this.compactBeforeSmallerModel(params.threadId, params.model);
+      } catch (error) {
+        this.updateThread(params.threadId, { status: "failed" });
+        throw error;
+      }
+    }
     if (current) {
       this.updateThread(params.threadId, {
         title: current.title === "新任务" ? summarizeTitle(params.text) : current.title,
         status: "running",
       });
     }
+    const attachments = validateAttachments(params.attachments || []);
+    const managedAttachments = this.managedFiles.registerUploads(params.threadId, attachments);
     this.publishTimeline({
       id: `user-${Date.now()}`,
       threadId: params.threadId,
@@ -523,9 +726,13 @@ export class DesktopRuntime extends EventEmitter {
       status: "completed",
       title: "你",
       content: params.text,
+      ...(managedAttachments.some((attachment) => attachment.kind === "file") ? {
+        files: managedAttachments
+          .filter((attachment) => attachment.kind === "file")
+          .map((attachment) => managedFileReference(attachment)),
+      } : {}),
       createdAt: new Date().toISOString(),
     });
-    const attachments = validateAttachments(params.attachments || []);
     const filePaths = attachments
       .filter((attachment) => attachment.kind === "file")
       .map((attachment) => attachment.path);
@@ -554,9 +761,16 @@ export class DesktopRuntime extends EventEmitter {
         this.updateThread(params.threadId, { model: params.model });
       }
       const turnId = response.turn?.id;
-      if (turnId) this.activeTurns.set(params.threadId, turnId);
-      return response;
+      if (turnId) {
+        this.activeTurns.set(params.threadId, turnId);
+        this.managedFiles.bindTurn(managedAttachments.map((attachment) => attachment.id), turnId);
+      }
+      const files = managedAttachments
+        .filter((attachment) => attachment.kind === "file")
+        .map((attachment) => managedFileReference(attachment, true));
+      return { ...response, ...(files.length ? { files } : {}) };
     } catch (error) {
+      this.managedFiles.removeRecords(managedAttachments.map((attachment) => attachment.id));
       this.updateThread(params.threadId, { status: "failed" });
       throw error;
     } finally {
@@ -571,6 +785,7 @@ export class DesktopRuntime extends EventEmitter {
     this.activeTurns.delete(threadId);
     this.updateThread(threadId, { status: "interrupted" });
     this.finalizeThreadTimeline(threadId, false);
+    this.clearRemoteAttachments(threadId);
     return response;
   }
 
@@ -580,11 +795,14 @@ export class DesktopRuntime extends EventEmitter {
       listProjects: () => this.listRemoteProjects(),
       browseProjects: (request) => this.browseRemoteDirectories(request),
       createProject: (request) => this.createRemoteProject(request),
+      forgetProject: (request) => this.forgetRemoteProject(request),
       listArchivedThreads: (request) => this.listRemoteArchivedThreads(request),
       startThread: (request) => this.startRemoteThread(request),
+      openThread: (threadId) => this.openRemoteThread(threadId),
       startTurn: (threadId, request) => this.startRemoteTurn(threadId, request),
       interruptTurn: (threadId) => this.interruptRemoteTurn(threadId),
       submitUserInput: (requestId, request) => this.submitRemoteUserInput(requestId, request),
+      setThreadModel: (threadId, request) => this.setRemoteThreadModel(threadId, request),
       renameThread: (threadId, request) => this.renameRemoteThread(threadId, request),
       archiveThread: (threadId) => this.archiveRemoteThread(threadId),
       unarchiveThread: (threadId) => this.unarchiveRemoteThread(threadId),
@@ -622,11 +840,14 @@ export class DesktopRuntime extends EventEmitter {
         ...(store ? { store } : {}),
         ...(this.mobileAccess ? { mobileAccess: this.mobileAccess } : {}),
         ...(this.mobileAccess ? { commands: this.remoteCommandHandlers() } : {}),
+        generatedImageDirectory: path.join(this.codexHome, "generated_images"),
+        managedFiles: this.managedFiles,
         ...(tls ? { tls } : {}),
       });
       const address = await controlPlane.start({ host: this.syncHost, port: this.syncPort });
       this.controlPlane = controlPlane;
       this.controlStoreUnsubscribe = controlPlane.store.onEvent((event) => this.handleSyncEvent(event));
+      controlPlane.store.setProjects(this.projectDirectories.list());
       const advertisedHost = resolveAdvertisedSyncHost(this.syncHost);
       this.syncStatus = {
         state: "running",
@@ -669,13 +890,20 @@ export class DesktopRuntime extends EventEmitter {
 
   private async startAgent(): Promise<void> {
     const catalogPath = this.gateway.getCatalogPath();
+    this.loadedThreadIds.clear();
+    this.threadLoadPromises.clear();
+    this.activeThreadId = null;
     await this.agent.start({
       codexHome: this.codexHome,
       configOverrides: {
-        model_provider: "rhzy_gateway",
+        model_provider: INTERNAL_MODEL_PROVIDER_ID,
         "model_providers.rhzy_gateway.name": "RHZYCODE Internal Gateway",
         "model_providers.rhzy_gateway.base_url": this.gateway.getBaseUrl(),
         "model_providers.rhzy_gateway.wire_api": "responses",
+        "model_providers.OpenAI.name": "RHZYCODE Legacy Gateway",
+        "model_providers.OpenAI.base_url": this.gateway.getBaseUrl(),
+        "model_providers.OpenAI.wire_api": "responses",
+        "model_providers.OpenAI.requires_openai_auth": false,
         model_catalog_json: catalogPath,
       },
     });
@@ -706,11 +934,43 @@ export class DesktopRuntime extends EventEmitter {
       || threadForTurn
       || soleCandidate
       || (unresolvedCandidates.size === 0 ? this.activeThreadId : null);
-    this.emit("agent:message", threadId && !extractThreadId(params)
-      ? { ...message, params: { ...params, threadId } }
-      : message);
+    let forwardedParams = params;
+    let completedGeneratedImage: StoredGeneratedImage | null = null;
+    if (method === "item/started" || method === "item/completed") {
+      const item = (params.item || {}) as Record<string, unknown>;
+      if (item.type === "imageGeneration") {
+        const image = method === "item/completed"
+          ? materializeGeneratedImage(path.join(this.codexHome, "generated_images"), item)
+          : null;
+        completedGeneratedImage = image;
+        if (image && threadId) this.publishedGeneratedImageIds.add(generatedImageKey(threadId, String(item.id || image.name)));
+        const rendererItem = { ...item };
+        delete rendererItem.result;
+        if (image) Object.assign(rendererItem, {
+          savedPath: image.path,
+          name: image.name,
+          generated: true,
+        });
+        if (method === "item/completed" && !image) {
+          this.emit("agent:diagnostic", "The generated image result could not be saved or was not a supported image.");
+        }
+        forwardedParams = { ...params, item: rendererItem };
+      }
+    }
+    this.emit("agent:message", threadId && !extractThreadId(forwardedParams)
+      ? { ...message, params: { ...forwardedParams, threadId } }
+      : forwardedParams === params ? message : { ...message, params: forwardedParams });
+
+    if (method === "item/completed" && threadId) {
+      const item = (params.item || {}) as Record<string, unknown>;
+      const itemType = String(item.type || "");
+      if (itemType === "agentMessage" || itemType === "fileChange") {
+        this.publishGeneratedArtifacts(threadId, turnId || this.activeTurns.get(threadId) || null, item);
+      }
+    }
 
     if ((method === "thread/archived" || method === "thread/deleted") && threadId) {
+      if (method === "thread/deleted") this.managedFiles.removeThread(threadId);
       this.removeRuntimeThread(threadId);
       return;
     }
@@ -738,9 +998,21 @@ export class DesktopRuntime extends EventEmitter {
     if (method === "turn/completed") {
       const turn = (params.turn || {}) as Record<string, unknown>;
       const status = mapTurnStatus(String(turn.status || "completed"));
+      const pendingCompaction = this.pendingCompactions.get(threadId);
+      if (pendingCompaction) {
+        if (status === "completed") pendingCompaction.resolve();
+        else {
+          const turnError = (turn.error || {}) as Record<string, unknown>;
+          pendingCompaction.reject(new Error(
+            String(turnError.message || "Conversation compaction did not complete."),
+          ));
+        }
+      }
       this.activeTurns.delete(threadId);
       this.updateThread(threadId, { status });
       this.finalizeThreadTimeline(threadId, status === "failed");
+      this.publishRolloutGeneratedImages(threadId, typeof turn.id === "string" ? turn.id : null);
+      this.clearRemoteAttachments(threadId);
     }
     if (method === "item/agentMessage/delta") {
       const itemId = String(params.itemId || `assistant-${threadId}`);
@@ -810,6 +1082,7 @@ export class DesktopRuntime extends EventEmitter {
         this.activeTurns.delete(threadId);
         this.updateThread(threadId, { status: "failed" });
         this.finalizeThreadTimeline(threadId, true);
+        this.clearRemoteAttachments(threadId);
       }
     }
     if (method === "serverRequest/resolved") {
@@ -834,6 +1107,17 @@ export class DesktopRuntime extends EventEmitter {
       const itemId = String(item.id || `${method}-${Date.now()}`);
       const itemType = String(item.type || "notice");
       if (itemType === "userMessage") return;
+      if (itemType === "imageGeneration") {
+        if (method === "item/completed" && completedGeneratedImage) {
+          this.publishTimeline(generatedImageTimelineItem(
+            itemId,
+            threadId,
+            completedGeneratedImage,
+            new Date().toISOString(),
+          ));
+        }
+        return;
+      }
       if (itemType === "agentMessage") {
         const content = String(item.text || this.timelineText.get(itemId) || "");
         if (!content && method === "item/started") return;
@@ -862,6 +1146,84 @@ export class DesktopRuntime extends EventEmitter {
         createdAt: new Date().toISOString(),
       });
     }
+  }
+
+  private publishRolloutGeneratedImages(threadId: string, turnId: string | null): void {
+    for (const generated of loadRolloutGeneratedImages(this.codexHome, threadId)) {
+      if (turnId && generated.turnId && generated.turnId !== turnId) continue;
+      const key = generatedImageKey(threadId, generated.id);
+      if (this.publishedGeneratedImageIds.has(key)) continue;
+      this.publishedGeneratedImageIds.add(key);
+      const item = {
+        id: generated.id,
+        type: "imageGeneration",
+        status: "completed",
+        savedPath: generated.image.path,
+        name: generated.image.name,
+        generated: true,
+        ...(generated.revisedPrompt ? { revisedPrompt: generated.revisedPrompt } : {}),
+      };
+      this.emit("agent:message", {
+        method: "item/completed",
+        params: { threadId, item },
+      });
+      this.publishTimeline(generatedImageTimelineItem(
+        generated.id,
+        threadId,
+        generated.image,
+        generated.createdAt,
+      ));
+    }
+  }
+
+  private clearRemoteAttachments(threadId: string): void {
+    const filePaths = this.remoteAttachments.get(threadId);
+    if (!filePaths) return;
+    this.remoteAttachments.delete(threadId);
+    removeRemoteAttachments(path.join(this.codexHome, "temp", "mobile-attachments"), filePaths);
+  }
+
+  private clearAllRemoteAttachments(): void {
+    this.remoteAttachments.clear();
+    removeRemoteAttachments(path.join(this.codexHome, "temp", "mobile-attachments"));
+  }
+
+  private publishGeneratedArtifacts(
+    threadId: string,
+    turnId: string | null,
+    item: Record<string, unknown>,
+  ): void {
+    const projectPath = this.threads.get(threadId)?.projectPath;
+    if (!projectPath) return;
+    const values: unknown[] = [item.text];
+    if (Array.isArray(item.changes)) values.push(...item.changes);
+    const records = resolveArtifactPaths(projectPath, values)
+      .flatMap((filePath) => {
+        const record = this.managedFiles.storeGenerated(threadId, turnId, filePath);
+        if (!record || this.publishedManagedFileIds.has(record.id)) return [];
+        this.publishedManagedFileIds.add(record.id);
+        return [record];
+      });
+    if (!records.length) return;
+    const itemId = `files-${records[0]!.id}`;
+    const rendererFiles = records.map((record) => managedFileReference(record, true));
+    this.emit("agent:message", {
+      method: "item/completed",
+      params: {
+        threadId,
+        item: { id: itemId, type: "artifact", files: rendererFiles },
+      },
+    });
+    this.publishTimeline({
+      id: itemId,
+      threadId,
+      kind: "assistant",
+      status: "completed",
+      title: "",
+      content: "",
+      files: records.map((record) => managedFileReference(record)),
+      createdAt: new Date().toISOString(),
+    });
   }
 
   private publishApproval(
@@ -985,6 +1347,27 @@ export class DesktopRuntime extends EventEmitter {
     }
   }
 
+  private async openRemoteThread(threadId: string): Promise<RemoteThreadOpenResult> {
+    if (!this.threads.has(threadId)) throw new ControlCommandError("not_found");
+    try {
+      const detail = await this.openThread(threadId);
+      const timelineById = new Map([
+        ...detail.timeline,
+        ...remoteMessageTimeline(detail),
+      ].map((item) => [item.id, item]));
+      for (const item of this.controlPlane?.store.snapshot().timeline || []) {
+        if (item.threadId === threadId) timelineById.set(item.id, item);
+      }
+      return {
+        thread: detail.thread,
+        timeline: [...timelineById.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+      };
+    } catch (error) {
+      if (error instanceof ControlCommandError) throw error;
+      throw new ControlCommandError("unavailable");
+    }
+  }
+
   private async listRemoteProjects(): Promise<RemoteProjectListResult> {
     return { projects: this.projectDirectories.list() };
   }
@@ -1033,8 +1416,9 @@ export class DesktopRuntime extends EventEmitter {
       return {
         models: (response.data || []).map((model) => {
           const gatewayModel = gatewayModels.get(model.model) || gatewayModels.get(model.id);
+          const { supportedReasoningEfforts: _supportedReasoningEfforts, ...remoteModel } = model;
           return {
-            ...model,
+            ...remoteModel,
             ...(gatewayModel ? {
               source: gatewayModelSourceName(gatewayModel),
               sourceModelName: gatewayModel.upstreamModel,
@@ -1054,6 +1438,17 @@ export class DesktopRuntime extends EventEmitter {
     try {
       if (request.create) return this.projectDirectories.create(request.path);
       return { project: this.projectDirectories.remember(request.path), created: false };
+    } catch (error) {
+      throw mapProjectDirectoryError(error);
+    }
+  }
+
+  private async forgetRemoteProject(
+    request: RemoteProjectForgetRequest,
+  ): Promise<RemoteProjectListResult> {
+    try {
+      this.projectDirectories.forget(request.path);
+      return { projects: this.projectDirectories.list() };
     } catch (error) {
       throw mapProjectDirectoryError(error);
     }
@@ -1082,6 +1477,9 @@ export class DesktopRuntime extends EventEmitter {
     if (["running", "waiting_for_approval", "waiting_for_input"].includes(thread.status)) {
       throw new ControlCommandError("conflict");
     }
+    const attachmentDirectory = path.join(this.codexHome, "temp", "mobile-attachments");
+    const attachments = saveRemoteAttachments(attachmentDirectory, request.attachments || []);
+    if (attachments.length) this.remoteAttachments.set(threadId, attachments.map((attachment) => attachment.path));
     try {
       const response = await this.startTurn({
         threadId,
@@ -1090,10 +1488,7 @@ export class DesktopRuntime extends EventEmitter {
         approvalPolicy: request.approvalPolicy || "on-request",
         sandboxMode: request.sandboxMode || "read-only",
         ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
-        attachments: saveRemoteAttachments(
-          path.join(this.codexHome, "temp", "mobile-attachments"),
-          request.attachments || [],
-        ),
+        attachments,
       });
       return {
         threadId,
@@ -1101,6 +1496,7 @@ export class DesktopRuntime extends EventEmitter {
         acceptedAt: new Date().toISOString(),
       };
     } catch (error) {
+      this.clearRemoteAttachments(threadId);
       if (error instanceof ControlCommandError) throw error;
       throw new ControlCommandError("unavailable");
     }
@@ -1111,6 +1507,7 @@ export class DesktopRuntime extends EventEmitter {
     if (!this.activeTurns.has(threadId)) throw new ControlCommandError("conflict");
     try {
       await this.interruptTurn(threadId);
+      this.clearRemoteAttachments(threadId);
       return { threadId, acceptedAt: new Date().toISOString() };
     } catch (error) {
       if (error instanceof ControlCommandError) throw error;
@@ -1148,6 +1545,20 @@ export class DesktopRuntime extends EventEmitter {
     } catch (error) {
       if (error instanceof ControlCommandError) throw error;
       throw new ControlCommandError("unavailable");
+    }
+  }
+
+  private async setRemoteThreadModel(
+    threadId: string,
+    request: RemoteThreadModelRequest,
+  ): Promise<RemoteThreadMutationResult> {
+    if (!this.threads.has(threadId)) throw new ControlCommandError("not_found");
+    try {
+      this.setThreadModel(threadId, request.model);
+      return { threadId, acceptedAt: new Date().toISOString() };
+    } catch (error) {
+      if (error instanceof ControlCommandError) throw error;
+      throw new ControlCommandError("invalid");
     }
   }
 
@@ -1212,6 +1623,8 @@ export class DesktopRuntime extends EventEmitter {
 
   private removeRuntimeThread(threadId: string): void {
     const existed = this.threads.delete(threadId);
+    this.loadedThreadIds.delete(threadId);
+    this.threadLoadPromises.delete(threadId);
     if (existed) this.controlPlane?.store.removeThread(threadId);
     if (this.activeThreadId === threadId) this.activeThreadId = null;
   }
@@ -1263,6 +1676,56 @@ export class DesktopRuntime extends EventEmitter {
     this.updateHostTaskCount();
   }
 
+  private async compactBeforeSmallerModel(threadId: string, targetModel: string): Promise<void> {
+    const gatewayModels = this.gateway.getStatus().models;
+    const target = gatewayModels.find((model) => model.id === targetModel);
+    if (!target?.contextWindow) return;
+
+    const rollout = loadRolloutThreadState(this.codexHome, threadId);
+    const compactAt = Math.floor(
+      target.contextWindow * (target.effectiveContextWindowPercent || 90) / 100,
+    );
+    if (rollout.currentTokens == null || rollout.currentTokens < compactAt) return;
+    if (!rollout.lastSuccessfulModel || rollout.lastSuccessfulModel === targetModel) return;
+    if (!gatewayModels.some((model) => model.id === rollout.lastSuccessfulModel)) return;
+
+    this.emit(
+      "agent:diagnostic",
+      `Compacting a ${rollout.currentTokens}-token conversation before switching to ${targetModel}.`,
+    );
+    await this.agent.request("thread/settings/update", {
+      threadId,
+      model: rollout.lastSuccessfulModel,
+    });
+    await this.compactThread(threadId);
+  }
+
+  private async compactThread(threadId: string): Promise<void> {
+    if (this.pendingCompactions.has(threadId)) {
+      throw new Error("Conversation compaction is already running.");
+    }
+
+    let pending!: PendingCompaction;
+    const completed = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingCompactions.delete(threadId);
+        reject(new Error("Conversation compaction timed out."));
+      }, 10 * 60_000);
+      timer.unref();
+      pending = { resolve, reject, timer };
+      this.pendingCompactions.set(threadId, pending);
+    });
+    try {
+      await this.agent.request("thread/compact/start", { threadId }, null);
+      await completed;
+    } finally {
+      if (this.pendingCompactions.get(threadId) === pending) {
+        this.pendingCompactions.delete(threadId);
+        clearTimeout(pending.timer);
+      }
+    }
+  }
+
   private updateHostTaskCount(): void {
     const activeTaskCount = [...this.threads.values()].filter((thread) =>
       ["running", "waiting_for_approval", "waiting_for_input"].includes(thread.status),
@@ -1307,11 +1770,10 @@ function supportedReasoningEfforts(model: {
   reasoningEfforts?: string[];
   supportedReasoningEfforts?: Array<{ reasoningEffort?: string }>;
 }): Array<"none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"> {
-  const values = model.reasoningEfforts?.length
-    ? model.reasoningEfforts
-    : model.supportedReasoningEfforts?.map((option) => option.reasoningEffort || "") || [];
-  const withDefault = values.length ? values : [model.defaultReasoningEffort];
-  return [...new Set(withDefault)].filter((value): value is "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" => reasoningEffortValues.has(value));
+  const declared = model.reasoningEfforts
+    ?? model.supportedReasoningEfforts?.map((option) => option.reasoningEffort || "");
+  const values = declared ?? [model.defaultReasoningEffort];
+  return [...new Set(values)].filter((value): value is "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" => reasoningEffortValues.has(value));
 }
 
 function extractThreadId(params: Record<string, unknown>): string | null {
@@ -1335,6 +1797,11 @@ function mapTurnStatus(status: string): ThreadStatus {
   return "completed";
 }
 
+function preferredStoredModel(storedModel: string | undefined, resumedModel: string | undefined): string {
+  if (storedModel && storedModel !== "default" && storedModel !== "previous") return storedModel;
+  return resumedModel || storedModel || "previous";
+}
+
 function toThreadSummary(thread: ServerThread, model: string): ThreadSummary {
   const threadId = String(thread.id || "");
   const title = String(thread.name || thread.preview || "New task").replace(/\s+/g, " ").trim();
@@ -1349,11 +1816,21 @@ function toThreadSummary(thread: ServerThread, model: string): ThreadSummary {
   };
 }
 
-function toThreadDetail(thread: ServerThread, summary: ThreadSummary): ThreadDetail {
+function toThreadDetail(
+  thread: ServerThread,
+  summary: ThreadSummary,
+  generatedImageDirectory: string,
+  rolloutGeneratedImages: RolloutGeneratedImage[] = [],
+  managedFiles: ManagedFileRecord[] = [],
+): ThreadDetail {
   const messages: ConversationMessage[] = [];
   const timeline: TimelineItem[] = [];
+  const pendingRolloutImages = new Map(rolloutGeneratedImages.map((image) => [image.id, image]));
 
   for (const turn of thread.turns || []) {
+    const firstMessageIndex = messages.length;
+    const turnFiles = managedFiles.filter((file) => file.turnId === turn.id);
+    const uploadedFiles = turnFiles.filter((file) => file.source === "upload" && file.kind === "file");
     const createdAt = timestampToIso(turn.startedAt || turn.completedAt || thread.updatedAt);
     for (const item of turn.items || []) {
       const itemId = String(item.id || `${turn.id || "turn"}-${messages.length + timeline.length}`);
@@ -1363,13 +1840,24 @@ function toThreadDetail(thread: ServerThread, summary: ThreadSummary): ThreadDet
         messages.push({
           id: itemId,
           role: "user",
-          content: describeUserContent(item.content),
+          content: stripAttachedFileInstructions(describeUserContent(item.content)),
           ...(images.length ? { images } : {}),
+          ...(uploadedFiles.length ? {
+            files: uploadedFiles.map((file) => managedFileReference(file, true)),
+          } : {}),
         });
         continue;
       }
       if (itemType === "agentMessage") {
         messages.push({ id: itemId, role: "assistant", content: String(item.text || "") });
+        continue;
+      }
+      if (itemType === "imageGeneration") {
+        const image = materializeGeneratedImage(generatedImageDirectory, item);
+        if (image) {
+          messages.push({ id: itemId, role: "assistant", content: "", images: [image] });
+        }
+        pendingRolloutImages.delete(itemId);
         continue;
       }
       timeline.push({
@@ -1382,9 +1870,132 @@ function toThreadDetail(thread: ServerThread, summary: ThreadSummary): ThreadDet
         createdAt,
       });
     }
+    const generatedFiles = turnFiles.filter((file) => file.source === "generated" && file.kind === "file");
+    const generatedImages = turnFiles.filter((file) => file.source === "generated" && file.kind === "image");
+    if (generatedFiles.length || generatedImages.length) {
+      let assistantIndex = -1;
+      for (let index = messages.length - 1; index >= firstMessageIndex; index -= 1) {
+        if (messages[index]?.role === "assistant") {
+          assistantIndex = index;
+          break;
+        }
+      }
+      const files = generatedFiles.map((file) => managedFileReference(file, true));
+      const images = generatedImages.map((file) => ({ path: file.path, name: file.name, generated: true as const }));
+      if (assistantIndex >= firstMessageIndex) {
+        messages[assistantIndex] = {
+          ...messages[assistantIndex]!,
+          ...(files.length ? { files } : {}),
+          ...(images.length ? { images } : {}),
+        };
+      } else {
+        const firstArtifact = generatedFiles[0] || generatedImages[0]!;
+        messages.push({
+          id: `files-${turn.id || firstArtifact.id}`,
+          role: "assistant",
+          content: "",
+          ...(files.length ? { files } : {}),
+          ...(images.length ? { images } : {}),
+        });
+      }
+    }
+    for (const generated of pendingRolloutImages.values()) {
+      if (generated.turnId !== turn.id) continue;
+      messages.push({
+        id: generated.id,
+        role: "assistant",
+        content: "",
+        images: [generated.image],
+      });
+      pendingRolloutImages.delete(generated.id);
+    }
+  }
+
+  for (const generated of pendingRolloutImages.values()) {
+    messages.push({ id: generated.id, role: "assistant", content: "", images: [generated.image] });
   }
 
   return { thread: summary, messages, timeline };
+}
+
+function remoteMessageTimeline(detail: ThreadDetail): TimelineItem[] {
+  const finalTimestamp = Date.parse(detail.thread.updatedAt);
+  const baseTimestamp = Number.isFinite(finalTimestamp)
+    ? finalTimestamp - Math.max(0, detail.messages.length - 1)
+    : Date.now();
+  return detail.messages.map((message, index) => {
+    const files = message.files?.map(({ path: _path, ...file }) => file);
+    const images = message.images
+      ?.filter((image) => image.generated)
+      .map((image) => ({ id: image.name, name: image.name, generated: true as const }));
+    return {
+      id: message.id,
+      threadId: detail.thread.id,
+      kind: message.role,
+      status: "completed" as const,
+      title: message.role === "user" ? "You" : "RHZYCODE",
+      content: message.content,
+      ...(images?.length ? { images } : {}),
+      ...(files?.length ? { files } : {}),
+      createdAt: new Date(baseTimestamp + index).toISOString(),
+    };
+  });
+}
+
+function managedFileReference(record: ManagedFileRecord, includePath = false): ConversationFile {
+  return {
+    id: record.id,
+    name: record.name,
+    size: record.size,
+    mimeType: record.mimeType,
+    source: record.source,
+    ...(includePath ? { path: record.path } : {}),
+  };
+}
+
+function stripAttachedFileInstructions(value: string): string {
+  return value.split("\n\nAttached files (use these absolute paths):\n", 1)[0] || value;
+}
+
+function generatedImageKey(threadId: string, itemId: string): string {
+  return `${threadId}\u0000${itemId}`;
+}
+
+function toGeneratedImageTimeline(
+  thread: ServerThread,
+  summary: ThreadSummary,
+  generatedImageDirectory: string,
+): TimelineItem[] {
+  const timeline: TimelineItem[] = [];
+  for (const turn of thread.turns || []) {
+    const createdAt = timestampToIso(turn.startedAt || turn.completedAt || thread.updatedAt);
+    for (const item of turn.items || []) {
+      if (item.type !== "imageGeneration") continue;
+      const image = materializeGeneratedImage(generatedImageDirectory, item);
+      if (!image) continue;
+      const itemId = String(item.id || `${turn.id || "turn"}-generated-image-${timeline.length}`);
+      timeline.push(generatedImageTimelineItem(itemId, summary.id, image, createdAt));
+    }
+  }
+  return timeline;
+}
+
+function generatedImageTimelineItem(
+  id: string,
+  threadId: string,
+  image: StoredGeneratedImage,
+  createdAt: string,
+): TimelineItem {
+  return {
+    id,
+    threadId,
+    kind: "assistant",
+    status: "completed",
+    title: "",
+    content: "",
+    images: [{ id: image.name, name: image.name, generated: true }],
+    createdAt,
+  };
 }
 
 function serverThreadStatus(thread: ServerThread): ThreadStatus {

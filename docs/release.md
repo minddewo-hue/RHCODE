@@ -2,7 +2,7 @@
 
 ## Build
 
-The release pins Electron `43.1.1` and Codex CLI `0.144.6`.
+The release pins Electron `43.1.1` and Codex CLI `0.145.0`.
 
 ```powershell
 npm run pack:desktop

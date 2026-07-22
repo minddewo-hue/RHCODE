@@ -1,4 +1,4 @@
-import type { RemoteModelOption } from "@rhzycode/protocol";
+import type { RemoteModelOption, RemoteReasoningEffort } from "@rhzycode/protocol";
 
 export interface RemoteModelGroup {
   key: string;
@@ -10,6 +10,19 @@ const modelNameCollator = new Intl.Collator(["zh-CN", "en"], {
   numeric: true,
   sensitivity: "base",
 });
+
+const reasoningEffortValues = new Set<RemoteReasoningEffort>([
+  "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+]);
+
+export function remoteModelReasoningEfforts(model: RemoteModelOption | null): RemoteReasoningEffort[] {
+  if (model?.reasoningEfforts) {
+    return [...new Set(model.reasoningEfforts)].filter((value) => reasoningEffortValues.has(value));
+  }
+  return reasoningEffortValues.has(model?.defaultReasoningEffort as RemoteReasoningEffort)
+    ? [model?.defaultReasoningEffort as RemoteReasoningEffort]
+    : ["high"];
+}
 
 export function groupRemoteModels(models: RemoteModelOption[]): RemoteModelGroup[] {
   const groups = new Map<string, RemoteModelGroup & { sourceOrder: number }>();

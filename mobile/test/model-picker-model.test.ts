@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { RemoteModelOption } from "@rhzycode/protocol";
-import { groupRemoteModels } from "../src/components/model-picker-model";
+import { groupRemoteModels, remoteModelReasoningEfforts } from "../src/components/model-picker-model";
 
 function model(modelId: string, displayName: string, extra: Partial<RemoteModelOption> = {}): RemoteModelOption {
   return {
@@ -45,4 +45,24 @@ test("groups models from older desktops by display and model prefixes", () => {
     { source: "Provider B", models: ["model-2", "model-10"] },
     { source: "provider-a", models: ["Model One"] },
   ]);
+});
+
+test("preserves an explicitly empty remote reasoning effort list", () => {
+  assert.deepEqual(remoteModelReasoningEfforts(model(
+    "provider/gemma-model",
+    "Gemma model",
+    { reasoningEfforts: [] },
+  )), []);
+});
+
+test("uses declared reasoning efforts and supports older desktop metadata", () => {
+  assert.deepEqual(remoteModelReasoningEfforts(model(
+    "provider/gpt-model",
+    "GPT model",
+    { reasoningEfforts: ["low", "medium", "high", "xhigh"] },
+  )), ["low", "medium", "high", "xhigh"]);
+  assert.deepEqual(remoteModelReasoningEfforts(model(
+    "provider/legacy-model",
+    "Legacy model",
+  )), ["medium"]);
 });

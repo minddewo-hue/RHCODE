@@ -6,6 +6,7 @@ import type {
   LlmProviderConfigurationInput,
   ReasoningEffort,
   SandboxMode,
+  SkillImportSource,
   StartThreadParams,
   StartTurnParams,
   TerminalStartParams,
@@ -55,6 +56,21 @@ export function validateProjectPath(value: unknown): string {
   return requireAbsolutePath(value, "projectPath");
 }
 
+export function validateSkillPath(value: unknown): string {
+  return requireAbsolutePath(value, "skillPath");
+}
+
+export function validateSkillEnabled(value: unknown): boolean {
+  return requireBoolean(value, "enabled");
+}
+
+export function validateSkillImportSource(value: unknown): SkillImportSource {
+  if (value !== "codex" && value !== "claude") {
+    invalid("skill import source", "must be codex or claude");
+  }
+  return value;
+}
+
 export function validateStartThread(value: unknown): StartThreadParams {
   const input = requireObject(value, "thread start request");
   assertOnlyKeys(
@@ -83,6 +99,16 @@ export function validateThreadRename(threadId: unknown, name: unknown): {
   return {
     threadId: validateIdentifier(threadId, "threadId"),
     name: requireNonEmptyString(name, "name", 200),
+  };
+}
+
+export function validateThreadModel(threadId: unknown, model: unknown): {
+  threadId: string;
+  model: string;
+} {
+  return {
+    threadId: validateIdentifier(threadId, "threadId"),
+    model: requireNonEmptyString(model, "model", 500),
   };
 }
 

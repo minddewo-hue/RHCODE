@@ -27,10 +27,15 @@ const api: RhzycodeDesktopApi = {
   chooseFiles: () => ipcRenderer.invoke("project:choose-files"),
   savePastedImage: (input) => ipcRenderer.invoke("project:save-pasted-image", input),
   readLocalImage: (path: string) => ipcRenderer.invoke("project:read-local-image", path),
+  openLocalFile: (path: string) => ipcRenderer.invoke("project:open-local-file", path),
+  revealLocalFile: (path: string) => ipcRenderer.invoke("project:reveal-local-file", path),
+  saveLocalFile: (path: string, suggestedName: string) =>
+    ipcRenderer.invoke("project:save-local-file", path, suggestedName),
   startThread: (params: { cwd: string; model?: string; approvalPolicy?: "on-request" | "untrusted" | "never"; sandboxMode?: "read-only" | "workspace-write" | "danger-full-access" }) =>
     ipcRenderer.invoke("agent:thread:start", params),
   archiveThread: (threadId: string) => ipcRenderer.invoke("agent:thread:archive", threadId),
   unarchiveThread: (threadId: string) => ipcRenderer.invoke("agent:thread:unarchive", threadId),
+  setThreadModel: (threadId: string, model: string) => ipcRenderer.invoke("agent:thread:model", threadId, model),
   renameThread: (threadId: string, name: string) => ipcRenderer.invoke("agent:thread:rename", threadId, name),
   deleteThread: (threadId: string) => ipcRenderer.invoke("agent:thread:delete", threadId),
   startTurn: (params: { threadId: string; text: string; model?: string; approvalPolicy?: "on-request" | "untrusted" | "never"; sandboxMode?: "read-only" | "workspace-write" | "danger-full-access"; reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"; attachments?: Array<{ path: string; name: string; kind: "file" | "image"; size: number }> }) =>
@@ -46,6 +51,12 @@ const api: RhzycodeDesktopApi = {
     ipcRenderer.invoke("credentials:set", providerId, apiKey),
   configureLlmProvider: (input) => ipcRenderer.invoke("providers:configure", input),
   removeLlmProvider: (providerId: string) => ipcRenderer.invoke("providers:remove", providerId),
+  getSkills: (forceReload?: boolean) => ipcRenderer.invoke("skills:list", forceReload),
+  chooseAndInstallSkill: () => ipcRenderer.invoke("skills:install"),
+  importSkills: (source) => ipcRenderer.invoke("skills:import", source),
+  setSkillEnabled: (path: string, enabled: boolean) =>
+    ipcRenderer.invoke("skills:enabled:set", path, enabled),
+  removeSkill: (path: string) => ipcRenderer.invoke("skills:remove", path),
   getUpdateStatus: () => ipcRenderer.invoke("updates:status"),
   checkForUpdates: () => ipcRenderer.invoke("updates:check"),
   downloadUpdate: () => ipcRenderer.invoke("updates:download"),

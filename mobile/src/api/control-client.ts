@@ -7,6 +7,7 @@ import {
   remoteProjectListResultSchema,
   remoteDirectoryBrowseResultSchema,
   remoteThreadMutationResultSchema,
+  remoteThreadOpenResultSchema,
   remoteThreadStartResultSchema,
   remoteTurnInterruptResultSchema,
   remoteTurnStartResultSchema,
@@ -23,6 +24,7 @@ import {
   type RemoteSandboxMode,
   type RemoteTurnAttachment,
   type RemoteThreadMutationResult,
+  type RemoteThreadOpenResult,
   type RemoteThreadStartResult,
   type RemoteTurnInterruptResult,
   type RemoteTurnStartResult,
@@ -69,6 +71,16 @@ export interface ControlAccessInput {
 export interface EventSocketDescriptor {
   url: string;
   protocols: ["rhzycode.v1", string];
+}
+
+export interface AuthenticatedImageSource {
+  uri: string;
+  headers: { Authorization: string };
+}
+
+export interface AuthenticatedFileRequest {
+  url: string;
+  headers: { Authorization: string };
 }
 
 type FetchLike = typeof fetch;
@@ -191,6 +203,17 @@ export class ControlClient {
     );
   }
 
+  async removeProject(projectPath: string, timeoutMs = 8000): Promise<RemoteProjectListResult> {
+    return this.command(
+      "/v1/commands/projects",
+      "DELETE",
+      { path: projectPath },
+      remoteProjectListResultSchema,
+      "控制服务返回了无效的项目移除结果。",
+      timeoutMs,
+    );
+  }
+
   async browseDirectories(projectPath?: string, timeoutMs = 10_000): Promise<RemoteDirectoryBrowseResult> {
     const url = new URL(`${this.controlUrl}/v1/commands/projects/browse`);
     if (projectPath) url.searchParams.set("path", projectPath);
@@ -214,6 +237,18 @@ export class ControlClient {
       "控制服务返回了无效的新会话结果。",
       timeoutMs,
     );
+  }
+
+  async openThread(threadId: string, timeoutMs = 60_000): Promise<RemoteThreadOpenResult> {
+    const value = await requestJson(
+      this.fetchImpl,
+      `${this.controlUrl}/v1/commands/threads/${encodeURIComponent(threadId)}`,
+      { headers: this.authorizedHeaders() },
+      timeoutMs,
+    );
+    const result = remoteThreadOpenResultSchema.safeParse(value);
+    if (!result.success) throw invalidResponse("The desktop returned an invalid conversation history.");
+    return result.data;
   }
 
   async startTurn(threadId: string, input: TurnStartInput, timeoutMs = 8000): Promise<RemoteTurnStartResult> {
@@ -240,6 +275,10 @@ export class ControlClient {
 
   async renameThread(threadId: string, name: string, timeoutMs = 8000): Promise<RemoteThreadMutationResult> {
     return this.threadMutation(threadId, "rename", { name }, timeoutMs);
+  }
+
+  async setThreadModel(threadId: string, model: string, timeoutMs = 8000): Promise<RemoteThreadMutationResult> {
+    return this.threadMutation(threadId, "model", { model }, timeoutMs);
   }
 
   async archiveThread(threadId: string, timeoutMs = 8000): Promise<RemoteThreadMutationResult> {
@@ -287,6 +326,20 @@ export class ControlClient {
     };
   }
 
+  generatedImageSource(imageId: string): AuthenticatedImageSource {
+    return {
+      uri: `${this.controlUrl}/v1/generated-images/${encodeURIComponent(imageId)}`,
+      headers: { Authorization: `Bearer ${this.accessKey}` },
+    };
+  }
+
+  managedFileRequest(fileId: string): AuthenticatedFileRequest {
+    return {
+      url: `${this.controlUrl}/v1/files/${encodeURIComponent(fileId)}`,
+      headers: { Authorization: `Bearer ${this.accessKey}` },
+    };
+  }
+
   parseEvent(value: unknown): AgentEvent {
     let decoded: unknown = value;
     if (typeof value === "string") {
@@ -310,7 +363,7 @@ export class ControlClient {
 
   private async threadMutation(
     threadId: string,
-    action: "rename" | "archive" | "unarchive",
+    action: "model" | "rename" | "archive" | "unarchive",
     body: Record<string, unknown>,
     timeoutMs: number,
   ): Promise<RemoteThreadMutationResult> {

@@ -19,6 +19,9 @@ export interface EmbeddedGatewayModel {
   upstreamModel: string;
   protocol: "responses" | "chat_completions" | "anthropic_messages";
   contextWindow: number | null;
+  maxContextWindow: number | null;
+  effectiveContextWindowPercent: number;
+  contextWindowSource: string | null;
   runtimeInstructions: string | null;
 }
 
@@ -41,5 +44,6 @@ export function startEmbeddedGateway(options: {
   port?: number;
   envPath?: string;
   configPath?: string;
+  contextConfigPath?: string;
   discoveryTimeoutMs?: number;
 }): Promise<EmbeddedGatewayHandle>;

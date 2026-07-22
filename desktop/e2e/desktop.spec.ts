@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { deflateSync } from "node:zlib";
 
 const desktopDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workspaceDir = path.resolve(desktopDir, "..");
@@ -22,6 +23,7 @@ let electronApp: ElectronApplication;
 let page: Page;
 let dataDir: string;
 let emptyProjectDir: string;
+let generatedImagePath: string;
 const rendererErrors: string[] = [];
 
 test.describe.configure({ mode: "serial" });
@@ -29,7 +31,9 @@ test.describe.configure({ mode: "serial" });
 test.beforeAll(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-playwright-"));
   emptyProjectDir = path.join(dataDir, "empty-project");
+  generatedImagePath = path.join(dataDir, "generated-image.png");
   fs.mkdirSync(emptyProjectDir);
+  writeGeneratedImageFixture(generatedImagePath);
   const environment = Object.fromEntries(
     Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
   );
@@ -99,6 +103,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await panelToggle.click();
   await expect(page.getByRole("tab", { name: "Gateway" })).toHaveCount(0);
   await page.getByRole("tab", { name: "Settings" }).click();
+  await page.getByRole("tab", { name: "Skills" }).click();
   await page.getByRole("tab", { name: "Activity" }).click();
   await panelToggle.click();
   await expect(closePanel).toBeHidden();
@@ -224,6 +229,14 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(page.locator(".message-list .message-author")).toHaveCount(0);
   await assertClosedPanelReleasesWorkspace(page);
   await assertChatMessageLayout(page);
+  await threadRow.click();
+  await expect(page.getByText("Please review the current project and summarize the important risks.", { exact: true })).toBeVisible();
+  await expect(page.getByText("I will inspect the project structure, trace the main workflows, and report concrete findings.", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Open notes.txt" }).click();
+  await expect.poll(() => ipcCalls(electronApp, "project:open-local-file").then((calls) => calls.at(-1)?.args)).toEqual([attachmentPath]);
+  await page.getByRole("button", { name: "Show notes.txt in folder" }).click();
+  await expect.poll(() => ipcCalls(electronApp, "project:reveal-local-file").then((calls) => calls.at(-1)?.args)).toEqual([attachmentPath]);
+  expect(await ipcCalls(electronApp, "agent:thread:open")).toHaveLength(1);
   await expect(page).toHaveScreenshot("desktop-chat-layout-lime.png", {
     animations: "disabled",
     caret: "hide",
@@ -231,11 +244,66 @@ test("supports core desktop workflows at the minimum window size", async () => {
     mask: [page.locator(".model-select"), page.locator(".project-picker small")],
   });
 
+  await sendAgentMessage(electronApp, {
+    method: "item/completed",
+    params: {
+      threadId,
+      item: {
+        id: "ui-generated-image",
+        type: "imageGeneration",
+        status: "completed",
+        savedPath: generatedImagePath,
+        name: "generated-image.png",
+      },
+    },
+  });
+  const generatedImage = page.locator(".message-image-wrap.generated .message-image");
+  await expect(generatedImage).toBeVisible();
+  await expect.poll(() => generatedImage.locator("img").evaluate((image: HTMLImageElement) => ({
+    width: image.naturalWidth,
+    height: image.naturalHeight,
+  }))).toEqual({ width: 320, height: 240 });
+  await page.getByRole("button", { name: "Save generated-image.png" }).click();
+  await expect.poll(() => ipcCalls(electronApp, "project:save-local-file").then((calls) => calls.at(-1)?.args)).toEqual([
+    generatedImagePath,
+    "generated-image.png",
+  ]);
+  await page.locator(".conversation").evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await expect.poll(() => page.locator(".conversation").evaluate((element) => element.scrollTop)).toBe(0);
+  await expect(page).toHaveScreenshot("desktop-generated-image.png", {
+    animations: "disabled",
+    caret: "hide",
+    maskColor: "#d8dcd6",
+    mask: [page.locator(".model-select"), page.locator(".project-picker small")],
+  });
+  await generatedImage.click();
+  await expect(page.getByRole("button", { name: "Close image preview" })).toBeVisible();
+  await page.getByRole("button", { name: "Close image preview" }).click();
+
+  await modelSelect.selectOption("provider-2/gemma-4-31b-it-uncensored-bf16");
+  await sendAgentMessage(electronApp, {
+    method: "error",
+    params: {
+      threadId,
+      turnId: "failed-gemma-turn",
+      willRetry: false,
+      error: { message: "Targeted Gemma failure" },
+    },
+  });
+  await modelSelect.selectOption("ui/model");
+  await expect(getThreadRow(page, "UI automation thread").locator("..")).toHaveClass(/active/);
+  await expect(page.getByText("Please review the current project and summarize the important risks.", { exact: true })).toBeVisible();
+  await expect(page.getByText("I will inspect the project structure, trace the main workflows, and report concrete findings.", { exact: true })).toBeVisible();
+  await expect(generatedImage).toBeVisible();
+
   const openCallsBeforeReload = await ipcCalls(electronApp, "agent:thread:open").then((calls) => calls.length);
   await page.reload();
   await page.locator(".app-shell").waitFor();
   await expect(page.locator(".project-picker")).toContainText("project");
   await expect(getThreadRow(page, "UI automation thread").locator("..")).toHaveClass(/active/);
+  await expect(page.locator(".model-select")).toHaveValue("ui/model");
   await expect.poll(() => ipcCalls(electronApp, "agent:thread:open").then((calls) => calls.length))
     .toBeGreaterThan(openCallsBeforeReload);
   if (await page.getByRole("button", { name: "Close side panel" }).isVisible()) {
@@ -259,6 +327,20 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await page.keyboard.press("Escape");
   await expect(page.getByRole("menu")).toBeHidden();
   await expect(threadActionsTrigger).toBeFocused();
+
+  await openThreadActions(page, "UI automation thread");
+  await page.getByRole("menuitem", { name: "Archive task" }).click();
+  await expect(getThreadRow(page, "UI automation thread")).toBeHidden();
+  await expect.poll(() => ipcCalls(electronApp, "agent:thread:archive").then((calls) => calls.at(-1)?.args)).toEqual([threadId]);
+  await page.getByRole("button", { name: "Show archived tasks" }).click();
+  await expect(getThreadRow(page, "UI automation thread")).toBeVisible();
+  await openThreadActions(page, "UI automation thread");
+  await page.getByRole("menuitem", { name: "Restore task" }).click();
+  await expect(getThreadRow(page, "UI automation thread")).toBeHidden();
+  await expect.poll(() => ipcCalls(electronApp, "agent:thread:unarchive").then((calls) => calls.at(-1)?.args)).toEqual([threadId]);
+  await page.getByRole("button", { name: "Show active tasks" }).click();
+  await expect(getThreadRow(page, "UI automation thread")).toBeVisible();
+
   await openThreadActions(page, "UI automation thread");
   await page.getByRole("menuitem", { name: "Rename task" }).click();
   let renameInput = page.getByRole("textbox", { name: "Rename UI automation thread" });
@@ -498,6 +580,27 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect.poll(() => ipcCalls(electronApp, "updates:check").then((calls) => calls.length)).toBeGreaterThan(0);
   await expect.poll(() => ipcCalls(electronApp, "updates:download").then((calls) => calls.length)).toBeGreaterThan(0);
   await expect.poll(() => ipcCalls(electronApp, "updates:install").then((calls) => calls.length)).toBeGreaterThan(0);
+  await page.getByRole("tab", { name: "Skills" }).click();
+  await expect(page.locator(".skill-row")).toHaveCount(2);
+  await expect(page.getByText("Review Helper", { exact: true })).toBeVisible();
+  await expect(page.getByText("System Writer", { exact: true })).toBeVisible();
+  await page.getByRole("switch", { name: "Disable Review Helper" }).click();
+  await expect.poll(() => ipcCalls(electronApp, "skills:enabled:set").then((calls) => calls.at(-1)?.args)).toEqual([
+    path.join(dataDir, "codex-home", "skills", "review-helper", "SKILL.md"),
+    false,
+  ]);
+  await page.getByRole("button", { name: /Codex 1/ }).click();
+  await expect(page.getByText("Imported 1; skipped 0.", { exact: true })).toBeVisible();
+  await Promise.all([
+    page.waitForEvent("dialog").then((dialog) => dialog.accept()),
+    page.getByRole("button", { name: "Delete Review Helper" }).click(),
+  ]);
+  await expect(page.getByText("Review Helper", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".skills-view")).toHaveScreenshot("desktop-skills.png", {
+    animations: "disabled",
+    caret: "hide",
+  });
+  await assertVisibleControlsHaveNames(page);
   await page.getByRole("button", { name: "Close side panel" }).click();
 
   const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
@@ -589,14 +692,14 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
   const failedCall = (await ipcCalls(electronApp, "agent:turn:start")).at(-1);
   await modelSelect.selectOption("ui/model");
-  await expect(page.getByText("Start a new task", { exact: true })).toBeVisible();
-  await expect(taskPrompt).toHaveValue("Recover this prompt with another model");
-  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("Start a new task", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("article").getByText("Recover this prompt with another model", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
   await expect.poll(() => ipcCalls(electronApp, "agent:turn:start").then((calls) => {
     const latest = calls.at(-1)?.args[0] as { threadId?: string; model?: string } | undefined;
     const failed = failedCall?.args[0] as { threadId?: string } | undefined;
     return { model: latest?.model, changedThread: latest?.threadId !== failed?.threadId };
-  })).toEqual({ model: "ui/model", changedThread: true });
+  })).toEqual({ model: "ui/model", changedThread: false });
   await page.locator(".send-button.stop").click();
 
   await getThreadRow(page, "Run deterministic verification").click();
@@ -804,6 +907,54 @@ async function failNextTurn(app: ElectronApplication): Promise<void> {
   });
 }
 
+function writeGeneratedImageFixture(filePath: string): void {
+  const width = 320;
+  const height = 240;
+  const pixels = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y += 1) {
+    const rowOffset = y * (width * 3 + 1);
+    for (let x = 0; x < width; x += 1) {
+      const offset = rowOffset + 1 + x * 3;
+      const highlight = Math.abs(x - y * 4 / 3) < 16 || Math.abs((width - x) - y * 4 / 3) < 16;
+      pixels[offset] = highlight ? 245 : Math.round(36 + 90 * x / width);
+      pixels[offset + 1] = highlight ? 204 : Math.round(72 + 105 * y / height);
+      pixels[offset + 2] = highlight ? 84 : Math.round(145 - 70 * x / width);
+    }
+  }
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  fs.writeFileSync(filePath, Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(pixels)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]));
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const typeBytes = Buffer.from(type, "ascii");
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  typeBytes.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])), 8 + data.length);
+  return chunk;
+}
+
+function crc32(bytes: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
 async function installDeterministicIpc(app: ElectronApplication): Promise<void> {
   await app.evaluate(({ ipcMain }, fixture) => {
     const threads = new Map<string, Record<string, unknown>>();
@@ -834,6 +985,35 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
         lastUsedAt: null,
       } as Record<string, unknown> | null,
       audit: [],
+    };
+    let skillsStatus = {
+      skills: [
+        {
+          name: "review-helper",
+          displayName: "Review Helper",
+          description: "Review changes and identify concrete engineering risks.",
+          shortDescription: "Focused code review support",
+          enabled: true,
+          path: fixture.userSkillPath,
+          scope: "user",
+          canRemove: true,
+        },
+        {
+          name: "system-writer",
+          displayName: "System Writer",
+          description: "Built-in document support.",
+          shortDescription: null,
+          enabled: true,
+          path: fixture.systemSkillPath,
+          scope: "system",
+          canRemove: false,
+        },
+      ],
+      errors: [],
+      sources: {
+        codex: { available: true, count: 1 },
+        claude: { available: false, count: 0 },
+      },
     };
     const testState = {
       calls: [] as Array<{ channel: string; args: unknown[] }>,
@@ -925,11 +1105,31 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
       return {
         thread: summary,
         messages: [
-          { id: "history-user", role: "user", content: "Please review the current project and summarize the important risks." },
+          {
+            id: "history-user",
+            role: "user",
+            content: "Please review the current project and summarize the important risks.",
+            files: [{
+              id: "file-history-notes",
+              name: "notes.txt",
+              size: 24,
+              source: "upload",
+              path: fixture.attachmentPath,
+            }],
+          },
           { id: "history-assistant", role: "assistant", content: "I will inspect the project structure, trace the main workflows, and report concrete findings." },
         ],
         timeline: [],
       };
+    });
+    replace("agent:thread:model", (_event, threadId, model) => {
+      record("agent:thread:model", threadId, model);
+      const thread = threads.get(threadId);
+      if (!thread) throw new Error("Thread not found");
+      const updated = { ...thread, model, updatedAt: new Date().toISOString() };
+      threads.set(threadId, updated);
+      const { archived: _archived, ...summary } = updated;
+      return summary;
     });
     replace("agent:thread:rename", (_event, threadId, name) => {
       record("agent:thread:rename", threadId, name);
@@ -974,6 +1174,16 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
       const thread = threads.get(threadId);
       if (thread) threads.set(threadId, { ...thread, status: "interrupted", updatedAt: new Date().toISOString() });
       return {};
+    });
+    replace("project:open-local-file", (_event, filePath) => {
+      record("project:open-local-file", filePath);
+    });
+    replace("project:reveal-local-file", (_event, filePath) => {
+      record("project:reveal-local-file", filePath);
+    });
+    replace("project:save-local-file", (_event, filePath, suggestedName) => {
+      record("project:save-local-file", filePath, suggestedName);
+      return filePath;
     });
     replace("gateway:status", () => gatewayStatus());
     replace("gateway:start", () => {
@@ -1039,6 +1249,34 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
         providers: credentialStatus.providers.filter((provider) => provider.providerId !== providerId),
       };
       return { credentials: credentialStatus, gateway: gatewayStatus(), gatewayError: null };
+    });
+    replace("skills:list", (_event, forceReload) => {
+      record("skills:list", forceReload);
+      return skillsStatus;
+    });
+    replace("skills:install", () => {
+      record("skills:install");
+      return null;
+    });
+    replace("skills:import", (_event, source) => {
+      record("skills:import", source);
+      return { importedCount: 1, skippedCount: 0, failedCount: 0, status: skillsStatus };
+    });
+    replace("skills:enabled:set", (_event, skillPath, enabled) => {
+      record("skills:enabled:set", skillPath, enabled);
+      skillsStatus = {
+        ...skillsStatus,
+        skills: skillsStatus.skills.map((skill) => skill.path === skillPath ? { ...skill, enabled } : skill),
+      };
+      return skillsStatus;
+    });
+    replace("skills:remove", (_event, skillPath) => {
+      record("skills:remove", skillPath);
+      skillsStatus = {
+        ...skillsStatus,
+        skills: skillsStatus.skills.filter((skill) => skill.path !== skillPath),
+      };
+      return skillsStatus;
     });
     replace("updates:status", () => ({
       enabled: true,
@@ -1124,5 +1362,10 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
       event.sender.send("terminal:status", terminal);
       return {};
     });
-  }, { projectDir });
+  }, {
+    projectDir,
+    attachmentPath,
+    userSkillPath: path.join(dataDir, "codex-home", "skills", "review-helper", "SKILL.md"),
+    systemSkillPath: path.join(dataDir, "codex-home", "skills", ".system", "system-writer", "SKILL.md"),
+  });
 }

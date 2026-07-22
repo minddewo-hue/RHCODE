@@ -1,7 +1,7 @@
 import path from "node:path";
 import { loadDotEnv, loadGatewayConfig } from "./config.js";
 import { createGatewayServer } from "./gateway.js";
-import { applyGemma31bModelPolicy } from "./gemma-31b-policy.js";
+import { applyModelContextConfig, loadModelContextConfig } from "./model-context-config.js";
 
 export async function startEmbeddedGateway(options) {
   const rootDir = path.resolve(options.rootDir);
@@ -15,8 +15,9 @@ export async function startEmbeddedGateway(options) {
     ? configuredPath
     : path.join(rootDir, configuredPath);
   const config = loadGatewayConfig({ configPath });
+  const contextConfig = loadModelContextConfig(rootDir, options.contextConfigPath);
   await discoverProviderModels(config, options.discoveryTimeoutMs ?? 5000);
-  addAutomaticModelProtocolRoutes(config);
+  addAutomaticModelProtocolRoutes(config, contextConfig);
   if (config.models.size === 0) {
     throw new Error(
       "Gateway config has no models. Add model IDs to the provider or use an upstream that supports GET /models.",
@@ -73,6 +74,9 @@ export async function startEmbeddedGateway(options) {
       upstreamModel: model.routes[0].upstreamModel,
       protocol: model.routes[0].protocol,
       contextWindow: model.contextWindow,
+      maxContextWindow: model.maxContextWindow,
+      effectiveContextWindowPercent: model.effectiveContextWindowPercent,
+      contextWindowSource: model.contextWindowSource,
       runtimeInstructions: model.runtimeInstructions,
     })),
     async probeProviders(options = {}) {
@@ -137,6 +141,15 @@ async function discoverProviderModels(config, timeoutMs) {
             "max_context_length",
             "max_model_len",
           ]),
+          maxContextWindow: discoveredPositiveInteger(item, [
+            "max_context_window",
+            "context_window",
+            "context_length",
+            "max_context_length",
+            "max_model_len",
+          ]),
+          effectiveContextWindowPercent: 90,
+          contextWindowSource: "provider_discovery",
           maxOutputTokens: discoveredPositiveInteger(item, [
             "max_output_tokens",
             "max_completion_tokens",
@@ -173,7 +186,7 @@ function discoveredPositiveInteger(item, keys) {
   return null;
 }
 
-function addAutomaticModelProtocolRoutes(config) {
+function addAutomaticModelProtocolRoutes(config, contextConfig) {
   for (const model of config.models.values()) {
     const routes = model.routes.flatMap((route) => {
       if (!route.provider.modelDiscovery?.detectProtocol || route.protocolExplicit) return [route];
@@ -192,7 +205,7 @@ function addAutomaticModelProtocolRoutes(config) {
     });
     model.routes = routes.filter((route, index) =>
       routes.findIndex((candidate) => candidate.key === route.key) === index);
-    applyGemma31bModelPolicy(model);
+    applyModelContextConfig(model, contextConfig);
   }
 }
 

@@ -109,8 +109,15 @@ async function handleResponses({
     throw new HttpError(400, "The model field is required.", "model_required");
   }
 
-  const model = config.models.get(body.model);
+  const model = resolveRequestedModel(config.models, body.model);
   if (!model) throw new HttpError(404, `Model ${body.model} was not found.`, "model_not_found");
+  if (model.id !== body.model) {
+    log(config, "info", {
+      event: "legacy_model_resolved",
+      requested_model: body.model,
+      public_model: model.id,
+    });
+  }
   if (!canUseModel(access, model.id)) {
     throw new HttpError(403, `Access to model ${model.id} is not allowed.`, "model_not_allowed");
   }
@@ -262,6 +269,22 @@ async function handleResponses({
   } finally {
     selected.cleanup();
   }
+}
+
+export function resolveRequestedModel(models, requestedId) {
+  const exact = models.get(requestedId);
+  if (exact) return exact;
+
+  const legacyName = requestedId.split("/").at(-1)?.trim();
+  if (!legacyName) return null;
+  const candidates = new Map();
+  for (const model of models.values()) {
+    const matchesPublicSuffix = model.id === legacyName || model.id.endsWith(`/${legacyName}`);
+    const matchesUpstream = model.routes.some((route) =>
+      route.upstreamModel === requestedId || route.upstreamModel === legacyName);
+    if (matchesPublicSuffix || matchesUpstream) candidates.set(model.id, model);
+  }
+  return candidates.size === 1 ? candidates.values().next().value : null;
 }
 
 async function selectUpstream({ routes, model, body, req, res, requestId, config, state }) {
@@ -1004,6 +1027,7 @@ function makeModels(config, access) {
         created: model.created,
         owned_by: model.ownedBy,
         ...(model.contextWindow ? { context_window: model.contextWindow } : {}),
+        ...(model.maxContextWindow ? { max_context_window: model.maxContextWindow } : {}),
         ...(model.maxOutputTokens ? { max_output_tokens: model.maxOutputTokens } : {}),
         capabilities: model.capabilities,
       })),

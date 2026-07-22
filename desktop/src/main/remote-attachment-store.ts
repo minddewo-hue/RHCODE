@@ -22,6 +22,29 @@ export function saveRemoteAttachments(
   });
 }
 
+export function removeRemoteAttachments(directory: string, filePaths?: string[]): void {
+  const root = path.resolve(directory);
+  const targets = filePaths || listDirectFiles(root);
+  for (const filePath of targets) {
+    const resolved = path.resolve(filePath);
+    if (path.dirname(resolved) !== root) continue;
+    try {
+      const stats = fs.lstatSync(resolved);
+      if (stats.isFile() && !stats.isSymbolicLink()) fs.unlinkSync(resolved);
+    } catch {
+      // The temporary upload is already unavailable.
+    }
+  }
+}
+
+function listDirectFiles(directory: string): string[] {
+  try {
+    return fs.readdirSync(directory).map((name) => path.join(directory, name));
+  } catch {
+    return [];
+  }
+}
+
 function safeName(value: string): string {
   const name = value.split(/[\\/]/).at(-1)?.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 240);
   return name || "attachment";

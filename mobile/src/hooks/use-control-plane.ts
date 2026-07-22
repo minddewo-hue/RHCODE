@@ -1,9 +1,9 @@
-import type { ControlSnapshot } from "@rhzycode/protocol";
+import type { ControlSnapshot, RemoteThreadOpenResult } from "@rhzycode/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { ControlClient, ControlClientError } from "../api/control-client";
 import type { MobileSession } from "../storage/secure-session";
-import { applyAgentEvent, emptyControlSnapshot } from "../state/control-reducer";
+import { applyAgentEvent, emptyControlSnapshot, hydrateThreadSnapshot } from "../state/control-reducer";
 
 export type ConnectionStatus = "connecting" | "online" | "offline" | "needs_configuration";
 
@@ -272,10 +272,19 @@ export function useControlPlane({
     }
   }, [activeSession, refresh]);
 
+  const hydrateThread = useCallback((result: RemoteThreadOpenResult) => {
+    if (!activeSession) return;
+    updateConnectionState(setConnectionStates, activeSession.id, (current) => ({
+      ...current,
+      snapshot: hydrateThreadSnapshot(current.snapshot, result),
+    }));
+  }, [activeSession]);
+
   return {
     ...activeState,
     connectionStates,
     refresh,
+    hydrateThread,
     resolveApproval,
   };
 }

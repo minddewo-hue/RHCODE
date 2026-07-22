@@ -39,6 +39,27 @@ test("keeps the WebSocket credential in subprotocols and the cursor in the URL",
   assert.doesNotMatch(descriptor.url, /credential/);
 });
 
+test("builds authenticated generated image sources without exposing the key in the URL", () => {
+  const client = new ControlClient("192.168.1.20", 8790, accessKey);
+  const source = client.generatedImageSource("generated-image-a1b2c3d4e5f60708.png");
+
+  assert.equal(
+    source.uri,
+    "http://192.168.1.20:8790/v1/generated-images/generated-image-a1b2c3d4e5f60708.png",
+  );
+  assert.equal(source.headers.Authorization, `Bearer ${accessKey}`);
+  assert.doesNotMatch(source.uri, /rhzy_/);
+});
+
+test("builds authenticated managed file downloads without exposing the key in the URL", () => {
+  const client = new ControlClient("192.168.1.20", 8790, accessKey);
+  const request = client.managedFileRequest("file-report-1");
+
+  assert.equal(request.url, "http://192.168.1.20:8790/v1/files/file-report-1");
+  assert.equal(request.headers.Authorization, `Bearer ${accessKey}`);
+  assert.doesNotMatch(request.url, /rhzy_/);
+});
+
 test("verifies a long-lived KEY before saving and validates events at runtime", async () => {
   let authorization = "";
   const fetchMock: typeof fetch = async (_input, init) => {
@@ -108,6 +129,20 @@ test("sends remote task commands with bearer auth and idempotency keys", async (
     if (url.endsWith("/threads/start")) {
       return Response.json({ threadId: "thread-new", acceptedAt: now }, { status: 201 });
     }
+    if (url.endsWith("/threads/thread-new")) {
+      return Response.json({
+        thread: {
+          id: "thread-new",
+          hostId: "local-desktop",
+          title: "Restored task",
+          projectPath: "D:\\work",
+          model: "sub2api/gpt-test",
+          status: "completed",
+          updatedAt: now,
+        },
+        timeline: [],
+      });
+    }
     return Response.json({ threadId: "thread-new", turnId: "turn-1", acceptedAt: now }, { status: 202 });
   };
   let sequence = 0;
@@ -124,6 +159,7 @@ test("sends remote task commands with bearer auth and idempotency keys", async (
     approvalPolicy: "never",
     sandboxMode: "danger-full-access",
   })).threadId, "thread-new");
+  assert.equal((await client.openThread("thread-new")).thread.id, "thread-new");
   assert.equal((await client.startTurn("thread-new", {
     text: "Run the tests",
     model: "sub2api/gpt-test",
@@ -131,23 +167,38 @@ test("sends remote task commands with bearer auth and idempotency keys", async (
     sandboxMode: "danger-full-access",
     reasoningEffort: "xhigh",
   })).turnId, "turn-1");
-  assert.equal(calls.length, 2);
+  assert.equal((await client.setThreadModel("thread-new", "sub2api/gpt-switched")).threadId, "thread-new");
+  assert.equal((await client.archiveThread("thread-new")).threadId, "thread-new");
+  assert.equal((await client.unarchiveThread("thread-new")).threadId, "thread-new");
+  assert.equal(calls.length, 6);
   assert.equal(calls[0]?.url, "http://192.168.1.20:8790/v1/commands/threads/start");
-  assert.equal(calls[1]?.url, "http://192.168.1.20:8790/v1/commands/threads/thread-new/turns/start");
+  assert.equal(calls[1]?.url, "http://192.168.1.20:8790/v1/commands/threads/thread-new");
+  assert.equal(calls[2]?.url, "http://192.168.1.20:8790/v1/commands/threads/thread-new/turns/start");
+  assert.equal(calls[3]?.url, "http://192.168.1.20:8790/v1/commands/threads/thread-new/model");
+  assert.equal(calls[4]?.url, "http://192.168.1.20:8790/v1/commands/threads/thread-new/archive");
+  assert.equal(calls[5]?.url, "http://192.168.1.20:8790/v1/commands/threads/thread-new/unarchive");
   assert.equal((calls[0]?.init?.headers as Record<string, string>)["Idempotency-Key"], "command-1");
-  assert.equal((calls[1]?.init?.headers as Record<string, string>)["Idempotency-Key"], "command-2");
+  assert.equal((calls[1]?.init?.headers as Record<string, string>)["Idempotency-Key"], undefined);
+  assert.equal((calls[2]?.init?.headers as Record<string, string>)["Idempotency-Key"], "command-2");
+  assert.equal((calls[3]?.init?.headers as Record<string, string>)["Idempotency-Key"], "command-3");
+  assert.equal((calls[4]?.init?.headers as Record<string, string>)["Idempotency-Key"], "command-4");
+  assert.equal((calls[5]?.init?.headers as Record<string, string>)["Idempotency-Key"], "command-5");
   assert.match(String((calls[0]?.init?.headers as Record<string, string>).Authorization), /^Bearer /);
   assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), {
     projectPath: "D:\\work",
     approvalPolicy: "never",
     sandboxMode: "danger-full-access",
   });
-  assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), {
+  assert.equal(calls[1]?.init?.body, undefined);
+  assert.deepEqual(JSON.parse(String(calls[2]?.init?.body)), {
     text: "Run the tests",
     model: "sub2api/gpt-test",
     approvalPolicy: "never",
     sandboxMode: "danger-full-access",
     reasoningEffort: "xhigh",
+  });
+  assert.deepEqual(JSON.parse(String(calls[3]?.init?.body)), {
+    model: "sub2api/gpt-switched",
   });
 });
 
@@ -181,6 +232,7 @@ test("lists and opens synchronized desktop project directories", async () => {
           created: false,
         });
       }
+      if (init?.method === "DELETE") return Response.json({ projects: [] });
       return Response.json({ projects: [{ path: "D:\\work_space\\test", name: "test" }] });
     },
     () => "project-command-1",
@@ -199,6 +251,11 @@ test("lists and opens synchronized desktop project directories", async () => {
     path: "D:\\work_space\\created",
     create: true,
   });
+
+  assert.deepEqual(await client.removeProject("D:\\work_space\\mobile-new"), { projects: [] });
+  assert.equal(calls[3]?.url, "http://192.168.1.20:8790/v1/commands/projects");
+  assert.equal(calls[3]?.init?.method, "DELETE");
+  assert.deepEqual(JSON.parse(String(calls[3]?.init?.body)), { path: "D:\\work_space\\mobile-new" });
 
 });
 

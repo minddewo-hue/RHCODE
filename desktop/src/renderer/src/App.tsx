@@ -1,5 +1,7 @@
 import {
   Activity,
+  Archive,
+  ArchiveRestore,
   Bot,
   Brain,
   Check,
@@ -20,6 +22,7 @@ import {
   Pencil,
   Play,
   Plus,
+  Puzzle,
   RefreshCw,
   RotateCcw,
   Send,
@@ -55,10 +58,11 @@ import type {
   ReasoningEffort,
   RpcNotification,
   SandboxMode,
+  SkillImportSource,
+  SkillsStatus,
   SyncStatus,
   UpdateStatus,
 } from "../../shared/desktop-api";
-import { isGemma31bBf16Model } from "../../../model-gateway/src/gemma-31b-policy.js";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import {
   activityFromTimeline,
@@ -92,7 +96,6 @@ import {
 
 interface ChatMessage extends ConversationMessage {
   streaming?: boolean;
-  images?: Array<{ path: string; name: string }>;
 }
 
 interface ComposerDraft {
@@ -143,6 +146,15 @@ const emptyPersistence: PersistenceStatus = {
   mobileAccessState: "missing",
 };
 
+const emptySkills: SkillsStatus = {
+  skills: [],
+  errors: [],
+  sources: {
+    codex: { available: false, count: 0 },
+    claude: { available: false, count: 0 },
+  },
+};
+
 export function App() {
   const [agentStatus, setAgentStatus] = useState<AgentStatus>({ state: "connecting", error: null });
   const [gatewayStatus, setGatewayStatus] = useState<GatewayStatus>(emptyGateway);
@@ -158,6 +170,7 @@ export function App() {
   const [projectPath, setProjectPath] = useState(() => storedLastProject());
   const [threadId, setThreadId] = useState<string | null>(null);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
+  const [showArchivedThreads, setShowArchivedThreads] = useState(false);
   const [threadSearch, setThreadSearch] = useState("");
   const [threadActionsId, setThreadActionsId] = useState<string | null>(null);
   const [threadMenuPosition, setThreadMenuPosition] = useState<{ top: number; left: number } | null>(null);
@@ -182,18 +195,22 @@ export function App() {
   const [submittingTurn, setSubmittingTurn] = useState(false);
   const [activeThreadIds, setActiveThreadIds] = useState<Set<string>>(() => new Set());
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
-  const [rightView, setRightView] = useState<"activity" | "settings">("activity");
+  const [rightView, setRightView] = useState<"activity" | "settings" | "skills">("activity");
   const projectPickerRef = useRef<HTMLButtonElement | null>(null);
   const threadActionsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const conversationRef = useRef<HTMLElement | null>(null);
   const selectedModelRef = useRef(selectedModel);
   const selectedProjectPathRef = useRef(projectPath);
   const selectedThreadIdRef = useRef<string | null>(null);
+  const loadedThreadIdRef = useRef<string | null>(null);
+  const openingThreadIdRef = useRef<string | null>(null);
   const navigationRevisionRef = useRef(0);
   const threadSearchRef = useRef(threadSearch);
+  const showArchivedThreadsRef = useRef(false);
   const followConversationRef = useRef(true);
   const lastPrompt = useRef("");
   const composerDraftsRef = useRef(new Map<string, ComposerDraft>());
+  const forgottenProjectPathsRef = useRef(new Set<string>());
 
   useEffect(() => {
     selectedModelRef.current = selectedModel;
@@ -212,6 +229,10 @@ export function App() {
   useEffect(() => {
     threadSearchRef.current = threadSearch;
   }, [threadSearch]);
+
+  useEffect(() => {
+    showArchivedThreadsRef.current = showArchivedThreads;
+  }, [showArchivedThreads]);
 
   useEffect(() => {
     const unsubscribers = [
@@ -246,7 +267,7 @@ export function App() {
       });
     }, 220);
     return () => window.clearTimeout(timeout);
-  }, [agentStatus.state, projectPath, threadSearch]);
+  }, [agentStatus.state, projectPath, showArchivedThreads, threadSearch]);
 
   useEffect(() => {
     if (!followConversationRef.current) return;
@@ -329,7 +350,9 @@ export function App() {
   function setWorkspaceProject(path: string): void {
     selectedProjectPathRef.current = path;
     setProjectPath(path);
-    if (path) localStorage.setItem("rhzycode.lastProject", path);
+    if (path && !forgottenProjectPathsRef.current.has(path)) {
+      localStorage.setItem("rhzycode.lastProject", path);
+    }
   }
 
   function setWorkspaceThread(id: string | null): void {
@@ -372,6 +395,7 @@ export function App() {
 
   function resetConversation(): void {
     setWorkspaceThread(null);
+    loadedThreadIdRef.current = null;
     setMessages([]);
     setActivities([]);
     setComposer("");
@@ -389,7 +413,7 @@ export function App() {
     }
     setWorkspaceProject(detail.thread.projectPath);
     setWorkspaceThread(detail.thread.id);
-    if (detail.thread.projectPath) rememberProject(detail.thread.projectPath);
+    loadedThreadIdRef.current = detail.thread.id;
     setMessages(detail.messages);
     setActivities(detail.timeline.map(activityFromTimeline));
     const active = isActiveThreadStatus(detail.thread.status);
@@ -409,6 +433,7 @@ export function App() {
     revision: number,
     availableModels: ModelOption[] = models,
   ): Promise<void> {
+    openingThreadIdRef.current = selectedThreadId;
     setOpeningThreadId(selectedThreadId);
     try {
       followConversationRef.current = true;
@@ -420,6 +445,7 @@ export function App() {
         upsertActivity(`history-error-${Date.now()}`, "Thread unavailable", getErrorMessage(error), "error");
       }
     } finally {
+      if (openingThreadIdRef.current === selectedThreadId) openingThreadIdRef.current = null;
       if (revision === navigationRevisionRef.current) setOpeningThreadId(null);
     }
   }
@@ -505,6 +531,7 @@ export function App() {
     const availableThreads = await window.rhzycode.listThreads({
       ...(requestedProject ? { cwd: requestedProject } : {}),
       ...(threadSearch.trim() ? { searchTerm: threadSearch.trim() } : {}),
+      ...(showArchivedThreads ? { archived: true } : {}),
     });
     if (requestedProject === selectedProjectPathRef.current) setThreads(availableThreads);
   }
@@ -525,7 +552,10 @@ export function App() {
     resetConversation();
     followConversationRef.current = true;
     try {
-      const availableThreads = await window.rhzycode.listThreads({ cwd: path });
+      const availableThreads = await window.rhzycode.listThreads({
+        cwd: path,
+        ...(showArchivedThreadsRef.current ? { archived: true } : {}),
+      });
       if (revision !== navigationRevisionRef.current) return;
       setThreads(availableThreads);
       const preferredThreadId = storedLastThread(path);
@@ -540,6 +570,10 @@ export function App() {
   }
 
   function rememberProject(path: string) {
+    forgottenProjectPathsRef.current.delete(path);
+    if (selectedProjectPathRef.current === path) {
+      localStorage.setItem("rhzycode.lastProject", path);
+    }
     setRecentProjects((current) => {
       const next = [path, ...current.filter((entry) => entry !== path)].slice(0, 50);
       localStorage.setItem("rhzycode.recentProjects", JSON.stringify(next));
@@ -549,11 +583,15 @@ export function App() {
   }
 
   function forgetProject(path: string) {
+    forgottenProjectPathsRef.current.add(path);
     setRecentProjects((current) => {
       const next = current.filter((entry) => entry !== path);
       localStorage.setItem("rhzycode.recentProjects", JSON.stringify(next));
       return next;
     });
+    if (selectedProjectPathRef.current === path) {
+      localStorage.removeItem("rhzycode.lastProject");
+    }
     void window.rhzycode.forgetProject(path).catch(() => undefined);
   }
 
@@ -568,24 +606,18 @@ export function App() {
   }
 
   function changeSelectedModel(nextModel: string) {
-    const recoverFailedTask = Boolean(
-      failedPrompt
-      && selectedThreadIdRef.current
-      && isGemma31bBf16Model(selectedModelRef.current)
-      && nextModel !== selectedModelRef.current,
-    );
-    if (recoverFailedTask) {
-      const retryText = composer.trim() ? composer : failedPrompt || "";
-      const retryAttachments = [...attachments];
-      navigationRevisionRef.current += 1;
-      setOpeningThreadId(null);
-      resetConversation();
-      setComposer(retryText);
-      setAttachments(retryAttachments);
-    }
     selectedModelRef.current = nextModel;
     setSelectedModel(nextModel);
     localStorage.setItem("rhzycode.selectedModel", nextModel);
+    const selectedThread = selectedThreadIdRef.current;
+    if (!selectedThread) return;
+    void window.rhzycode.setThreadModel(selectedThread, nextModel)
+      .then((updated) => {
+        setThreads((current) => current.map((thread) => thread.id === updated.id ? updated : thread));
+      })
+      .catch((error) => {
+        upsertActivity(`model-error-${Date.now()}`, "Model selection unavailable", getErrorMessage(error), "error");
+      });
   }
 
   async function chooseAttachments() {
@@ -673,6 +705,50 @@ export function App() {
     }
   }
 
+  async function archiveSelectedThread(selectedThreadId: string) {
+    const thread = threads.find((entry) => entry.id === selectedThreadId);
+    if (thread && isActiveThreadStatus(thread.status)) {
+      closeThreadActions();
+      window.alert("Stop the running task before archiving it.");
+      return;
+    }
+    closeThreadActions();
+    try {
+      await window.rhzycode.archiveThread(selectedThreadId);
+      setThreads((current) => current.filter((entry) => entry.id !== selectedThreadId));
+      if (selectedThreadId === selectedThreadIdRef.current) startNewTask();
+    } catch (error) {
+      upsertActivity(`archive-error-${Date.now()}`, "Archive failed", getErrorMessage(error), "error");
+    }
+  }
+
+  async function restoreArchivedThread(selectedThreadId: string) {
+    closeThreadActions();
+    try {
+      await window.rhzycode.unarchiveThread(selectedThreadId);
+      setThreads((current) => current.filter((entry) => entry.id !== selectedThreadId));
+    } catch (error) {
+      upsertActivity(`archive-error-${Date.now()}`, "Restore failed", getErrorMessage(error), "error");
+    }
+  }
+
+  async function switchThreadList(archived: boolean) {
+    closeThreadActions();
+    setShowArchivedThreads(archived);
+    showArchivedThreadsRef.current = archived;
+    setThreadSearch("");
+    resetConversation();
+    try {
+      const availableThreads = await window.rhzycode.listThreads({
+        ...(selectedProjectPathRef.current ? { cwd: selectedProjectPathRef.current } : {}),
+        ...(archived ? { archived: true } : {}),
+      });
+      setThreads(availableThreads);
+    } catch (error) {
+      upsertActivity(`history-error-${Date.now()}`, "History unavailable", getErrorMessage(error), "error");
+    }
+  }
+
   function closeThreadActions() {
     setThreadActionsId(null);
     setThreadMenuPosition(null);
@@ -705,6 +781,10 @@ export function App() {
   }
 
   async function openThread(selectedThreadId: string) {
+    if (
+      selectedThreadIdRef.current === selectedThreadId
+      && (loadedThreadIdRef.current === selectedThreadId || openingThreadIdRef.current === selectedThreadId)
+    ) return;
     const revision = ++navigationRevisionRef.current;
     if (selectedThreadIdRef.current !== selectedThreadId) {
       saveComposerDraft();
@@ -738,17 +818,25 @@ export function App() {
     followConversationRef.current = true;
     lastPrompt.current = text;
     setSubmittingTurn(true);
+    const optimisticMessageId = `user-${Date.now()}`;
     setMessages((current) => [
       ...current,
       {
-        id: `user-${Date.now()}`,
+        id: optimisticMessageId,
         role: "user",
-        content: selectedAttachments.some((attachment) => attachment.kind === "file")
-          ? `${text}\n\nAttachments: ${selectedAttachments.filter((attachment) => attachment.kind === "file").map((attachment) => attachment.name).join(", ")}`
-          : text,
+        content: text,
         images: selectedAttachments
           .filter((attachment) => attachment.kind === "image")
           .map((attachment) => ({ path: attachment.path, name: attachment.name })),
+        files: selectedAttachments
+          .filter((attachment) => attachment.kind === "file")
+          .map((attachment) => ({
+            id: `local-${attachment.path}`,
+            path: attachment.path,
+            name: attachment.name,
+            size: attachment.size,
+            source: "upload" as const,
+          })),
       },
     ]);
 
@@ -785,6 +873,7 @@ export function App() {
           && selectedThreadIdRef.current === null
         ) {
           setWorkspaceThread(activeThreadId);
+          loadedThreadIdRef.current = activeThreadId;
         }
       }
       markThreadActive(activeThreadId, true);
@@ -797,15 +886,20 @@ export function App() {
             updatedAt: new Date().toISOString(),
           }
         : thread));
-      await window.rhzycode.startTurn({
+      const result = await window.rhzycode.startTurn({
         threadId: activeThreadId,
         text,
         ...(submissionModel ? { model: submissionModel } : {}),
         approvalPolicy,
         sandboxMode,
-        reasoningEffort,
+        ...(reasoningEfforts.length ? { reasoningEffort } : {}),
         attachments: selectedAttachments,
       });
+      if (result.files?.length) {
+        setMessages((current) => current.map((message) => message.id === optimisticMessageId
+          ? { ...message, files: result.files }
+          : message));
+      }
     } catch (error) {
       if (submittedThreadId) {
         markThreadActive(submittedThreadId, false);
@@ -1074,6 +1168,51 @@ export function App() {
       const item = (params.item || {}) as Record<string, unknown>;
       const itemId = String(item.id || `${method}-${Date.now()}`);
       const itemType = String(item.type || "activity");
+      if (method === "item/completed" && itemType === "imageGeneration") {
+        const imagePath = String(item.savedPath || "");
+        if (imagePath) {
+          const incoming: ChatMessage = {
+            id: itemId,
+            role: "assistant",
+            content: "",
+            images: [{
+              path: imagePath,
+              name: String(item.name || basename(imagePath) || "generated-image"),
+              generated: true,
+            }],
+          };
+          setMessages((current) => current.some((message) => message.id === itemId)
+            ? current.map((message) => message.id === itemId ? incoming : message)
+            : [...current, incoming]);
+        } else {
+          upsertActivity(itemId, "Generated image", "The generated image could not be loaded.", "error");
+        }
+        return;
+      }
+      if (itemType === "imageGeneration") return;
+      if (method === "item/completed" && itemType === "artifact") {
+        const files = Array.isArray(item.files)
+          ? item.files.flatMap((value) => {
+              const file = (value || {}) as Record<string, unknown>;
+              if (!file.id || !file.name || !file.path) return [];
+              return [{
+                id: String(file.id),
+                name: String(file.name),
+                path: String(file.path),
+                size: Number(file.size || 0),
+                mimeType: file.mimeType ? String(file.mimeType) : undefined,
+                source: "generated" as const,
+              }];
+            })
+          : [];
+        if (files.length) {
+          const incoming: ChatMessage = { id: itemId, role: "assistant", content: "", files };
+          setMessages((current) => current.some((message) => message.id === itemId)
+            ? current.map((message) => message.id === itemId ? incoming : message)
+            : [...current, incoming]);
+        }
+        return;
+      }
       if (method === "item/completed" && itemType === "userMessage") {
         const incoming = userMessageFromNotification(itemId, item);
         setMessages((current) => {
@@ -1108,7 +1247,8 @@ export function App() {
       const active = isActiveThreadStatus(event.thread.status);
       markThreadActive(event.thread.id, active);
       const searchTerm = threadSearchRef.current.trim().toLowerCase();
-      const belongsInCurrentList = event.thread.projectPath === selectedProjectPathRef.current
+      const belongsInCurrentList = !showArchivedThreadsRef.current
+        && event.thread.projectPath === selectedProjectPathRef.current
         && (!searchTerm || event.thread.title.toLowerCase().includes(searchTerm));
       setThreads((current) => {
         const existingIndex = current.findIndex((thread) => thread.id === event.thread.id);
@@ -1125,6 +1265,13 @@ export function App() {
       markThreadActive(event.threadId, false);
       setThreads((current) => current.filter((thread) => thread.id !== event.threadId));
       if (event.threadId === selectedThreadIdRef.current) resetConversation();
+      if (showArchivedThreadsRef.current) {
+        void window.rhzycode.listThreads({
+          ...(selectedProjectPathRef.current ? { cwd: selectedProjectPathRef.current } : {}),
+          ...(threadSearchRef.current.trim() ? { searchTerm: threadSearchRef.current.trim() } : {}),
+          archived: true,
+        }).then(setThreads).catch(() => undefined);
+      }
     }
     if (event.type === "approval.requested") {
       setApprovals((current) => [
@@ -1242,16 +1389,26 @@ export function App() {
         </div>
 
         <div className="section-heading">
-          <span>Tasks ({threads.length})</span>
-          <button className="icon-button compact" title="New task" aria-label="New task" onClick={startNewTask}><Plus size={15} /></button>
+          <span>{showArchivedThreads ? "Archived" : "Tasks"} ({threads.length})</span>
+          <div>
+            <button
+              className={`icon-button compact ${showArchivedThreads ? "selected" : ""}`}
+              title={showArchivedThreads ? "Show active tasks" : "Show archived tasks"}
+              aria-label={showArchivedThreads ? "Show active tasks" : "Show archived tasks"}
+              onClick={() => void switchThreadList(!showArchivedThreads)}
+            >
+              {showArchivedThreads ? <ArchiveRestore size={15} /> : <Archive size={15} />}
+            </button>
+            {!showArchivedThreads && <button className="icon-button compact" title="New task" aria-label="New task" onClick={startNewTask}><Plus size={15} /></button>}
+          </div>
         </div>
         <label className="thread-search">
           <Search size={13} />
           <input
             value={threadSearch}
             onChange={(event) => setThreadSearch(event.target.value)}
-            placeholder="Search threads"
-            aria-label="Search threads"
+            placeholder={showArchivedThreads ? "Search archived tasks" : "Search threads"}
+            aria-label={showArchivedThreads ? "Search archived tasks" : "Search threads"}
           />
           {threadSearch && <button title="Clear search" onClick={() => setThreadSearch("")}><X size={12} /></button>}
         </label>
@@ -1268,7 +1425,8 @@ export function App() {
                 <button
                   className="thread-row"
                   title={`Model: ${thread.model}`}
-                  onClick={() => void openThread(thread.id)}
+                  disabled={showArchivedThreads}
+                  onClick={() => !showArchivedThreads && void openThread(thread.id)}
                 >
                   <span className={`thread-state ${thread.status}`} />
                   <span>
@@ -1281,7 +1439,14 @@ export function App() {
               )}
               {threadActionsId === thread.id && threadMenuPosition && (
                 <div className="thread-actions-menu" role="menu" style={threadMenuPosition}>
-                  <button role="menuitem" onClick={() => beginRename(thread)}><Pencil size={13} /> Rename task</button>
+                  {showArchivedThreads ? (
+                    <button role="menuitem" onClick={() => void restoreArchivedThread(thread.id)}><ArchiveRestore size={13} /> Restore task</button>
+                  ) : (
+                    <>
+                      <button role="menuitem" onClick={() => beginRename(thread)}><Pencil size={13} /> Rename task</button>
+                      <button role="menuitem" onClick={() => void archiveSelectedThread(thread.id)}><Archive size={13} /> Archive task</button>
+                    </>
+                  )}
                   <button role="menuitem" className="danger" onClick={() => void permanentlyDeleteThread(thread.id)}><Trash2 size={13} /> Delete task permanently</button>
                 </div>
               )}
@@ -1341,10 +1506,24 @@ export function App() {
                     {message.streaming && <div className="message-author"><span className="streaming-label">Streaming</span></div>}
                     <div className="message-content">
                       {!!message.content && <div>{message.content}</div>}
-                      {!!message.images?.length && (
+                      {!!(message.images?.length || message.files?.some(isGeneratedImageFile)) && (
                         <div className="message-images">
-                          {message.images.map((image) => (
+                          {message.images?.map((image) => (
                             <MessageImage key={image.path} image={image} onOpen={setPreviewImage} />
+                          ))}
+                          {message.files?.filter(isGeneratedImageFile).map((file) => (
+                            <MessageImage
+                              key={file.id}
+                              image={{ path: file.path!, name: file.name, generated: true }}
+                              onOpen={setPreviewImage}
+                            />
+                          ))}
+                        </div>
+                      )}
+                      {!!message.files?.some((file) => !isGeneratedImageFile(file)) && (
+                        <div className="message-files">
+                          {message.files.filter((file) => !isGeneratedImageFile(file)).map((file) => (
+                            <MessageFile key={file.id} file={file} />
                           ))}
                         </div>
                       )}
@@ -1418,24 +1597,26 @@ export function App() {
                     <option value="never">Never ask</option>
                   </select>
                 </label>
-                <label className="approval-mode" title="Reasoning effort">
-                  <Brain size={14} />
-                  <select
-                    aria-label="Reasoning effort"
-                    value={reasoningEffort}
-                    onChange={(event) => {
-                      const next = event.target.value as ReasoningEffort;
-                      setReasoningEffort(next);
-                      localStorage.setItem("rhzycode.reasoningEffort", next);
-                    }}
-                  >
-                    {reasoningEfforts.map((effort) => (
-                      <option key={effort} value={effort}>
-                        {effort === "xhigh" ? "XHigh" : effort.charAt(0).toUpperCase() + effort.slice(1)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                {reasoningEfforts.length > 0 && (
+                  <label className="approval-mode" title="Reasoning effort">
+                    <Brain size={14} />
+                    <select
+                      aria-label="Reasoning effort"
+                      value={reasoningEffort}
+                      onChange={(event) => {
+                        const next = event.target.value as ReasoningEffort;
+                        setReasoningEffort(next);
+                        localStorage.setItem("rhzycode.reasoningEffort", next);
+                      }}
+                    >
+                      {reasoningEfforts.map((effort) => (
+                        <option key={effort} value={effort}>
+                          {effort === "xhigh" ? "XHigh" : effort.charAt(0).toUpperCase() + effort.slice(1)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 {failedPrompt && !running && (
                   <button className="retry-turn" title="Retry last turn" onClick={() => void sendTurn(failedPrompt)}>
                     <RotateCcw size={14} /> Retry
@@ -1457,6 +1638,7 @@ export function App() {
           <div className="panel-tabs" role="tablist" aria-label="Side panel views">
             <button role="tab" aria-selected={rightView === "activity"} aria-busy={running} className={rightView === "activity" ? "active" : ""} onClick={() => setRightView("activity")}><Activity className={running ? "activity-wave-running" : ""} size={15} /> Activity</button>
             <button role="tab" aria-selected={rightView === "settings"} className={rightView === "settings" ? "active" : ""} onClick={() => setRightView("settings")}><Settings size={15} /> Settings</button>
+            <button role="tab" aria-selected={rightView === "skills"} className={rightView === "skills" ? "active" : ""} onClick={() => setRightView("skills")}><Puzzle size={15} /> Skills</button>
             <button className="panel-close" title="Close side panel" aria-label="Close side panel" onClick={() => setRightPanelOpen(false)}><X size={15} /></button>
           </div>
           {rightView === "activity" ? (
@@ -1469,7 +1651,7 @@ export function App() {
               resolvingUserInputId={resolvingUserInputId}
               onResolveUserInput={resolveUserInput}
             />
-          ) : (
+          ) : rightView === "settings" ? (
             <SettingsView
               status={credentialStatus}
               updateStatus={updateStatus}
@@ -1486,6 +1668,8 @@ export function App() {
               onRotateAccessKey={rotateMobileAccessKey}
               onSyncPortChange={updateSyncPort}
             />
+          ) : (
+            <SkillsView />
           )}
         </aside>
       )}
@@ -1503,7 +1687,7 @@ function MessageImage({
   image,
   onOpen,
 }: {
-  image: { path: string; name: string };
+  image: NonNullable<ConversationMessage["images"]>[number];
   onOpen: (source: string) => void;
 }) {
   const [source, setSource] = useState<string | null>(null);
@@ -1516,10 +1700,61 @@ function MessageImage({
   }, [image.path]);
   if (!source) return null;
   return (
-    <button className="message-image" title={`Open ${image.name}`} onClick={() => onOpen(source)}>
-      <img src={source} alt={image.name} />
-    </button>
+    <div className={`message-image-wrap${image.generated ? " generated" : ""}`}>
+      <button
+        className="message-image"
+        title={`Open ${image.name}`}
+        onClick={() => onOpen(source)}
+      >
+        <img src={source} alt={image.name} />
+      </button>
+      {image.generated && (
+        <button
+          className="message-image-save"
+          aria-label={`Save ${image.name}`}
+          title={`Save ${image.name}`}
+          onClick={() => void window.rhzycode.saveLocalFile(image.path, image.name)}
+        >
+          <Download size={16} />
+        </button>
+      )}
+    </div>
   );
+}
+
+function MessageFile({ file }: {
+  file: NonNullable<ConversationMessage["files"]>[number];
+}) {
+  const open = () => file.path && window.rhzycode.openLocalFile(file.path).catch(() => undefined);
+  const reveal = () => file.path && window.rhzycode.revealLocalFile(file.path).catch(() => undefined);
+  const save = () => file.path && window.rhzycode.saveLocalFile(file.path, file.name).catch(() => undefined);
+  return (
+    <div className="message-file" title={file.path || file.name}>
+      <button className="message-file-main" aria-label={`Open ${file.name}`} title={`Open ${file.name}`} disabled={!file.path} onClick={open}>
+        <span className="message-file-icon"><File size={18} /></span>
+        <span className="message-file-copy">
+          <strong>{file.name}</strong>
+          <small>{formatFileSize(file.size)}{file.source === "generated" ? " - Generated" : ""}</small>
+        </span>
+      </button>
+      {file.path && (
+        <button
+          className="message-file-reveal"
+          aria-label={file.source === "generated" ? `Save ${file.name}` : `Show ${file.name} in folder`}
+          title={file.source === "generated" ? `Save ${file.name}` : `Show ${file.name} in folder`}
+          onClick={file.source === "generated" ? save : reveal}
+        >
+          {file.source === "generated" ? <Download size={15} /> : <FolderOpen size={15} />}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function isGeneratedImageFile(
+  file: NonNullable<ConversationMessage["files"]>[number],
+): boolean {
+  return file.source === "generated" && Boolean(file.path) && file.mimeType?.startsWith("image/") === true;
 }
 
 function userMessageFromNotification(id: string, item: Record<string, unknown>): ChatMessage {
@@ -1527,7 +1762,7 @@ function userMessageFromNotification(id: string, item: Record<string, unknown>):
   const content = contentItems.flatMap((rawItem) => {
     const entry = (rawItem || {}) as Record<string, unknown>;
     return entry.type === "text" ? [String(entry.text || "")] : [];
-  }).filter(Boolean).join("\n");
+  }).filter(Boolean).join("\n").split("\n\nAttached files (use these absolute paths):\n", 1)[0] || "";
   const images = contentItems.flatMap((rawItem) => {
     const entry = (rawItem || {}) as Record<string, unknown>;
     if (entry.type !== "image" && entry.type !== "localImage") return [];
@@ -1745,6 +1980,182 @@ function GatewayView({
         <h3>Mobile sync</h3>
         <div className="sync-row"><span className={`connection-dot ${syncStatus.state}`} /><div><strong>{syncStatus.state}</strong><small>{syncStatus.state === "running" ? `External port ${syncStatus.port}` : syncStatus.error || "Not running"}</small></div></div>
       </section>
+    </div>
+  );
+}
+
+function SkillsView() {
+  const [status, setStatus] = useState<SkillsStatus>(emptySkills);
+  const [loading, setLoading] = useState(true);
+  const [pendingPath, setPendingPath] = useState<string | null>(null);
+  const [pendingSource, setPendingSource] = useState<SkillImportSource | "install" | null>(null);
+  const [query, setQuery] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function loadSkills(forceReload = false) {
+    setLoading(true);
+    setError(null);
+    try {
+      setStatus(await window.rhzycode.getSkills(forceReload));
+    } catch (loadError) {
+      setError(getErrorMessage(loadError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadSkills();
+  }, []);
+
+  async function installSkill() {
+    setPendingSource("install");
+    setNotice(null);
+    setError(null);
+    try {
+      const result = await window.rhzycode.chooseAndInstallSkill();
+      if (!result) return;
+      setStatus(result.status);
+      setNotice(`Installed ${result.installedName}.`);
+    } catch (installError) {
+      setError(getErrorMessage(installError));
+    } finally {
+      setPendingSource(null);
+    }
+  }
+
+  async function importSkills(source: SkillImportSource) {
+    setPendingSource(source);
+    setNotice(null);
+    setError(null);
+    try {
+      const result = await window.rhzycode.importSkills(source);
+      setStatus(result.status);
+      setNotice(
+        `Imported ${result.importedCount}; skipped ${result.skippedCount}`
+        + (result.failedCount > 0 ? `; failed ${result.failedCount}.` : "."),
+      );
+    } catch (importError) {
+      setError(getErrorMessage(importError));
+    } finally {
+      setPendingSource(null);
+    }
+  }
+
+  async function toggleSkill(skillPath: string, enabled: boolean) {
+    setPendingPath(skillPath);
+    setNotice(null);
+    setError(null);
+    try {
+      setStatus(await window.rhzycode.setSkillEnabled(skillPath, enabled));
+    } catch (toggleError) {
+      setError(getErrorMessage(toggleError));
+    } finally {
+      setPendingPath(null);
+    }
+  }
+
+  async function removeSkill(skillPath: string, displayName: string) {
+    if (!window.confirm(`Delete ${displayName}?`)) return;
+    setPendingPath(skillPath);
+    setNotice(null);
+    setError(null);
+    try {
+      setStatus(await window.rhzycode.removeSkill(skillPath));
+      setNotice(`Deleted ${displayName}.`);
+    } catch (removeError) {
+      setError(getErrorMessage(removeError));
+    } finally {
+      setPendingPath(null);
+    }
+  }
+
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleSkills = status.skills.filter((skill) => !normalizedQuery || [
+    skill.name,
+    skill.displayName,
+    skill.description,
+    skill.shortDescription || "",
+    skill.scope,
+  ].some((value) => value.toLowerCase().includes(normalizedQuery)));
+  const busy = loading || pendingSource !== null || pendingPath !== null;
+
+  return (
+    <div className="skills-view">
+      <div className="skills-actions">
+        <button className="skills-install" disabled={busy} onClick={() => void installSkill()}>
+          {pendingSource === "install" ? <RefreshCw className="spinning" size={14} /> : <FolderOpen size={14} />}
+          Install
+        </button>
+        {(["codex", "claude"] as const).map((source) => {
+          const sourceStatus = status.sources[source];
+          return (
+            <button
+              key={source}
+              disabled={busy || !sourceStatus.available || sourceStatus.count === 0}
+              onClick={() => void importSkills(source)}
+              title={`Import user skills from ${source === "codex" ? "Codex" : "Claude"}`}
+            >
+              {pendingSource === source ? <RefreshCw className="spinning" size={13} /> : <Download size={13} />}
+              {source === "codex" ? "Codex" : "Claude"} <span>{sourceStatus.count}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="skills-filter">
+        <Search size={14} />
+        <input aria-label="Search skills" placeholder="Search skills" value={query} onChange={(event) => setQuery(event.target.value)} />
+        <button disabled={busy} title="Refresh skills" aria-label="Refresh skills" onClick={() => void loadSkills(true)}>
+          <RefreshCw className={loading ? "spinning" : ""} size={14} />
+        </button>
+      </div>
+      <div className="skills-summary">
+        <span>{visibleSkills.length} of {status.skills.length}</span>
+        <span>{status.skills.filter((skill) => skill.enabled).length} enabled</span>
+      </div>
+      {notice && <p className="skills-notice">{notice}</p>}
+      {error && <p className="gateway-error">{error}</p>}
+      {status.errors.map((skillError) => (
+        <p className="gateway-error" key={`${skillError.path}-${skillError.message}`} title={skillError.path}>{skillError.message}</p>
+      ))}
+      <div className="skill-list" aria-busy={loading}>
+        {!loading && visibleSkills.length === 0 && (
+          <div className="skills-empty"><Puzzle size={22} /><span>{query.trim() ? "No matching skills" : "No skills installed"}</span></div>
+        )}
+        {visibleSkills.map((skill) => {
+          const pending = pendingPath === skill.path;
+          const description = skill.shortDescription || skill.description;
+          return (
+            <div className={`skill-row ${skill.enabled ? "" : "disabled"}`} key={skill.path}>
+              <div className="skill-row-heading">
+                <div className="skill-title">
+                  <strong title={skill.displayName}>{skill.displayName}</strong>
+                  <span>{skill.scope}</span>
+                </div>
+                <div className="skill-row-actions">
+                  <button
+                    className={`skill-toggle ${skill.enabled ? "enabled" : ""}`}
+                    role="switch"
+                    aria-checked={skill.enabled}
+                    aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.displayName}`}
+                    title={`${skill.enabled ? "Disable" : "Enable"} skill`}
+                    disabled={busy}
+                    onClick={() => void toggleSkill(skill.path, !skill.enabled)}
+                  ><span /></button>
+                  {skill.canRemove && (
+                    <button className="skill-remove" disabled={busy} title="Delete skill" aria-label={`Delete ${skill.displayName}`} onClick={() => void removeSkill(skill.path, skill.displayName)}>
+                      {pending ? <RefreshCw className="spinning" size={13} /> : <Trash2 size={13} />}
+                    </button>
+                  )}
+                </div>
+              </div>
+              <p>{description}</p>
+              <small title={skill.path}>{skill.name}</small>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

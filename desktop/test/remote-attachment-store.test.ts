@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { saveRemoteAttachments } from "../src/main/remote-attachment-store";
+import { removeRemoteAttachments, saveRemoteAttachments } from "../src/main/remote-attachment-store";
 
 test("stores validated mobile attachments under the managed directory", (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-remote-attachments-"));
@@ -17,6 +17,12 @@ test("stores validated mobile attachments under the managed directory", (context
   assert.equal(attachment.name, "notes.txt");
   assert.equal(fs.readFileSync(attachment.path, "utf8"), "hello");
   assert.equal(path.dirname(attachment.path), directory);
+  const outside = path.join(path.dirname(directory), "rhzycode-user-file.txt");
+  fs.writeFileSync(outside, "keep", "utf8");
+  removeRemoteAttachments(directory, [attachment.path, outside]);
+  assert.equal(fs.existsSync(attachment.path), false);
+  assert.equal(fs.readFileSync(outside, "utf8"), "keep");
+  fs.unlinkSync(outside);
 });
 
 test("rejects the whole mobile attachment batch before writing invalid data", (context) => {

@@ -44,6 +44,16 @@ export const threadSummarySchema = z.object({
 });
 export type ThreadSummary = z.infer<typeof threadSummarySchema>;
 
+export const conversationFileSchema = z.object({
+  id: z.string().min(1).max(240),
+  name: z.string().min(1).max(240),
+  size: z.number().int().nonnegative(),
+  mimeType: z.string().min(1).max(240).optional(),
+  source: z.enum(["upload", "generated"]),
+  path: z.string().min(1).optional(),
+});
+export type ConversationFile = z.infer<typeof conversationFileSchema>;
+
 export const timelineItemSchema = z.object({
   id: z.string().min(1),
   threadId: z.string().min(1),
@@ -51,6 +61,12 @@ export const timelineItemSchema = z.object({
   status: z.enum(["pending", "running", "completed", "failed"]),
   title: z.string(),
   content: z.string(),
+  images: z.array(z.object({
+    id: z.string().min(1).max(240),
+    name: z.string().min(1).max(240),
+    generated: z.boolean().optional(),
+  })).max(10).optional(),
+  files: z.array(conversationFileSchema.omit({ path: true })).max(20).optional(),
   createdAt: z.string().datetime(),
 });
 export type TimelineItem = z.infer<typeof timelineItemSchema>;
@@ -62,7 +78,9 @@ export const conversationMessageSchema = z.object({
   images: z.array(z.object({
     path: z.string().min(1),
     name: z.string().min(1),
+    generated: z.boolean().optional(),
   })).optional(),
+  files: z.array(conversationFileSchema).max(20).optional(),
 });
 export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
 
@@ -108,6 +126,12 @@ export const userInputRequestSchema = z.object({
 });
 export type UserInputRequest = z.infer<typeof userInputRequestSchema>;
 
+export const projectDirectorySchema = z.object({
+  path: z.string().min(1).max(32_768),
+  name: z.string().min(1).max(500),
+});
+export type ProjectDirectory = z.infer<typeof projectDirectorySchema>;
+
 export const userInputAnswersSchema = z.record(z.string(), z.array(z.string()));
 export type UserInputAnswers = z.infer<typeof userInputAnswersSchema>;
 
@@ -126,6 +150,11 @@ export const agentEventSchema = z.discriminatedUnion("type", [
     type: z.literal("thread.removed"),
     sequence: z.number().int().nonnegative(),
     threadId: z.string().min(1),
+  }),
+  z.object({
+    type: z.literal("projects.updated"),
+    sequence: z.number().int().nonnegative(),
+    projects: z.array(projectDirectorySchema).max(500),
   }),
   z.object({
     type: z.literal("timeline.upserted"),
@@ -180,12 +209,6 @@ export const remoteReasoningEffortSchema = z.enum([
 ]);
 export type RemoteReasoningEffort = z.infer<typeof remoteReasoningEffortSchema>;
 
-export const projectDirectorySchema = z.object({
-  path: z.string().min(1).max(32_768),
-  name: z.string().min(1).max(500),
-});
-export type ProjectDirectory = z.infer<typeof projectDirectorySchema>;
-
 export const remoteProjectListResultSchema = z.object({
   projects: z.array(projectDirectorySchema).max(500),
 });
@@ -221,6 +244,11 @@ export const remoteProjectCreateResultSchema = z.object({
 });
 export type RemoteProjectCreateResult = z.infer<typeof remoteProjectCreateResultSchema>;
 
+export const remoteProjectForgetRequestSchema = z.object({
+  path: z.string().trim().min(1).max(32_768),
+}).strict();
+export type RemoteProjectForgetRequest = z.infer<typeof remoteProjectForgetRequestSchema>;
+
 export const remoteDirectoryBrowseRequestSchema = z.object({
   path: z.string().trim().max(32_768).optional(),
 }).strict();
@@ -246,6 +274,12 @@ export const remoteThreadStartResultSchema = z.object({
   acceptedAt: z.string().datetime(),
 });
 export type RemoteThreadStartResult = z.infer<typeof remoteThreadStartResultSchema>;
+
+export const remoteThreadOpenResultSchema = z.object({
+  thread: threadSummarySchema,
+  timeline: z.array(timelineItemSchema).max(50_000),
+});
+export type RemoteThreadOpenResult = z.infer<typeof remoteThreadOpenResultSchema>;
 
 export const remoteTurnAttachmentSchema = z.object({
   name: z.string().trim().min(1).max(240),
@@ -293,6 +327,11 @@ export const remoteThreadRenameRequestSchema = z.object({
   name: z.string().trim().min(1).max(200),
 }).strict();
 export type RemoteThreadRenameRequest = z.infer<typeof remoteThreadRenameRequestSchema>;
+
+export const remoteThreadModelRequestSchema = z.object({
+  model: z.string().trim().min(1).max(500),
+}).strict();
+export type RemoteThreadModelRequest = z.infer<typeof remoteThreadModelRequestSchema>;
 
 export const remoteArchivedThreadListRequestSchema = z.object({
   searchTerm: z.string().trim().max(500).optional(),
@@ -343,6 +382,7 @@ export type RemoteUserInputSubmitResult = z.infer<typeof remoteUserInputSubmitRe
 
 export const controlSnapshotSchema = z.object({
   hosts: z.array(hostSummarySchema),
+  projects: z.array(projectDirectorySchema).max(500).optional(),
   threads: z.array(threadSummarySchema),
   timeline: z.array(timelineItemSchema),
   approvals: z.array(approvalRequestSchema),

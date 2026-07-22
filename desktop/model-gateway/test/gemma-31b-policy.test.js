@@ -6,7 +6,6 @@ import path from "node:path";
 import test from "node:test";
 import { startEmbeddedGateway } from "../src/embedded.js";
 import {
-  GEMMA_31B_CONTEXT_WINDOW,
   applyGemma31bChatRequestPolicy,
   isGemma31bBf16Model,
 } from "../src/gemma-31b-policy.js";
@@ -38,7 +37,7 @@ test("removes an orphaned tool choice only for the targeted model", () => {
   assert.equal(applyGemma31bChatRequestPolicy(withTools, upstreamModel), withTools);
 });
 
-test("uses the isolated Gemma policy in the embedded gateway", async (context) => {
+test("keeps the isolated Gemma request policy in the embedded gateway", async (context) => {
   let receivedBody = null;
   const upstream = http.createServer(async (request, response) => {
     receivedBody = await readJson(request);
@@ -54,6 +53,10 @@ test("uses the isolated Gemma policy in the embedded gateway", async (context) =
   assert.ok(address && typeof address !== "string");
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-gemma-policy-"));
+  fs.copyFileSync(
+    path.resolve("desktop", "model-context-windows.json"),
+    path.join(root, "model-context-windows.json"),
+  );
   fs.writeFileSync(path.join(root, "gateway.config.json"), JSON.stringify({
     providers: {
       "provider-2": {
@@ -77,7 +80,7 @@ test("uses the isolated Gemma policy in the embedded gateway", async (context) =
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  assert.equal(gateway.models[0].contextWindow, GEMMA_31B_CONTEXT_WINDOW);
+  assert.equal(gateway.models[0].contextWindow, 131_072);
   const response = await fetch(`${gateway.baseUrl}/responses`, {
     method: "POST",
     headers: { "content-type": "application/json" },

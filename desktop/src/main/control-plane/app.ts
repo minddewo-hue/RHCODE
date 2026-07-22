@@ -8,12 +8,15 @@ import {
   remoteArchivedThreadListResultSchema,
   remoteProjectCreateRequestSchema,
   remoteProjectCreateResultSchema,
+  remoteProjectForgetRequestSchema,
   remoteProjectListResultSchema,
   remoteDirectoryBrowseRequestSchema,
   remoteDirectoryBrowseResultSchema,
   remoteThreadStartRequestSchema,
   remoteThreadStartResultSchema,
+  remoteThreadOpenResultSchema,
   remoteThreadMutationResultSchema,
+  remoteThreadModelRequestSchema,
   remoteThreadRenameRequestSchema,
   remoteTurnInterruptResultSchema,
   remoteTurnStartRequestSchema,
@@ -26,10 +29,13 @@ import {
   type RemoteModelListResult,
   type RemoteProjectCreateRequest,
   type RemoteProjectCreateResult,
+  type RemoteProjectForgetRequest,
   type RemoteProjectListResult,
   type RemoteDirectoryBrowseRequest,
   type RemoteDirectoryBrowseResult,
   type RemoteThreadMutationResult,
+  type RemoteThreadOpenResult,
+  type RemoteThreadModelRequest,
   type RemoteThreadRenameRequest,
   type RemoteThreadStartRequest,
   type RemoteThreadStartResult,
@@ -43,6 +49,8 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { createHash } from "node:crypto";
 import type { ServerOptions as HttpsServerOptions } from "node:https";
 import { z } from "zod";
+import { readGeneratedImageFile } from "../generated-image-store.js";
+import type { ManagedFileStore } from "../managed-file-store.js";
 import { ControlStore, type AgentEventInput } from "./store.js";
 import { MobileAccessManager, type MobileClientIdentity } from "./mobile-access.js";
 
@@ -51,6 +59,8 @@ export interface ControlPlaneOptions {
   logLevel?: string;
   mobileAccess?: MobileAccessManager;
   commands?: ControlCommandHandlers;
+  generatedImageDirectory?: string;
+  managedFiles?: Pick<ManagedFileStore, "read">;
   tls?: HttpsServerOptions;
 }
 
@@ -69,6 +79,10 @@ export interface ControlCommandHandlers {
     request: RemoteProjectCreateRequest,
     context: RemoteCommandContext,
   ): Promise<RemoteProjectCreateResult>;
+  forgetProject?(
+    request: RemoteProjectForgetRequest,
+    context: RemoteCommandContext,
+  ): Promise<RemoteProjectListResult>;
   listArchivedThreads(
     request: RemoteArchivedThreadListRequest,
     context: RemoteCommandContext,
@@ -77,6 +91,10 @@ export interface ControlCommandHandlers {
     request: RemoteThreadStartRequest,
     context: RemoteCommandContext,
   ): Promise<RemoteThreadStartResult>;
+  openThread(
+    threadId: string,
+    context: RemoteCommandContext,
+  ): Promise<RemoteThreadOpenResult>;
   startTurn(
     threadId: string,
     request: RemoteTurnStartRequest,
@@ -91,6 +109,11 @@ export interface ControlCommandHandlers {
     request: RemoteUserInputSubmitRequest,
     context: RemoteCommandContext,
   ): Promise<RemoteUserInputSubmitResult>;
+  setThreadModel?(
+    threadId: string,
+    request: RemoteThreadModelRequest,
+    context: RemoteCommandContext,
+  ): Promise<RemoteThreadMutationResult>;
   renameThread(
     threadId: string,
     request: RemoteThreadRenameRequest,
@@ -211,6 +234,37 @@ export async function createControlPlane(options: ControlPlaneOptions = {}): Pro
   }));
 
   app.get("/v1/snapshot", async () => store.snapshot());
+
+  app.get("/v1/generated-images/:id", async (request, reply) => {
+    if (!mobileAccess || !options.generatedImageDirectory) {
+      return reply.code(404).send({ error: "Generated image access is not enabled." });
+    }
+    const params = z.object({ id: z.string().min(1).max(240) }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "Invalid generated image identifier." });
+    const image = readGeneratedImageFile(options.generatedImageDirectory, params.data.id);
+    if (!image) return reply.code(404).send({ error: "Generated image not found." });
+    return reply
+      .header("Content-Type", image.mimeType)
+      .header("Content-Length", String(image.bytes.byteLength))
+      .header("Cache-Control", "private, max-age=31536000, immutable")
+      .send(image.bytes);
+  });
+
+  app.get("/v1/files/:id", async (request, reply) => {
+    if (!mobileAccess || !options.managedFiles) {
+      return reply.code(404).send({ error: "Managed file access is not enabled." });
+    }
+    const params = z.object({ id: z.string().min(1).max(240) }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "Invalid file identifier." });
+    const file = options.managedFiles.read(params.data.id);
+    if (!file) return reply.code(404).send({ error: "File not found." });
+    return reply
+      .header("Content-Type", file.mimeType)
+      .header("Content-Length", String(file.bytes.byteLength))
+      .header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`)
+      .header("Cache-Control", "private, no-store")
+      .send(file.bytes);
+  });
 
   app.post("/v1/hosts", async (request, reply) => {
     if (mobileAccess) return reply.code(403).send({ error: "Mobile clients cannot publish host state." });
@@ -334,6 +388,34 @@ export async function createControlPlane(options: ControlPlaneOptions = {}): Pro
     }
   });
 
+  app.delete("/v1/commands/projects", async (request, reply) => {
+    if (!mobileAccess) return reply.code(404).send({ error: "Remote project access is not enabled." });
+    const client = mobileCommandClient(request, mobileAccess);
+    if (!client) return reply.code(401).send({ error: "Missing mobile access identity." });
+    if (!commands?.forgetProject) return reply.code(503).send({ error: "Desktop project access is unavailable." });
+    const body = remoteProjectForgetRequestSchema.safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: "Invalid remote project removal request." });
+    const idempotencyKey = parseIdempotencyKey(request.headers["idempotency-key"]);
+    if (!idempotencyKey) return reply.code(400).send({ error: "A valid Idempotency-Key is required." });
+    try {
+      const result = await commandReplay.execute(
+        client.id,
+        idempotencyKey,
+        commandFingerprint("project.forget", body.data),
+        async () => {
+          const parsed = remoteProjectListResultSchema.parse(
+            await commands.forgetProject!(body.data, { client }),
+          );
+          mobileAccess.recordProjectRemoved(client.id);
+          return parsed;
+        },
+      );
+      return reply.code(200).send(result);
+    } catch (error) {
+      return sendCommandError(reply, error);
+    }
+  });
+
   app.post("/v1/commands/user-inputs/:requestId/submit", async (request, reply) => {
     if (!mobileAccess) return reply.code(404).send({ error: "Remote task control is not enabled." });
     const client = mobileCommandClient(request, mobileAccess);
@@ -390,6 +472,25 @@ export async function createControlPlane(options: ControlPlaneOptions = {}): Pro
         },
       );
       return reply.code(201).send(result);
+    } catch (error) {
+      return sendCommandError(reply, error);
+    }
+  });
+
+  app.get("/v1/commands/threads/:threadId", async (request, reply) => {
+    if (!mobileAccess) return reply.code(404).send({ error: "Remote task control is not enabled." });
+    const client = mobileCommandClient(request, mobileAccess);
+    if (!client) return reply.code(401).send({ error: "Missing mobile access identity." });
+    if (!commands) return reply.code(503).send({ error: "Desktop task control is unavailable." });
+    const params = z.object({ threadId: z.string().min(1).max(500) }).safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: "Invalid remote thread open request." });
+    }
+    try {
+      const result = remoteThreadOpenResultSchema.parse(
+        await commands.openThread(params.data.threadId, { client }),
+      );
+      return reply.send(result);
     } catch (error) {
       return sendCommandError(reply, error);
     }
@@ -454,6 +555,37 @@ export async function createControlPlane(options: ControlPlaneOptions = {}): Pro
         },
       );
       return reply.code(202).send(result);
+    } catch (error) {
+      return sendCommandError(reply, error);
+    }
+  });
+
+  app.post("/v1/commands/threads/:threadId/model", async (request, reply) => {
+    if (!mobileAccess) return reply.code(404).send({ error: "Remote task control is not enabled." });
+    const client = mobileCommandClient(request, mobileAccess);
+    if (!client) return reply.code(401).send({ error: "Missing mobile access identity." });
+    const setThreadModel = commands?.setThreadModel;
+    if (!setThreadModel) return reply.code(503).send({ error: "Desktop task control is unavailable." });
+    const params = z.object({ threadId: z.string().min(1).max(500) }).safeParse(request.params);
+    const body = remoteThreadModelRequestSchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return reply.code(400).send({ error: "Invalid remote thread model request." });
+    }
+    const idempotencyKey = parseIdempotencyKey(request.headers["idempotency-key"]);
+    if (!idempotencyKey) return reply.code(400).send({ error: "A valid Idempotency-Key is required." });
+    try {
+      const result = await commandReplay.execute(
+        client.id,
+        idempotencyKey,
+        commandFingerprint("thread.model", { threadId: params.data.threadId, ...body.data }),
+        async () => {
+          const rawResult = await setThreadModel(params.data.threadId, body.data, { client });
+          const parsed = remoteThreadMutationResultSchema.parse(rawResult);
+          mobileAccess.recordTaskCommand(client.id, "task.thread_model_changed", parsed.threadId);
+          return parsed;
+        },
+      );
+      return reply.send(result);
     } catch (error) {
       return sendCommandError(reply, error);
     }

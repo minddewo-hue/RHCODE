@@ -33,6 +33,12 @@ export interface SessionMigrationResult {
   projectPaths: string[];
 }
 
+export interface SessionProviderNormalizationResult {
+  examinedCount: number;
+  normalizedCount: number;
+  failedCount: number;
+}
+
 export interface MigrationRunResult {
   source: EnvironmentMigrationSource;
   status: EnvironmentMigrationStatus | "failed";
@@ -174,6 +180,27 @@ export function migrateCodexSessions(plan: CodexMigrationPlan): SessionMigration
   }
 
   return { importedCount, skippedCount, failedCount, projectPaths: [...projectPaths] };
+}
+
+export function normalizeCodexSessionProviders(
+  codexHome: string,
+): SessionProviderNormalizationResult {
+  let examinedCount = 0;
+  let normalizedCount = 0;
+  let failedCount = 0;
+
+  for (const directoryName of ["sessions", "archived_sessions"]) {
+    for (const filePath of listJsonlFiles(path.join(codexHome, directoryName))) {
+      examinedCount += 1;
+      try {
+        if (normalizeCodexSessionProvider(filePath)) normalizedCount += 1;
+      } catch {
+        failedCount += 1;
+      }
+    }
+  }
+
+  return { examinedCount, normalizedCount, failedCount };
 }
 
 export async function runFirstLaunchEnvironmentMigrations(
@@ -410,45 +437,81 @@ function readCodexSessionMetadata(filePath: string): { cwd: string | null } | nu
 }
 
 function copyCodexSession(sourcePath: string, destinationPath: string): void {
-  const firstLine = readFirstJsonLine(sourcePath);
-  if (!firstLine || !firstLine.value || typeof firstLine.value !== "object") {
-    throw new Error("Codex conversation metadata is invalid.");
-  }
-  const record = firstLine.value as { payload?: Record<string, unknown> };
-  if (!record.payload) throw new Error("Codex conversation metadata is missing its payload.");
-  record.payload.model_provider = "rhzy_gateway";
-
-  const sourceDescriptor = fs.openSync(sourcePath, "r");
-  let destinationDescriptor: number | null = null;
+  let copied = false;
   let completed = false;
   try {
-    destinationDescriptor = fs.openSync(
-      destinationPath,
-      "wx",
-      fs.statSync(sourcePath).mode,
-    );
-    fs.writeSync(destinationDescriptor, `${JSON.stringify(record)}\n`, undefined, "utf8");
-    const buffer = Buffer.allocUnsafe(1024 * 1024);
-    let sourceOffset = firstLine.nextOffset;
-    while (true) {
-      const bytesRead = fs.readSync(sourceDescriptor, buffer, 0, buffer.length, sourceOffset);
-      if (bytesRead === 0) break;
-      writeBuffer(destinationDescriptor, buffer, bytesRead);
-      sourceOffset += bytesRead;
-    }
+    fs.copyFileSync(sourcePath, destinationPath, fs.constants.COPYFILE_EXCL);
+    copied = true;
+    normalizeCodexSessionProvider(destinationPath);
     completed = true;
   } finally {
-    fs.closeSync(sourceDescriptor);
-    if (destinationDescriptor !== null) fs.closeSync(destinationDescriptor);
-    if (!completed && destinationDescriptor !== null) fs.rmSync(destinationPath, { force: true });
+    if (!completed && copied) fs.rmSync(destinationPath, { force: true });
   }
 }
 
-function writeBuffer(descriptor: number, buffer: Buffer, length: number): void {
-  let written = 0;
-  while (written < length) {
-    written += fs.writeSync(descriptor, buffer, written, length - written, null);
+function normalizeCodexSessionProvider(filePath: string): boolean {
+  const contents = fs.readFileSync(filePath, "utf8");
+  const lines = contents.split("\n");
+  let changed = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const originalLine = lines[index]!;
+    const hasCarriageReturn = originalLine.endsWith("\r");
+    const line = (hasCarriageReturn ? originalLine.slice(0, -1) : originalLine)
+      .replace(/^\uFEFF/, "");
+    if (!line || (!line.includes("model_provider") && !line.includes("modelProvider"))) continue;
+
+    const record = JSON.parse(line) as {
+      type?: string;
+      payload?: Record<string, unknown>;
+    };
+    if (!normalizeCodexProviderFields(record)) continue;
+    lines[index] = `${JSON.stringify(record)}${hasCarriageReturn ? "\r" : ""}`;
+    changed = true;
   }
+
+  if (!changed) return false;
+
+  const stat = fs.statSync(filePath);
+  const temporaryPath = `${filePath}.provider-${process.pid}-${Date.now()}.tmp`;
+  try {
+    fs.writeFileSync(temporaryPath, lines.join("\n"), { encoding: "utf8", mode: stat.mode });
+    fs.utimesSync(temporaryPath, stat.atime, stat.mtime);
+    fs.renameSync(temporaryPath, filePath);
+  } catch (error) {
+    fs.rmSync(temporaryPath, { force: true });
+    throw error;
+  }
+  return true;
+}
+
+function normalizeCodexProviderFields(record: {
+  type?: string;
+  payload?: Record<string, unknown>;
+}): boolean {
+  const payload = record.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+
+  let changed = false;
+  if (record.type === "session_meta" && payload.model_provider !== "rhzy_gateway") {
+    payload.model_provider = "rhzy_gateway";
+    changed = true;
+  }
+
+  const threadSettings = payload.thread_settings;
+  if (
+    record.type === "event_msg"
+    && payload.type === "thread_settings_applied"
+    && threadSettings
+    && typeof threadSettings === "object"
+    && !Array.isArray(threadSettings)
+    && "model_provider_id" in threadSettings
+    && (threadSettings as Record<string, unknown>).model_provider_id !== "rhzy_gateway"
+  ) {
+    (threadSettings as Record<string, unknown>).model_provider_id = "rhzy_gateway";
+    changed = true;
+  }
+  return changed;
 }
 
 function readFirstJsonLine(filePath: string): { value: unknown; nextOffset: number } | null {

@@ -149,10 +149,12 @@ export interface MobileAccessStatus {
     action:
       | "approval.resolved"
       | "project.created"
+      | "project.removed"
       | "task.thread_started"
       | "task.turn_started"
       | "task.turn_interrupted"
       | "task.user_input_submitted"
+      | "task.thread_model_changed"
       | "task.thread_renamed"
       | "task.thread_archived"
       | "task.thread_unarchived"
@@ -208,12 +210,62 @@ export interface ModelListResponse {
   data?: ModelOption[];
 }
 
+export type SkillScope = "user" | "repo" | "system" | "admin";
+export type SkillImportSource = "codex" | "claude";
+
+export interface SkillInfo {
+  name: string;
+  displayName: string;
+  description: string;
+  shortDescription: string | null;
+  enabled: boolean;
+  path: string;
+  scope: SkillScope;
+  canRemove: boolean;
+}
+
+export interface SkillLoadError {
+  path: string;
+  message: string;
+}
+
+export interface SkillSourceStatus {
+  available: boolean;
+  count: number;
+}
+
+export interface SkillsStatus {
+  skills: SkillInfo[];
+  errors: SkillLoadError[];
+  sources: Record<SkillImportSource, SkillSourceStatus>;
+}
+
+export interface SkillInstallResult {
+  installedName: string;
+  status: SkillsStatus;
+}
+
+export interface SkillImportResult {
+  importedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  status: SkillsStatus;
+}
+
 export interface StartThreadResult {
   thread?: { id?: string };
 }
 
 export interface TurnStartResult {
   turn?: { id?: string };
+  files?: Array<{
+    id: string;
+    name: string;
+    size: number;
+    mimeType?: string;
+    source: "upload" | "generated";
+    path?: string;
+  }>;
 }
 
 export interface RpcNotification {
@@ -234,9 +286,13 @@ export interface RhzycodeDesktopApi {
   chooseFiles(): Promise<ComposerAttachment[]>;
   savePastedImage(input: PastedImageInput): Promise<ComposerAttachment>;
   readLocalImage(path: string): Promise<string>;
+  openLocalFile(path: string): Promise<void>;
+  revealLocalFile(path: string): Promise<void>;
+  saveLocalFile(path: string, suggestedName: string): Promise<string | null>;
   startThread(params: StartThreadParams): Promise<StartThreadResult>;
   archiveThread(threadId: string): Promise<void>;
   unarchiveThread(threadId: string): Promise<unknown>;
+  setThreadModel(threadId: string, model: string): Promise<ThreadSummary>;
   renameThread(threadId: string, name: string): Promise<void>;
   deleteThread(threadId: string): Promise<void>;
   startTurn(params: StartTurnParams): Promise<TurnStartResult>;
@@ -250,6 +306,11 @@ export interface RhzycodeDesktopApi {
   setProviderCredential(providerId: string, apiKey: string): Promise<CredentialUpdateResult>;
   configureLlmProvider(input: LlmProviderConfigurationInput): Promise<CredentialUpdateResult>;
   removeLlmProvider(providerId: string): Promise<CredentialUpdateResult>;
+  getSkills(forceReload?: boolean): Promise<SkillsStatus>;
+  chooseAndInstallSkill(): Promise<SkillInstallResult | null>;
+  importSkills(source: SkillImportSource): Promise<SkillImportResult>;
+  setSkillEnabled(path: string, enabled: boolean): Promise<SkillsStatus>;
+  removeSkill(path: string): Promise<SkillsStatus>;
   getUpdateStatus(): Promise<UpdateStatus>;
   checkForUpdates(): Promise<UpdateStatus>;
   downloadUpdate(): Promise<UpdateStatus>;

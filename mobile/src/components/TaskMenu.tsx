@@ -72,13 +72,15 @@ export function TaskMenu(props: TaskMenuProps) {
             selected={props.approvalPolicy}
             onSelect={props.onApprovalPolicyChange}
           />
-          <OptionGroup
-            icon="brain"
-            label="推理强度"
-            options={props.reasoningEfforts.map((value) => ({ label: effortLabel(value), value }))}
-            selected={props.reasoningEffort}
-            onSelect={props.onReasoningEffortChange}
-          />
+          {props.reasoningEfforts.length > 0 && (
+            <OptionGroup
+              icon="brain"
+              label="推理强度"
+              options={props.reasoningEfforts.map((value) => ({ label: effortLabel(value), value }))}
+              selected={props.reasoningEffort}
+              onSelect={props.onReasoningEffortChange}
+            />
+          )}
         </ScrollView>
       </View>
     </Modal>

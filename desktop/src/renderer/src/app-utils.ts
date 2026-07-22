@@ -116,10 +116,12 @@ export function storedSelectedModel(): string {
 const reasoningEffortValues: ReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 export function modelReasoningEfforts(model: ModelOption | undefined): ReasoningEffort[] {
-  const declared = model?.supportedReasoningEfforts
-    ?.map((option) => option.reasoningEffort)
-    .filter((value): value is ReasoningEffort => reasoningEffortValues.includes(value as ReasoningEffort)) || [];
-  if (declared.length) return [...new Set(declared)];
+  if (model?.supportedReasoningEfforts) {
+    const declared = model.supportedReasoningEfforts
+      .map((option) => option.reasoningEffort)
+      .filter((value): value is ReasoningEffort => reasoningEffortValues.includes(value as ReasoningEffort));
+    return [...new Set(declared)];
+  }
   return reasoningEffortValues.includes(model?.defaultReasoningEffort as ReasoningEffort)
     ? [model?.defaultReasoningEffort as ReasoningEffort]
     : ["high"];

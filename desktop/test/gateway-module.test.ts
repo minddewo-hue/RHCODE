@@ -35,23 +35,35 @@ test("prefers the desktop config and falls back to the legacy gateway layout", (
   assert.equal(selectGatewayRoot([desktopRoot, legacyRoot, packagedRoot]), desktopRoot);
 });
 
-test("writes the targeted Gemma model with a 128K runtime context", async (context) => {
+test("writes configured runtime and maximum contexts to the Codex catalog", async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-gemma-catalog-"));
   fs.copyFileSync(
     path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "codex-model-catalog.json"),
     path.join(root, "codex-model-catalog.json"),
   );
+  fs.copyFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "model-context-windows.json"),
+    path.join(root, "model-context-windows.json"),
+  );
   fs.writeFileSync(path.join(root, "gateway.config.json"), JSON.stringify({
     providers: {
       "provider-2": {
         base_url: "http://127.0.0.1:9/v1",
-        protocol: "chat_completions",
+        protocol: "responses",
       },
     },
     models: {
       "provider-2/gemma-4-31b-it-uncensored-bf16": {
         provider: "provider-2",
         upstream_model: "gemma-4-31b-it-uncensored-bf16",
+      },
+      "provider-2/MiniMax-M3": {
+        provider: "provider-2",
+        upstream_model: "MiniMax-M3",
+      },
+      "provider-2/gpt-5.4": {
+        provider: "provider-2",
+        upstream_model: "gpt-5.4",
       },
     },
   }));
@@ -70,4 +82,17 @@ test("writes the targeted Gemma model with a 128K runtime context", async (conte
     model.slug === "provider-2/gemma-4-31b-it-uncensored-bf16");
   assert.equal(gemma?.context_window, 131_072);
   assert.equal(gemma?.max_context_window, 131_072);
+  assert.equal(gemma?.default_reasoning_level, null);
+  assert.deepEqual(gemma?.supported_reasoning_levels, []);
+  const minimax = catalog.models.find((model) => model.slug === "provider-2/MiniMax-M3");
+  assert.equal(minimax?.context_window, 524_288);
+  assert.equal(minimax?.max_context_window, 1_048_576);
+  assert.equal(minimax?.default_reasoning_level, null);
+  assert.deepEqual(minimax?.supported_reasoning_levels, []);
+  const gpt = catalog.models.find((model) => model.slug === "provider-2/gpt-5.4");
+  assert.equal(gpt?.default_reasoning_level, "medium");
+  assert.deepEqual(
+    (gpt?.supported_reasoning_levels as Array<{ effort: string }>).map((option) => option.effort),
+    ["low", "medium", "high", "xhigh"],
+  );
 });

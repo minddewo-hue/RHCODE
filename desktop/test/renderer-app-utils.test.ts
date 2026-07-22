@@ -42,6 +42,27 @@ test("uses every reasoning effort supported by the selected model", () => {
   }), ["low", "medium", "xhigh"]);
 });
 
+test("preserves an explicitly empty reasoning effort list", () => {
+  assert.deepEqual(modelReasoningEfforts({
+    id: "model-1",
+    model: "provider/gemma-model",
+    displayName: "Gemma model",
+    description: "Model without configurable reasoning",
+    defaultReasoningEffort: "high",
+    supportedReasoningEfforts: [],
+  }), []);
+});
+
+test("falls back for older model metadata without a declared effort list", () => {
+  assert.deepEqual(modelReasoningEfforts({
+    id: "model-1",
+    model: "provider/legacy-model",
+    displayName: "Legacy model",
+    description: "Older model metadata",
+    defaultReasoningEffort: "medium",
+  }), ["medium"]);
+});
+
 test("groups models by source and naturally sorts versions within each source", () => {
   const model = (modelId: string, displayName: string) => ({
     id: modelId,

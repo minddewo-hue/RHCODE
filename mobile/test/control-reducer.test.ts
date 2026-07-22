@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentEvent, ControlSnapshot } from "@rhzycode/protocol";
-import { applyAgentEvent, emptyControlSnapshot } from "../src/state/control-reducer";
+import { applyAgentEvent, emptyControlSnapshot, hydrateThreadSnapshot } from "../src/state/control-reducer";
 
 const now = "2026-07-15T10:00:00.000Z";
 
@@ -54,7 +54,7 @@ const userInput = {
   createdAt: now,
 };
 
-test("merges all eight AgentEvent variants", () => {
+test("merges all nine AgentEvent variants", () => {
   const events: AgentEvent[] = [
     { type: "host.status", sequence: 1, host },
     { type: "thread.updated", sequence: 2, thread },
@@ -63,16 +63,18 @@ test("merges all eight AgentEvent variants", () => {
     { type: "user_input.requested", sequence: 5, request: userInput },
     { type: "approval.resolved", sequence: 6, approvalId: approval.id, decision: "approved" },
     { type: "user_input.resolved", sequence: 7, requestId: userInput.id },
-    { type: "thread.removed", sequence: 8, threadId: thread.id },
+    { type: "projects.updated", sequence: 8, projects: [{ path: "D:\\work", name: "work" }] },
+    { type: "thread.removed", sequence: 9, threadId: thread.id },
   ];
   const result = events.reduce<ControlSnapshot>(applyAgentEvent, emptyControlSnapshot);
 
   assert.deepEqual(result.hosts, [host]);
+  assert.deepEqual(result.projects, [{ path: "D:\\work", name: "work" }]);
   assert.deepEqual(result.timeline, [timeline]);
   assert.deepEqual(result.threads, []);
   assert.deepEqual(result.approvals, []);
   assert.deepEqual(result.userInputs, []);
-  assert.equal(result.lastSequence, 8);
+  assert.equal(result.lastSequence, 9);
 });
 
 test("upserts duplicate ids and never moves the sequence backwards", () => {
@@ -110,4 +112,26 @@ test("removing missing state is idempotent", () => {
   assert.deepEqual(inputResult.approvals, []);
   assert.deepEqual(inputResult.userInputs, []);
   assert.equal(inputResult.lastSequence, 3);
+});
+
+test("hydrates complete thread history without dropping concurrent events", () => {
+  const liveItem = {
+    ...timeline,
+    id: "timeline-live",
+    kind: "assistant" as const,
+    content: "Live response",
+  };
+  const current = {
+    ...emptyControlSnapshot,
+    timeline: [liveItem],
+    lastSequence: 12,
+  };
+  const hydrated = hydrateThreadSnapshot(current, {
+    thread: { ...thread, status: "completed" },
+    timeline: [{ ...timeline, createdAt: "2026-07-15T09:59:00.000Z" }],
+  });
+
+  assert.deepEqual(hydrated.timeline.map((item) => item.id), ["timeline-1", "timeline-live"]);
+  assert.equal(hydrated.threads[0]?.id, thread.id);
+  assert.equal(hydrated.lastSequence, 12);
 });

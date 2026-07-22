@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDotEnv, loadGatewayConfig } from "../src/config.js";
+import { applyModelContextConfig, loadModelContextConfig } from "../src/model-context-config.js";
 
 const gatewayRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const desktopRoot = path.resolve(gatewayRoot, "..");
@@ -16,6 +17,8 @@ const bundled = JSON.parse(
 );
 const bundledModels = new Map(bundled.models.map((model) => [model.slug, model]));
 const config = loadGatewayConfig({ configPath: path.join(desktopRoot, "gateway.config.json") });
+const contextConfig = loadModelContextConfig(desktopRoot);
+for (const model of config.models.values()) applyModelContextConfig(model, contextConfig);
 
 const fallbackTemplates = [
   [/^gpt-5\.2/, "gpt-5.2"],
@@ -69,10 +72,11 @@ const models = [...config.models.values()].map((model, index) => {
     entry.use_responses_lite = false;
     entry.shell_type = "default";
     entry.apply_patch_tool_type = null;
-    entry.context_window = model.contextWindow || 131072;
-    entry.max_context_window = entry.context_window;
-    entry.effective_context_window_percent = 90;
   }
+
+  entry.context_window = model.contextWindow || Number(entry.context_window) || 131072;
+  entry.max_context_window = model.maxContextWindow || entry.context_window;
+  entry.effective_context_window_percent = model.effectiveContextWindowPercent || 90;
 
   return entry;
 });

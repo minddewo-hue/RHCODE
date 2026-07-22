@@ -99,33 +99,39 @@ export class GatewayModule extends EventEmitter {
     const sourcePath = path.join(this.rootDir, "codex-model-catalog.json");
     const catalog = JSON.parse(fs.readFileSync(sourcePath, "utf8")) as { models: Array<Record<string, unknown>> };
     const entries = new Map(catalog.models.map((entry) => [String(entry.slug), entry]));
+    const entriesByUpstreamModel = new Map(catalog.models.map((entry) => [
+      upstreamModelFromCatalogSlug(String(entry.slug)),
+      entry,
+    ]));
     for (const [index, model] of models.entries()) {
       const existing = entries.get(model.id);
-      if (existing) {
-        if (model.runtimeInstructions || model.contextWindow) {
-          const entry = structuredClone(existing);
-          const instructions = String(entry.base_instructions || "");
-          if (model.runtimeInstructions && !instructions.includes("# Model Runtime Rules")) {
-            entry.base_instructions = `${instructions}\n\n# Model Runtime Rules\n${model.runtimeInstructions}`;
-          }
-          if (model.contextWindow) {
-            entry.context_window = model.contextWindow;
-            entry.max_context_window = model.contextWindow;
-            entry.effective_context_window_percent = 90;
-          }
-          entries.set(model.id, entry);
-        }
-        continue;
-      }
-      const template = catalog.models.find((entry) =>
+      const upstreamTemplate = entriesByUpstreamModel.get(model.upstreamModel);
+      const providerTemplate = catalog.models.find((entry) =>
         model.id.startsWith("vllm/") ? String(entry.slug).startsWith("vllm/") : String(entry.slug).startsWith(`${model.providerId}/`),
-      ) || catalog.models[0];
+      );
+      const template = existing || upstreamTemplate || providerTemplate || catalog.models[0];
       if (!template) continue;
       const entry = structuredClone(template);
-      entry.slug = model.id;
-      entry.display_name = `${model.ownedBy} - ${model.upstreamModel}`;
-      entry.description = `${model.upstreamModel} through the local RHZY gateway.`;
-      entry.priority = index + 1;
+      if (!existing) {
+        entry.slug = model.id;
+        entry.display_name = `${model.ownedBy} - ${model.upstreamModel}`;
+        entry.description = `${model.upstreamModel} through the local RHZY gateway.`;
+        entry.priority = index + 1;
+      }
+      if (model.runtimeInstructions) {
+        const instructions = String(entry.base_instructions || "");
+        if (!instructions.includes("# Model Runtime Rules")) {
+          entry.base_instructions = `${instructions}\n\n# Model Runtime Rules\n${model.runtimeInstructions}`;
+        }
+      }
+      const hasDeclaredReasoning = Boolean(
+        existing
+        || upstreamTemplate
+        || model.capabilities.reasoning === true,
+      );
+      if (!hasDeclaredReasoning || model.capabilities.reasoning === false) {
+        clearReasoningOptions(entry);
+      }
       if (model.protocol !== "responses") {
         const instructions = String(entry.base_instructions || "");
         const remainder = instructions.includes("\n\n") ? instructions.slice(instructions.indexOf("\n\n")) : "";
@@ -133,10 +139,7 @@ export class GatewayModule extends EventEmitter {
           ? `\n\n# Model Runtime Rules\n${model.runtimeInstructions}`
           : "";
         entry.base_instructions = `You are Codex, a coding agent powered by ${model.upstreamModel} through the Codex CLI. The active model ID is ${model.id}. If asked which model is active, answer with this model ID and do not claim to be an OpenAI GPT model.${remainder}${runtimeInstructions}`;
-        entry.default_reasoning_level = null;
-        entry.supported_reasoning_levels = [];
-        entry.supports_reasoning_summaries = false;
-        entry.default_reasoning_summary = "none";
+        clearReasoningOptions(entry);
         entry.support_verbosity = false;
         entry.default_verbosity = null;
         entry.supports_parallel_tool_calls = model.capabilities.parallel_tool_calls !== false;
@@ -147,13 +150,13 @@ export class GatewayModule extends EventEmitter {
         entry.shell_type = "default";
         entry.apply_patch_tool_type = null;
         entry.context_window = Number(entry.context_window) || 131_072;
-        entry.max_context_window = entry.context_window;
-        entry.effective_context_window_percent = 90;
+        entry.max_context_window = model.maxContextWindow || entry.context_window;
+        entry.effective_context_window_percent = model.effectiveContextWindowPercent || 90;
       }
       if (model.contextWindow) {
         entry.context_window = model.contextWindow;
-        entry.max_context_window = model.contextWindow;
-        entry.effective_context_window_percent = 90;
+        entry.max_context_window = model.maxContextWindow || model.contextWindow;
+        entry.effective_context_window_percent = model.effectiveContextWindowPercent || 90;
       }
       entries.set(model.id, entry);
     }
@@ -200,6 +203,18 @@ export class GatewayModule extends EventEmitter {
     this.state = state;
     this.emit("status", this.getStatus());
   }
+}
+
+function upstreamModelFromCatalogSlug(slug: string): string {
+  const separator = slug.indexOf("/");
+  return separator >= 0 ? slug.slice(separator + 1) : slug;
+}
+
+function clearReasoningOptions(entry: Record<string, unknown>): void {
+  entry.default_reasoning_level = null;
+  entry.supported_reasoning_levels = [];
+  entry.supports_reasoning_summaries = false;
+  entry.default_reasoning_summary = "none";
 }
 
 export function resolveGatewayEnvPath(rootDir: string): string {

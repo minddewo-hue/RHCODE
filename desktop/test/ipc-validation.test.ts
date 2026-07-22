@@ -7,6 +7,9 @@ import {
   validateCredentialUpdate,
   validateIdentifier,
   validateLlmProviderConfiguration,
+  validateSkillEnabled,
+  validateSkillImportSource,
+  validateSkillPath,
   validateStartThread,
   validateStartTurn,
   validateSyncPort,
@@ -14,6 +17,7 @@ import {
   validateTerminalStart,
   validateTerminalWrite,
   validateThreadListOptions,
+  validateThreadModel,
   validateThreadRename,
   validateUserInputResolution,
 } from "../src/main/ipc-validation.js";
@@ -41,6 +45,10 @@ test("validates and normalizes thread requests", () => {
     threadId: "thread-1",
     name: "Release fixes",
   });
+  assert.deepEqual(validateThreadModel(" thread-1 ", "provider/gpt-test"), {
+    threadId: "thread-1",
+    model: "provider/gpt-test",
+  });
 });
 
 test("rejects malformed thread requests before they reach the runtime", () => {
@@ -55,6 +63,7 @@ test("rejects malformed thread requests before they reach the runtime", () => {
   );
   assert.throws(() => validateIdentifier("  ", "threadId"), /threadId must not be empty/);
   assert.throws(() => validateThreadRename("thread-1", " "), /name must not be blank/);
+  assert.throws(() => validateThreadModel("thread-1", " "), /model must not be blank/);
 });
 
 test("validates turn content, policies, and attachment metadata", () => {
@@ -216,4 +225,15 @@ test("bounds terminal paths, dimensions, identifiers, and writes", () => {
     () => validateTerminalWrite("process-1", "x".repeat(65_537)),
     /data must not exceed 65536 characters/,
   );
+});
+
+test("validates skill paths, import sources, and enabled state", () => {
+  const skillPath = path.resolve("fixtures", "skills", "reviewer", "SKILL.md");
+  assert.equal(validateSkillPath(skillPath), skillPath);
+  assert.equal(validateSkillImportSource("codex"), "codex");
+  assert.equal(validateSkillImportSource("claude"), "claude");
+  assert.equal(validateSkillEnabled(false), false);
+  assert.throws(() => validateSkillPath("relative/SKILL.md"), /must be an absolute path/);
+  assert.throws(() => validateSkillImportSource("cursor"), /must be codex or claude/);
+  assert.throws(() => validateSkillEnabled("true"), /must be a boolean/);
 });

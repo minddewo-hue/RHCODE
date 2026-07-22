@@ -21,6 +21,7 @@ import { buildControlUrl } from "../auth/control-access";
 import type { ConnectionStatus, ControlPlaneConnectionState } from "../hooks/use-control-plane";
 import type { MobileSession } from "../storage/secure-session";
 import { colors } from "../ui/theme";
+import { registeredProjectPaths } from "../state/project-list";
 import type { MobileUpdateStatus } from "../update/mobile-update";
 
 export type DrawerPage = "threads" | "archived" | "computers" | "connection" | "settings";
@@ -58,6 +59,7 @@ interface AppDrawerProps {
   onThreadActions: (thread: ThreadSummary, archived: boolean) => void;
   onSearchChange: (value: string) => void;
   onSelectProject: (projectPath: string | null) => void;
+  onRemoveProject: (projectPath: string) => void;
   onRefreshArchived: () => void;
   onHostChange: (value: string) => void;
   onPortChange: (value: string) => void;
@@ -95,8 +97,8 @@ function ThreadList(props: AppDrawerProps) {
   const [searching, setSearching] = useState(false);
   const [projectMenuVisible, setProjectMenuVisible] = useState(false);
   const projects = useMemo(
-    () => uniqueProjects(props.threads, props.projectPaths),
-    [props.projectPaths, props.threads],
+    () => registeredProjectPaths(props.projectPaths),
+    [props.projectPaths],
   );
   const visibleThreads = useMemo(
     () => searching || !props.selectedProjectPath
@@ -205,6 +207,9 @@ function ThreadList(props: AppDrawerProps) {
                 <ProjectOption
                   key={path}
                   label={projectName(path)}
+                  onRemove={props.canManageThreads && props.connectionStatus === "online"
+                    ? () => props.onRemoveProject(path)
+                    : undefined}
                   selected={props.selectedProjectPath === path}
                   onPress={() => {
                     props.onSelectProject(path);
@@ -619,18 +624,40 @@ function ComputerConnectionRow({
   );
 }
 
-function ProjectOption({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
+function ProjectOption({
+  label,
+  selected,
+  onPress,
+  onRemove,
+}: {
+  label: string;
+  selected: boolean;
+  onPress: () => void;
+  onRemove?: () => void;
+}) {
   return (
-    <Pressable
-      accessibilityRole="radio"
-      accessibilityState={{ selected }}
-      onPress={onPress}
-      style={({ pressed }) => [styles.projectOption, selected && styles.projectOptionSelected, pressed && styles.navRowPressed]}
-    >
-      <Feather color={selected ? colors.accent : colors.inkMuted} name="folder" size={15} />
-      <Text numberOfLines={1} style={[styles.projectOptionText, selected && styles.projectOptionTextSelected]}>{label}</Text>
-      {selected && <Feather color={colors.accent} name="check" size={15} />}
-    </Pressable>
+    <View style={[styles.projectOption, selected && styles.projectOptionSelected]}>
+      <Pressable
+        accessibilityRole="radio"
+        accessibilityState={{ selected }}
+        onPress={onPress}
+        style={({ pressed }) => [styles.projectOptionSelect, pressed && styles.navRowPressed]}
+      >
+        <Feather color={selected ? colors.accent : colors.inkMuted} name="folder" size={15} />
+        <Text numberOfLines={1} style={[styles.projectOptionText, selected && styles.projectOptionTextSelected]}>{label}</Text>
+        {selected && <Feather color={colors.accent} name="check" size={15} />}
+      </Pressable>
+      {onRemove && (
+        <Pressable
+          accessibilityLabel={`移除项目 ${label}`}
+          hitSlop={6}
+          onPress={onRemove}
+          style={({ pressed }) => [styles.projectRemove, pressed && styles.morePressed]}
+        >
+          <Feather color={colors.danger} name="x" size={15} />
+        </Pressable>
+      )}
+    </View>
   );
 }
 
@@ -667,17 +694,6 @@ function filterThreads(threads: ThreadSummary[], search: string): ThreadSummary[
   return [...threads]
     .filter((thread) => !term || `${thread.title} ${thread.projectPath}`.toLocaleLowerCase().includes(term))
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-}
-
-function uniqueProjects(threads: ThreadSummary[], additionalPaths: string[] = []): string[] {
-  return [...new Set(
-    [
-      ...additionalPaths,
-      ...[...threads]
-        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-        .map((thread) => thread.projectPath),
-    ].map((projectPath) => projectPath.trim()).filter(Boolean),
-  )];
 }
 
 function projectName(path: string): string {
@@ -768,8 +784,10 @@ const styles = StyleSheet.create({
   projectName: { color: colors.ink, fontSize: 13, lineHeight: 18, fontWeight: "600", letterSpacing: 0 },
   projectPath: { color: colors.inkMuted, fontSize: 10, lineHeight: 14, marginTop: 1, letterSpacing: 0 },
   projectMenu: { maxHeight: 224, marginHorizontal: 12, marginTop: 5, borderWidth: 1, borderColor: colors.border, borderRadius: 7, backgroundColor: colors.surface },
-  projectOption: { height: 42, paddingHorizontal: 10, flexDirection: "row", alignItems: "center", gap: 9 },
-  projectActionOption: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  projectOption: { height: 42, flexDirection: "row", alignItems: "center" },
+  projectOptionSelect: { minWidth: 0, flex: 1, height: 42, paddingLeft: 10, paddingRight: 8, flexDirection: "row", alignItems: "center", gap: 9 },
+  projectRemove: { width: 38, height: 38, marginRight: 2, borderRadius: 5, alignItems: "center", justifyContent: "center" },
+  projectActionOption: { paddingHorizontal: 10, gap: 9, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   projectOptionSelected: { backgroundColor: colors.accentSoft },
   projectOptionText: { flex: 1, color: colors.ink, fontSize: 12, lineHeight: 17, letterSpacing: 0 },
   projectOptionTextSelected: { color: colors.accent, fontWeight: "600" },

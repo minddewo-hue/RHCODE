@@ -1,7 +1,8 @@
-import type { AgentEvent, ControlSnapshot } from "@rhzycode/protocol";
+import type { AgentEvent, ControlSnapshot, RemoteThreadOpenResult } from "@rhzycode/protocol";
 
 export const emptyControlSnapshot: ControlSnapshot = {
   hosts: [],
+  projects: [],
   threads: [],
   timeline: [],
   approvals: [],
@@ -22,6 +23,9 @@ export function applyAgentEvent(snapshot: ControlSnapshot, event: AgentEvent): C
     case "thread.removed":
       next.threads = snapshot.threads.filter((thread) => thread.id !== event.threadId);
       break;
+    case "projects.updated":
+      next.projects = event.projects;
+      break;
     case "timeline.upserted":
       next.timeline = upsertById(snapshot.timeline, event.item);
       break;
@@ -40,6 +44,19 @@ export function applyAgentEvent(snapshot: ControlSnapshot, event: AgentEvent): C
   }
 
   return next;
+}
+
+export function hydrateThreadSnapshot(
+  snapshot: ControlSnapshot,
+  result: RemoteThreadOpenResult,
+): ControlSnapshot {
+  const timeline = new Map(snapshot.timeline.map((item) => [item.id, item]));
+  for (const item of result.timeline) timeline.set(item.id, item);
+  return {
+    ...snapshot,
+    threads: upsertById(snapshot.threads, result.thread),
+    timeline: [...timeline.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+  };
 }
 
 function upsertById<T extends { id: string }>(items: T[], value: T): T[] {

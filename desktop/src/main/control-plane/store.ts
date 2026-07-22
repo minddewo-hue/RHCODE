@@ -3,6 +3,7 @@ import type {
   ApprovalRequest,
   ControlSnapshot,
   HostSummary,
+  ProjectDirectory,
   ThreadSummary,
   TimelineItem,
   UserInputRequest,
@@ -25,6 +26,7 @@ type AgentEventInput = AgentEvent extends infer Event
 
 export class ControlStore extends EventEmitter {
   private hosts = new Map<string, HostSummary>();
+  private projects: ProjectDirectory[] = [];
   private threads = new Map<string, ThreadSummary>();
   private timeline = new Map<string, TimelineItem>();
   private approvals = new Map<string, ApprovalRequest>();
@@ -52,6 +54,7 @@ export class ControlStore extends EventEmitter {
   snapshot(): ControlSnapshot {
     return {
       hosts: [...this.hosts.values()],
+      projects: [...this.projects],
       threads: [...this.threads.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
       timeline: [...this.timeline.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
       approvals: [...this.approvals.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
@@ -69,11 +72,11 @@ export class ControlStore extends EventEmitter {
     return {
       snapshot: {
         ...snapshot,
-        timeline: snapshot.timeline.slice(-maxTimelineItems),
+        timeline: snapshot.timeline.slice(-maxTimelineItems).map(durableTimelineItem),
         approvals: [],
         userInputs: [],
       },
-      events: this.events.filter(isDurableEvent),
+      events: this.events.filter(isDurableEvent).map(durableEvent),
     };
   }
 
@@ -87,6 +90,10 @@ export class ControlStore extends EventEmitter {
 
   removeThread(threadId: string): AgentEvent {
     return this.publish({ type: "thread.removed", threadId });
+  }
+
+  setProjects(projects: ProjectDirectory[]): AgentEvent {
+    return this.publish({ type: "projects.updated", projects: [...projects] });
   }
 
   resolveApproval(id: string, decision: "approved" | "declined"): AgentEvent | null {
@@ -117,6 +124,7 @@ export class ControlStore extends EventEmitter {
     if (event.type === "host.status") this.hosts.set(event.host.id, event.host);
     if (event.type === "thread.updated") this.threads.set(event.thread.id, event.thread);
     if (event.type === "thread.removed") this.threads.delete(event.threadId);
+    if (event.type === "projects.updated") this.projects = [...event.projects];
     if (event.type === "timeline.upserted") this.timeline.set(event.item.id, event.item);
     if (event.type === "approval.requested") this.approvals.set(event.approval.id, event.approval);
     if (event.type === "approval.resolved") this.approvals.delete(event.approvalId);
@@ -126,6 +134,7 @@ export class ControlStore extends EventEmitter {
 
   private restore(state: ControlStoreState): void {
     for (const host of state.snapshot.hosts) this.hosts.set(host.id, host);
+    this.projects = [...(state.snapshot.projects || [])];
     for (const thread of state.snapshot.threads) this.threads.set(thread.id, thread);
     for (const item of state.snapshot.timeline.slice(-maxTimelineItems)) this.timeline.set(item.id, item);
     this.events = state.events.filter(isDurableEvent).slice(-maxEvents);
@@ -139,9 +148,22 @@ export class ControlStore extends EventEmitter {
 
 function isDurableEvent(event: AgentEvent): boolean {
   return event.type === "host.status"
+    || event.type === "projects.updated"
     || event.type === "thread.updated"
     || event.type === "thread.removed"
     || event.type === "timeline.upserted";
+}
+
+function durableEvent(event: AgentEvent): AgentEvent {
+  return event.type === "timeline.upserted"
+    ? { ...event, item: durableTimelineItem(event.item) }
+    : event;
+}
+
+function durableTimelineItem(item: TimelineItem): TimelineItem {
+  const files = item.files?.filter((file) => file.source === "generated") || [];
+  const { files: _transientFiles, ...durable } = item;
+  return files.length ? { ...durable, files } : durable;
 }
 
 export type { AgentEventInput };

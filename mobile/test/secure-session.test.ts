@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   SecureSessionStore,
+  mobileNavigationKey,
   secureConnectionKey,
   secureSessionKeys,
   type SecureStorageAdapter,
@@ -61,6 +62,33 @@ test("updates an existing endpoint instead of duplicating it", async () => {
   assert.equal(updated.connections[0]?.accessKey, `rhzy_${"B".repeat(43)}`);
 });
 
+test("persists the last project and thread separately for each computer", async () => {
+  const storage = new MemoryStorage();
+  const sessions = new SecureSessionStore(storage);
+  await sessions.saveNavigation("computer-1", {
+    projectPath: "D:\\work\\first",
+    threadId: "thread-first",
+    newThreadDraft: false,
+  });
+  await sessions.saveNavigation("computer-2", {
+    projectPath: "D:\\work\\second",
+    threadId: null,
+    newThreadDraft: true,
+  });
+
+  const restored = new SecureSessionStore(storage);
+  assert.deepEqual(await restored.loadNavigation("computer-1"), {
+    projectPath: "D:\\work\\first",
+    threadId: "thread-first",
+    newThreadDraft: false,
+  });
+  assert.deepEqual(await restored.loadNavigation("computer-2"), {
+    projectPath: "D:\\work\\second",
+    threadId: null,
+    newThreadDraft: true,
+  });
+});
+
 test("clears or removes only the selected computer", async () => {
   const storage = new MemoryStorage();
   const sessions = new SecureSessionStore(storage);
@@ -68,6 +96,11 @@ test("clears or removes only the selected computer", async () => {
   const firstId = first.activeConnectionId!;
   const second = await sessions.saveConnection({ host: "192.168.11.104", port: 8790, accessKey: `rhzy_${"B".repeat(43)}` });
   const secondId = second.activeConnectionId!;
+  await sessions.saveNavigation(secondId, {
+    projectPath: "D:\\work",
+    threadId: "thread-2",
+    newThreadDraft: false,
+  });
 
   const cleared = await sessions.clearAccessKey(firstId);
   assert.equal(cleared.connections.find((item) => item.id === firstId)?.accessKey, "");
@@ -77,6 +110,7 @@ test("clears or removes only the selected computer", async () => {
   assert.deepEqual(removed.connections.map((item) => item.id), [firstId]);
   assert.equal(removed.activeConnectionId, firstId);
   assert.equal(storage.values.has(secureConnectionKey(secondId)), false);
+  assert.equal(storage.values.has(mobileNavigationKey(secondId)), false);
 });
 
 test("migrates the legacy single-computer session", async () => {

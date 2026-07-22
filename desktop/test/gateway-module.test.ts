@@ -3,7 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { GatewayModule, resolveGatewayEnvPath } from "../src/main/gateway-module";
+import { fileURLToPath } from "node:url";
+import { GatewayModule, resolveGatewayEnvPath, selectGatewayRoot } from "../src/main/gateway-module";
 
 test("resolves the source desktop environment outside model-gateway", () => {
   const desktopRoot = path.join(os.tmpdir(), "rhzycode-desktop");
@@ -18,10 +19,26 @@ test("keeps packaged or external gateway environments inside their root", () => 
   assert.equal(resolveGatewayEnvPath(gatewayRoot), path.join(gatewayRoot, ".env"));
 });
 
+test("prefers the desktop config and falls back to the legacy gateway layout", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-gateway-layout-"));
+  const desktopRoot = path.join(root, "desktop");
+  const legacyRoot = path.join(desktopRoot, "model-gateway");
+  const packagedRoot = path.join(root, "resources", "gateway");
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(legacyRoot, { recursive: true });
+  fs.mkdirSync(packagedRoot, { recursive: true });
+  fs.writeFileSync(path.join(legacyRoot, "gateway.config.json"), "{}", "utf8");
+  fs.writeFileSync(path.join(packagedRoot, "gateway.config.json"), "{}", "utf8");
+
+  assert.equal(selectGatewayRoot([desktopRoot, legacyRoot, packagedRoot]), legacyRoot);
+  fs.writeFileSync(path.join(desktopRoot, "gateway.config.json"), "{}", "utf8");
+  assert.equal(selectGatewayRoot([desktopRoot, legacyRoot, packagedRoot]), desktopRoot);
+});
+
 test("writes the targeted Gemma model with a 128K runtime context", async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-gemma-catalog-"));
   fs.copyFileSync(
-    path.resolve("codex-model-catalog.json"),
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "codex-model-catalog.json"),
     path.join(root, "codex-model-catalog.json"),
   );
   fs.writeFileSync(path.join(root, "gateway.config.json"), JSON.stringify({

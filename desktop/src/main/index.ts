@@ -7,6 +7,7 @@ import {
   type MobileAccessState,
 } from "./control-plane/app";
 import fs from "node:fs";
+import os from "node:os";
 import { extname, isAbsolute, join, resolve } from "node:path";
 import { DesktopRuntime } from "./runtime";
 import {
@@ -22,6 +23,12 @@ import { removeStalePastedImages, savePastedImage } from "./pasted-image-store";
 import { buildTextContextMenu } from "./text-context-menu";
 import { UpdateManager, type UpdateAdapter } from "./update-manager";
 import { EncryptedControlPersistence, EncryptedStateFile, type PersistenceStatus } from "./control-persistence";
+import { AppServerClient } from "./app-server";
+import {
+  runFirstLaunchEnvironmentMigrations,
+  type EnvironmentMigrationSource,
+} from "./environment-migration";
+import { selectGatewayRoot } from "./gateway-module";
 import {
   validateApprovalResolution,
   validateClipboardText,
@@ -46,6 +53,7 @@ let mainWindow: BrowserWindow | null = null;
 let runtime: DesktopRuntime | null = null;
 let controlPersistence: EncryptedControlPersistence | null = null;
 let quitAfterCleanup = false;
+let startupEnvironmentMigration: Promise<void> = Promise.resolve();
 
 const userDataOverride = process.env.RHZYCODE_USER_DATA_DIR?.trim();
 if (userDataOverride) app.setPath("userData", resolve(userDataOverride));
@@ -60,7 +68,7 @@ app.on("second-instance", () => {
   mainWindow.focus();
 });
 
-function createWindow(): void {
+function createWindow(): BrowserWindow {
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -106,6 +114,7 @@ function createWindow(): void {
   } else {
     void mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
   }
+  return mainWindow;
 }
 
 function registerIpc(
@@ -118,6 +127,7 @@ function registerIpc(
 ): void {
   ipcMain.handle("agent:status", () => activeRuntime.agent.getStatus());
   ipcMain.handle("agent:connect", async () => {
+    await startupEnvironmentMigration;
     await activeRuntime.startGatewayAndAgent().catch(() => undefined);
     return activeRuntime.agent.getStatus();
   });
@@ -365,15 +375,14 @@ function pastedImageDirectory(): string {
 }
 
 function resolveGatewayRoot(): string {
-  const candidates = [
+  return selectGatewayRoot([
     process.env.RHZYCODE_GATEWAY_HOME,
     app.getAppPath(),
+    // Keep source installations that still store configuration in model-gateway working.
     resolve(app.getAppPath(), "model-gateway"),
     join(process.resourcesPath, "gateway"),
     join(app.getPath("userData"), "gateway"),
-  ].filter((candidate): candidate is string => Boolean(candidate));
-
-  return candidates.find((candidate) => fs.existsSync(join(candidate, "gateway.config.json"))) || candidates[0]!;
+  ]);
 }
 
 function resolveCodexHome(): string {
@@ -381,6 +390,63 @@ function resolveCodexHome(): string {
   return configuredHome
     ? resolve(configuredHome)
     : join(app.getPath("userData"), "codex-home");
+}
+
+function resolveUserCodexHome(): string {
+  const configuredHome = process.env.CODEX_HOME?.trim();
+  return configuredHome ? resolve(configuredHome) : join(os.homedir(), ".codex");
+}
+
+function migrationSourceLabel(source: EnvironmentMigrationSource): string {
+  return source === "codex" ? "Codex" : "Claude";
+}
+
+async function runStartupEnvironmentMigrations(
+  codexHome: string,
+  projectDirectories: ProjectDirectoryRegistry,
+  window: BrowserWindow,
+): Promise<void> {
+  if (process.env.RHZYCODE_SKIP_ENVIRONMENT_MIGRATION === "1") return;
+
+  await runFirstLaunchEnvironmentMigrations({
+    statePath: join(app.getPath("userData"), "environment-migration.json"),
+    codexSourceHome: resolveUserCodexHome(),
+    codexDestinationHome: codexHome,
+    createClaudeClient: () => new AppServerClient(),
+    confirm: async (source, count) => {
+      const label = migrationSourceLabel(source);
+      const result = await dialog.showMessageBox(window, {
+        type: "question",
+        title: `迁移 ${label} 对话`,
+        message: `检测到 ${count} 个 ${label} 项目对话，是否迁移到 RHZYCODE？`,
+        detail: "只复制项目对话，不迁移 API Key、登录信息或模型配置，也不会删除原始数据。仍然存在的项目目录会自动加入项目列表。",
+        buttons: ["迁移", "跳过"],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      });
+      return result.response === 0;
+    },
+    rememberProject: (projectPath) => {
+      projectDirectories.remember(projectPath);
+    },
+    onProgress: (source, active) => {
+      window.setProgressBar(active ? 2 : -1);
+      window.setTitle(active ? `RHZYCODE - 正在迁移 ${migrationSourceLabel(source)} 对话` : "RHZYCODE");
+    },
+    onError: async (source, error) => {
+      console.error(`[Environment migration:${source}]`, error.message);
+      await dialog.showMessageBox(window, {
+        type: "error",
+        title: `${migrationSourceLabel(source)} 对话迁移失败`,
+        message: `${migrationSourceLabel(source)} 对话未能全部迁移`,
+        detail: `${error.message}\n\n原始数据没有修改，下次启动时会再次尝试。`,
+        buttons: ["确定"],
+        defaultId: 0,
+        noLink: true,
+      });
+    },
+  });
 }
 
 function useBundledCodexBinary(): void {
@@ -399,7 +465,7 @@ function traceStartup(stage: string): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
   traceStartup("ready");
   removeStalePastedImages(pastedImageDirectory());
@@ -473,9 +539,10 @@ app.whenReady().then(() => {
     encryption.isAvailable() ? (state) => projectDirectoryState.save(state) : undefined,
   );
   traceStartup("project-directories-loaded");
+  const codexHome = resolveCodexHome();
   runtime = new DesktopRuntime(
     gatewayRoot,
-    resolveCodexHome(),
+    codexHome,
     undefined,
     savedDesktopSettings.syncPort,
     controlStore,
@@ -490,12 +557,26 @@ app.whenReady().then(() => {
     mobileAccessState: mobileAccessState.getLoadStatus(),
   }));
   traceStartup("ipc-registered");
-  createWindow();
-  traceStartup("window-created");
-  updates.start();
-  void runtime.start().catch((error) => {
-    mainWindow?.webContents.send("agent:diagnostic", String(error));
+  let finishEnvironmentMigration!: () => void;
+  startupEnvironmentMigration = new Promise<void>((resolveMigration) => {
+    finishEnvironmentMigration = resolveMigration;
   });
+  const window = createWindow();
+  traceStartup("window-created");
+  await new Promise<void>((resolveWindow) => {
+    if (!window.webContents.isLoadingMainFrame()) resolveWindow();
+    else window.webContents.once("did-finish-load", () => resolveWindow());
+  });
+  try {
+    await runStartupEnvironmentMigrations(codexHome, projectDirectories, window);
+    traceStartup("environment-migration-checked");
+    await runtime.start();
+  } catch (error) {
+    window.webContents.send("agent:diagnostic", String(error));
+  } finally {
+    finishEnvironmentMigration();
+  }
+  updates.start();
 }).catch((error) => {
   const message = error instanceof Error ? error.stack || error.message : String(error);
   traceStartup(`failed: ${message.replace(/[\r\n]+/g, " ").slice(0, 1000)}`);

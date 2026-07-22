@@ -208,3 +208,10 @@ export function resolveGatewayEnvPath(rootDir: string): string {
     ? path.join(path.dirname(resolvedRoot), ".env")
     : path.join(resolvedRoot, ".env");
 }
+
+export function selectGatewayRoot(candidates: Array<string | undefined>): string {
+  const available = candidates.filter((candidate): candidate is string => Boolean(candidate));
+  if (available.length === 0) throw new Error("No model gateway location is available.");
+  return available.find((candidate) => fs.existsSync(path.join(candidate, "gateway.config.json")))
+    || available[0]!;
+}

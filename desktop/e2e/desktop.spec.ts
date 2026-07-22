@@ -46,6 +46,7 @@ test.beforeAll(async () => {
       RHZYCODE_GATEWAY_HOME: path.join(workspaceDir, "desktop"),
       RHZYCODE_SYNC_HOST: "127.0.0.1",
       RHZYCODE_SYNC_PORT: "0",
+      RHZYCODE_SKIP_ENVIRONMENT_MIGRATION: "1",
       SUB2API_API_KEY: "",
     },
     timeout: 30_000,

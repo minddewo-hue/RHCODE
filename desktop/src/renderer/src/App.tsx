@@ -460,9 +460,16 @@ export function App() {
       const status = await window.rhzycode.connectAgent();
       setAgentStatus(status);
       if (status.state !== "connected") return;
-      const restoredProject = synchronizedProjects.includes(selectedProjectPathRef.current)
+      const refreshedProjects = await window.rhzycode.listProjects();
+      const connectedProjects = [
+        ...refreshedProjects.map((project) => project.path),
+        ...rememberedStoredProjects.filter((path) =>
+          !refreshedProjects.some((project) => project.path === path)),
+      ].slice(0, 50);
+      setRecentProjects(connectedProjects);
+      const restoredProject = connectedProjects.includes(selectedProjectPathRef.current)
         ? selectedProjectPathRef.current
-        : synchronizedProjects[0] || "";
+        : connectedProjects[0] || "";
       const revision = ++navigationRevisionRef.current;
       setWorkspaceProject(restoredProject);
       const [response, availableThreads] = await Promise.all([

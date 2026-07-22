@@ -108,6 +108,12 @@ SUB2API_API_KEY=replace-with-your-key
 
 安装版应在桌面设置中保存密钥。密钥由 Electron `safeStorage` 和 Windows DPAPI 加密。
 
+## 首次启动迁移
+
+桌面版首次启动时会分别检测用户 Codex 和 Claude 环境中的项目对话，并对两个来源分别询问是否迁移。迁移只复制会话历史并登记仍然存在的项目目录，不复制 API Key、登录状态或模型配置，也不会删除源文件。选择跳过后不会再次提示；迁移失败会在下次启动时重试。
+
+Codex 会话保持原始 rollout 格式，Claude 会话通过 Codex App Server 的官方外部会话导入接口转换后写入 RHZYCODE 私有 `codex-home`。旧版 `desktop/model-gateway/gateway.config.json` 和安装包 `resources/gateway/gateway.config.json` 路径继续兼容。
+
 ## 构建与发布
 
 构建 Windows x64 安装程序：

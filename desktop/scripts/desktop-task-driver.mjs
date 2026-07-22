@@ -39,6 +39,7 @@ try {
       RHZYCODE_GATEWAY_HOME: path.join(workspaceDir, "desktop"),
       RHZYCODE_SYNC_HOST: "127.0.0.1",
       RHZYCODE_SYNC_PORT: "0",
+      RHZYCODE_SKIP_ENVIRONMENT_MIGRATION: "1",
     },
     timeout: 30_000,
   });

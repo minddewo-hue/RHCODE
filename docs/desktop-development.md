@@ -20,7 +20,7 @@
 - 不直接修改 `packages/protocol/src/index.ts` 中的跨端 schema。确需变更时，先形成兼容方案，并同时通知手机任务。
 - 不把 Codex App Server 原始 RPC 结构暴露给移动端或作为公共协议。
 - 不把 Provider API Key、Codex 认证信息、TLS 私钥或移动 KEY 传给日志、快照或移动端事件。
-- 不读取、覆盖或复用用户默认的 `%USERPROFILE%\.codex`、`config.toml`、`auth.json`。开发和测试必须使用隔离目录。
+- 不覆盖或复用用户默认的 `%USERPROFILE%\.codex`、`config.toml`、`auth.json`。首次启动迁移只能在用户明确同意后复制会话文件；开发和测试必须使用隔离目录并设置 `RHZYCODE_SKIP_ENVIRONMENT_MIGRATION=1`。
 - 不把局域网 HTTP/WS 控制端口转发到公网。
 - 不提交 `.env`、证书、私钥、签名证书、密码或任何真实密钥。
 - 不绕过 `contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`，也不在 renderer 中引入 Node.js 文件系统能力。

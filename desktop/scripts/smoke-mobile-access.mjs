@@ -89,6 +89,7 @@ async function launch() {
       RHZYCODE_SYNC_PORT: "8891",
       RHZYCODE_STARTUP_TRACE: "1",
       RHZYCODE_USER_DATA_DIR: dataDir,
+      RHZYCODE_SKIP_ENVIRONMENT_MIGRATION: "1",
       RHZYCODE_GATEWAY_HOME: "",
       SUB2API_API_KEY: "",
     },

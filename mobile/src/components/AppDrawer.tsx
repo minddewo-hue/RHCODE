@@ -154,7 +154,6 @@ function ThreadList(props: AppDrawerProps) {
               setSearching(true);
             }}
           />
-          <DrawerIcon accessibilityLabel="工程目录" icon="folder-outline" onPress={props.onOpenProjects} />
         </View>
       )}
 
@@ -179,8 +178,21 @@ function ThreadList(props: AppDrawerProps) {
             <Feather color={colors.inkMuted} name={projectMenuVisible ? "chevron-up" : "chevron-down"} size={16} />
           </Pressable>
           {projectMenuVisible && (
-            <View style={[styles.projectMenu, { height: Math.min((projects.length + 1) * 42, 224) }]}>
+            <View style={[styles.projectMenu, { height: Math.min((projects.length + 2) * 42, 224) }]}>
               <ScrollView nestedScrollEnabled>
+              <Pressable
+                accessibilityLabel="选择项目"
+                accessibilityRole="button"
+                onPress={() => {
+                  setProjectMenuVisible(false);
+                  props.onOpenProjects();
+                }}
+                style={({ pressed }) => [styles.projectOption, styles.projectActionOption, pressed && styles.navRowPressed]}
+              >
+                <Feather color={colors.inkMuted} name="folder-plus" size={15} />
+                <Text numberOfLines={1} style={styles.projectOptionText}>选择项目</Text>
+                <Feather color={colors.inkFaint} name="chevron-right" size={15} />
+              </Pressable>
               <ProjectOption
                 label="所有项目"
                 selected={!props.selectedProjectPath}
@@ -757,6 +769,7 @@ const styles = StyleSheet.create({
   projectPath: { color: colors.inkMuted, fontSize: 10, lineHeight: 14, marginTop: 1, letterSpacing: 0 },
   projectMenu: { maxHeight: 224, marginHorizontal: 12, marginTop: 5, borderWidth: 1, borderColor: colors.border, borderRadius: 7, backgroundColor: colors.surface },
   projectOption: { height: 42, paddingHorizontal: 10, flexDirection: "row", alignItems: "center", gap: 9 },
+  projectActionOption: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   projectOptionSelected: { backgroundColor: colors.accentSoft },
   projectOptionText: { flex: 1, color: colors.ink, fontSize: 12, lineHeight: 17, letterSpacing: 0 },
   projectOptionTextSelected: { color: colors.accent, fontWeight: "600" },

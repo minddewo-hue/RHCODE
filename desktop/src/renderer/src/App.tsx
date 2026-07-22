@@ -1198,7 +1198,6 @@ export function App() {
       <aside className="sidebar">
         <div className="sidebar-header">
           <div><span className="product-name">RHZYCODE</span><span className="product-channel">DESKTOP</span></div>
-          <button className="icon-button" title="Open folder" aria-label="Open folder" onClick={() => void chooseProject()}><FolderOpen size={17} /></button>
         </div>
 
         <div className="project-picker-wrap">
@@ -1223,6 +1222,7 @@ export function App() {
               id="project-menu"
               role="menu"
             >
+              <button role="menuitem" onClick={() => { setProjectMenuOpen(false); void chooseProject(); }}><FolderOpen size={13} /> Open project folder</button>
               {recentProjects.length > 0 && <span className="project-menu-label">Recent</span>}
               {recentProjects.map((path) => (
                 <div className="recent-project" key={path}>

@@ -118,7 +118,8 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await page.keyboard.press("Enter");
   await expect(page.locator("#project-menu")).toBeVisible();
   await expect(page.getByRole("menuitem", { name: /New project folder/i })).toHaveCount(0);
-  await expect(page.getByRole("menuitem", { name: /Open folder/i })).toHaveCount(0);
+  await expect(page.getByRole("menuitem", { name: "Open project folder" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open folder" })).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(page.locator("#project-menu")).toBeHidden();
   await expect(projectPicker).toBeFocused();
@@ -128,8 +129,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(page.locator("#project-menu")).toBeHidden();
   await projectPicker.focus();
   await page.keyboard.press("Enter");
-  await page.keyboard.press("Escape");
-  const openFolder = page.getByRole("button", { name: "Open folder" });
+  const openFolder = page.getByRole("menuitem", { name: "Open project folder" });
   await openFolder.focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("button", { name: /project.*fixtures.*project/i })).toBeVisible();
@@ -610,7 +610,8 @@ test("supports core desktop workflows at the minimum window size", async () => {
       filePaths: [selectedDirectory],
     })) as typeof dialog.showOpenDialog;
   }, emptyProjectDir);
-  await page.getByRole("button", { name: "Open folder" }).click();
+  await page.locator(".project-picker").click();
+  await page.getByRole("menuitem", { name: "Open project folder" }).click();
   await expect(page.locator(".project-picker")).toContainText("empty-project");
   await expect(page.getByText("No tasks in this project", { exact: true })).toBeVisible();
   await expect(page.getByText("Start a new task", { exact: true })).toBeVisible();

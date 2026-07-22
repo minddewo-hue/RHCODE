@@ -5,9 +5,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const desktopRoot = path.resolve(root, "..");
 
 test("catalog contains only model.rhzy.ai routes", () => {
-  const catalog = JSON.parse(fs.readFileSync(path.join(root, "codex-model-catalog.json"), "utf8"));
+  const catalog = JSON.parse(fs.readFileSync(path.join(desktopRoot, "codex-model-catalog.json"), "utf8"));
   const models = new Map(catalog.models.map((model) => [model.slug, model]));
 
   assert.ok(models.size > 0);

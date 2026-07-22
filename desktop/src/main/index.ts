@@ -367,6 +367,7 @@ function pastedImageDirectory(): string {
 function resolveGatewayRoot(): string {
   const candidates = [
     process.env.RHZYCODE_GATEWAY_HOME,
+    app.getAppPath(),
     resolve(app.getAppPath(), "model-gateway"),
     join(process.resourcesPath, "gateway"),
     join(app.getPath("userData"), "gateway"),

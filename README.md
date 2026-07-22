@@ -98,7 +98,7 @@ npm run android --workspace @rhzycode/mobile
 
 ## 配置模型
 
-模型路由位于 `desktop/model-gateway/gateway.config.json`。配置文件只保存供应商地址、模型映射和 API Key 环境变量名称，不保存密钥值。
+模型路由位于 `desktop/gateway.config.json`。配置文件只保存供应商地址、模型映射和 API Key 环境变量名称，不保存密钥值。
 
 源码开发可在 `desktop/.env` 配置供应商密钥：
 

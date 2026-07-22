@@ -11,10 +11,6 @@ test-results/
 
 # Local credentials and generated gateway state
 *.env
-desktop/.env
-desktop/model-gateway/.proxy.pid
-desktop/model-gateway/proxy.out.log
-desktop/model-gateway/proxy.err.log
 
 # Desktop release output
 desktop/release/

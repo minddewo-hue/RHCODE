@@ -17,7 +17,7 @@ try {
   config = loadGatewayConfig({
     configPath: path.isAbsolute(configuredPath)
       ? configuredPath
-      : path.join(gatewayRoot, configuredPath),
+      : path.join(desktopRoot, configuredPath),
   });
 } catch (error) {
   console.error(`Gateway configuration error: ${error.message}`);

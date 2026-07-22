@@ -5,16 +5,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDotEnv, loadGatewayConfig } from "../src/config.js";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-process.chdir(root);
-loadDotEnv(path.join(root, "..", ".env"));
+const gatewayRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const desktopRoot = path.resolve(gatewayRoot, "..");
+process.chdir(desktopRoot);
+loadDotEnv(path.join(desktopRoot, ".env"));
 
-const outputPath = path.resolve(process.argv[2] || "codex-model-catalog.json");
+const outputPath = path.resolve(process.argv[2] || path.join(desktopRoot, "codex-model-catalog.json"));
 const bundled = JSON.parse(
   execFileSync("codex", ["debug", "models", "--bundled"], { encoding: "utf8" }),
 );
 const bundledModels = new Map(bundled.models.map((model) => [model.slug, model]));
-const config = loadGatewayConfig();
+const config = loadGatewayConfig({ configPath: path.join(desktopRoot, "gateway.config.json") });
 
 const fallbackTemplates = [
   [/^gpt-5\.2/, "gpt-5.2"],

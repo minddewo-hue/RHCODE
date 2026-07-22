@@ -21,7 +21,7 @@ test("keeps packaged or external gateway environments inside their root", () => 
 test("writes the targeted Gemma model with a 128K runtime context", async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-gemma-catalog-"));
   fs.copyFileSync(
-    path.resolve("model-gateway", "codex-model-catalog.json"),
+    path.resolve("codex-model-catalog.json"),
     path.join(root, "codex-model-catalog.json"),
   );
   fs.writeFileSync(path.join(root, "gateway.config.json"), JSON.stringify({

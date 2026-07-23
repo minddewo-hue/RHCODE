@@ -6,6 +6,7 @@
   "manifestFile": "version.json",
   "accessKeyEnv": "RHZYCODE_MINIO_ACCESS_KEY",
   "secretKeyEnv": "RHZYCODE_MINIO_SECRET_KEY",
+  "credentialsFile": ".minio-credentials.json",
   "legacyServer": {
     "host": "0.0.0.0",
     "port": 8791

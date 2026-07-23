@@ -19,6 +19,7 @@
     "update:build:mobile": "node appupdate/scripts/build-mobile.mjs",
     "update:build:mac": "node appupdate/scripts/build-macos.mjs",
     "update:build:ios": "node appupdate/scripts/build-ios.mjs",
+    "update:credentials": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File appupdate/scripts/configure-credentials.ps1",
     "update:stage": "node appupdate/scripts/publish.mjs --dry-run",
     "update:publish": "node appupdate/scripts/publish.mjs",
     "update:release": "npm run update:build:desktop && npm run update:build:mobile && npm run update:publish",

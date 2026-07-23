@@ -11,6 +11,7 @@ test-results/
 
 # Local credentials and generated gateway state
 *.env
+appupdate/.minio-credentials.json
 
 # Desktop release output
 desktop/release/

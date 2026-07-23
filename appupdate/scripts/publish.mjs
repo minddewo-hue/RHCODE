@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseUpdateManifest } from "@rhzycode/update-contract";
+import { loadMinioCredentials } from "./credentials.mjs";
 import { publicObjectUrl, uploadBuffer, uploadFile } from "./minio-client.mjs";
 
 const updateRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -84,8 +85,11 @@ if (dryRun) {
   process.exit(0);
 }
 
-const accessKey = requireEnvironment(config.accessKeyEnv);
-const secretKey = requireEnvironment(config.secretKeyEnv);
+const { accessKey, secretKey, source: credentialSource } = loadMinioCredentials({
+  config,
+  updateRoot,
+});
+console.log(`Using MinIO credentials from ${credentialSource}.`);
 const credentials = { ...config, accessKey, secretKey };
 const uploads = [
   { filePath: windowsInstallerPath, objectName: windowsObject, contentType: "application/octet-stream", cacheControl: "public, max-age=31536000, immutable" },
@@ -160,12 +164,6 @@ async function verifyPublicRelease(expected, manifestUrl) {
     if (!metadata.ok) throw new Error(`Desktop update metadata is not publicly readable (HTTP ${metadata.status}).`);
   }
   console.log("Verified anonymous public access to the manifest and release packages.");
-}
-
-function requireEnvironment(name) {
-  const value = process.env[name]?.trim();
-  if (!value) throw new Error(`Required environment variable is missing: ${name}`);
-  return value;
 }
 
 function trimSlashes(value) {

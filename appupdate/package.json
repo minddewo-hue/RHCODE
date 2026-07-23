@@ -10,6 +10,7 @@
     "start": "node server.mjs",
     "build:macos": "node scripts/build-macos.mjs",
     "build:ios": "node scripts/build-ios.mjs",
+    "credentials:configure": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/configure-credentials.ps1",
     "publish": "node scripts/publish.mjs",
     "stage": "node scripts/publish.mjs --dry-run",
     "test": "node --test test/*.test.mjs"

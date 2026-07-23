@@ -1,4 +1,4 @@
-# Windows Release
+# Windows and macOS Desktop Release
 
 ## Build
 
@@ -42,23 +42,36 @@ npm run dist:desktop
 
 ## Automatic updates
 
-The trusted-LAN development channel and its complete operator workflow are documented in
-[`docs/update-system.md`](./update-system.md). It uses the fixed private endpoint
-`http://192.168.11.103:8791`, and the local packaging exception accepts only localhost or
-RFC1918 private addresses when `RHZYCODE_ALLOW_UNSIGNED_LOCAL_UPDATES=1` is explicitly set.
+The MinIO release layout and complete operator workflow are documented in
+[`docs/update-system.md`](./update-system.md). Desktop builds read the shared public manifest
+at `https://minio.gshbzw.com/wxfile/rhzycode/version.json`, then use the Windows feed under
+the same prefix.
 
-Public or production update channels still require a signed build and HTTPS:
+Production releases should use an Authenticode-signed build:
 
 ```powershell
 $env:CSC_LINK = "C:\secure\rhzycode-signing.pfx"
 $env:CSC_KEY_PASSWORD = "<certificate-password>"
-$env:RHZYCODE_UPDATE_URL = "https://updates.example.com/rhzycode/windows"
+$env:RHZYCODE_UPDATE_URL = "https://minio.gshbzw.com/wxfile/rhzycode/windows"
 $env:RHZYCODE_REQUIRE_SIGNING = "1"
 npm run dist:desktop
 ```
 
-electron-builder emits the channel metadata and SHA-512 package data used by `electron-updater`. Packaging rejects unsigned non-private update channels. The desktop Settings panel supports check, download, and install/restart states.
+electron-builder emits the channel metadata and SHA-512 package data used by
+`electron-updater`. `RHZYCODE_REQUIRE_SIGNING=1` makes packaging fail when no signing
+identity is available. The desktop Settings panel supports check, download, and
+install/restart states.
 
-The local release build writes its generic provider URL to the packaged `app-update.yml`.
-Keep public builds pinned to their signed HTTPS channel and do not use the private-network
-unsigned exception for an internet-reachable endpoint.
+## macOS
+
+macOS packages must be produced on macOS so the bundled Codex binary, Electron runtime,
+Keychain integration, Developer ID signature, and notarization all match the target host.
+
+```bash
+npm run pack:mac
+npm run dist:mac
+```
+
+The release contains DMG and ZIP artifacts; the ZIP and `latest-mac.yml` are required by
+the automatic update feed. Signing, notarization, architecture selection, MinIO staging,
+and iOS delivery are documented in [`docs/apple-platforms.md`](./apple-platforms.md).

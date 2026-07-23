@@ -11,8 +11,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
-  AppState,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -42,20 +40,20 @@ import { createNativeSecureSessionStore } from "./storage/native-secure-session"
 import type { MobileSession, MobileSessionState, SecureSessionStore } from "./storage/secure-session";
 import { isRegisteredProject, registeredProjectPaths } from "./state/project-list";
 import { colors } from "./ui/theme";
-import {
-  defaultUpdateManifestUrl,
-  fetchMobileUpdate,
-  initialMobileUpdateStatus,
-  type MobileUpdateStatus,
-  type AndroidUpdate,
-} from "./update/mobile-update";
-import UpdateInstaller from "../modules/update-installer";
+import { defaultUpdateManifestUrl } from "./platform/update/mobile-update";
+import { useMobileUpdate } from "./platform/update/use-mobile-update";
 
 const defaultControlHost = process.env.EXPO_PUBLIC_CONTROL_HOST || builtInControlHost;
 const newConnectionHost = defaultControlHost === builtInControlHost ? "" : defaultControlHost;
 const configuredControlPort = Number(process.env.EXPO_PUBLIC_CONTROL_PORT || builtInControlPort);
 const defaultControlPort = Number.isInteger(configuredControlPort) ? configuredControlPort : builtInControlPort;
 const currentAppVersion = Constants.expoConfig?.version || "0.0.0";
+const currentBuildNumber = String(
+  Constants.nativeBuildVersion
+    || Constants.expoConfig?.android?.versionCode
+    || Constants.expoConfig?.ios?.buildNumber
+    || "0",
+);
 const updateManifestUrl = process.env.EXPO_PUBLIC_UPDATE_URL
   || String(Constants.expoConfig?.extra?.updateManifestUrl || defaultUpdateManifestUrl);
 
@@ -141,10 +139,15 @@ function AppContent() {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
-  const [mobileUpdateStatus, setMobileUpdateStatus] = useState<MobileUpdateStatus>(initialMobileUpdateStatus);
-  const announcedUpdateVersion = useRef<string | null>(null);
-  const pendingInstallPermission = useRef<AndroidUpdate | null>(null);
-  const installPermissionScreenOpened = useRef(false);
+  const {
+    status: mobileUpdateStatus,
+    check: checkForAppUpdate,
+    install: installMobileUpdate,
+  } = useMobileUpdate({
+    currentVersion: currentAppVersion,
+    currentBuildNumber,
+    manifestUrl: updateManifestUrl,
+  });
   const modelsLoadingRef = useRef(false);
   const modelSelectionContext = useRef("");
   const navigationSessionIdRef = useRef<string | null>(null);
@@ -152,94 +155,6 @@ function AppContent() {
     () => sessionState.connections.find((connection) => connection.id === sessionState.activeConnectionId) || null,
     [sessionState],
   );
-
-  const installDownloadedUpdate = useCallback(async (update: AndroidUpdate) => {
-    setMobileUpdateStatus({ state: "installing", latest: update, error: null });
-    await UpdateInstaller.installDownloaded();
-  }, []);
-
-  const downloadAndInstallUpdate = useCallback(async (update: AndroidUpdate) => {
-    if (Platform.OS !== "android") return;
-    setMobileUpdateStatus({ state: "downloading", latest: update, error: null });
-    try {
-      await UpdateInstaller.download(update.apkUrl, update.bytes, update.sha256);
-      if (await UpdateInstaller.canInstallPackages()) {
-        await installDownloadedUpdate(update);
-        return;
-      }
-      pendingInstallPermission.current = update;
-      installPermissionScreenOpened.current = false;
-      setMobileUpdateStatus({ state: "awaiting_permission", latest: update, error: null });
-      await UpdateInstaller.requestInstallPermission();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "更新下载或安装失败。";
-      setMobileUpdateStatus({ state: "error", latest: update, error: message });
-      Alert.alert("无法安装更新", message);
-    }
-  }, [installDownloadedUpdate]);
-
-  useEffect(() => {
-    if (Platform.OS !== "android") return undefined;
-    const subscription = AppState.addEventListener("change", (state) => {
-      if (!pendingInstallPermission.current) return;
-      if (state !== "active") {
-        installPermissionScreenOpened.current = true;
-        return;
-      }
-      if (!installPermissionScreenOpened.current) return;
-      const update = pendingInstallPermission.current;
-      pendingInstallPermission.current = null;
-      installPermissionScreenOpened.current = false;
-      void UpdateInstaller.canInstallPackages().then(async (allowed) => {
-        if (!allowed) {
-          setMobileUpdateStatus({ state: "available", latest: update, error: null });
-          Alert.alert("需要安装权限", "请允许 RHZYCODE 安装未知应用，然后重新点击下载并安装。");
-          return;
-        }
-        await installDownloadedUpdate(update);
-      }).catch((error) => {
-        const message = error instanceof Error ? error.message : "无法继续安装更新。";
-        setMobileUpdateStatus({ state: "error", latest: update, error: message });
-        Alert.alert("无法安装更新", message);
-      });
-    });
-    return () => subscription.remove();
-  }, []);
-
-  const checkForAppUpdate = useCallback(async (announce: boolean) => {
-    if (Platform.OS !== "android") return;
-    setMobileUpdateStatus((current) => ({ state: "checking", latest: current.latest, error: null }));
-    try {
-      const status = await fetchMobileUpdate(currentAppVersion, { manifestUrl: updateManifestUrl });
-      setMobileUpdateStatus(status);
-      if (!announce && status.state === "current") {
-        Alert.alert("当前版本已是最新");
-      }
-      if (announce && status.state === "available" && announcedUpdateVersion.current !== status.latest.version) {
-        announcedUpdateVersion.current = status.latest.version;
-        Alert.alert(
-          "发现新版本",
-          `RHZYCODE ${status.latest.version} 已可下载。`,
-          [
-            { text: "稍后", style: "cancel" },
-            { text: "下载并安装", onPress: () => void downloadAndInstallUpdate(status.latest) },
-          ],
-        );
-      }
-    } catch (error) {
-      setMobileUpdateStatus((current) => ({
-        state: "error",
-        latest: current.latest,
-        error: error instanceof Error ? error.message : "无法检查更新。",
-      }));
-    }
-  }, [downloadAndInstallUpdate]);
-
-  useEffect(() => {
-    if (Platform.OS !== "android") return undefined;
-    const initialCheck = setTimeout(() => void checkForAppUpdate(true), 3_000);
-    return () => clearTimeout(initialCheck);
-  }, [checkForAppUpdate]);
 
   const loadSession = useCallback(async () => {
     setBooting(true);
@@ -1152,7 +1067,7 @@ function AppContent() {
         onCheckForUpdate={() => void checkForAppUpdate(false)}
         onDownloadUpdate={() => {
           if (mobileUpdateStatus.state === "available") {
-            void downloadAndInstallUpdate(mobileUpdateStatus.latest);
+            void installMobileUpdate(mobileUpdateStatus.latest);
           }
         }}
         onOpenProjects={openProjectPicker}

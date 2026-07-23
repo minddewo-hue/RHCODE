@@ -21,7 +21,7 @@ import { detectLlmProtocol } from "./llm-protocol";
 import { DesktopSettingsStore, isValidSyncPort } from "./desktop-settings";
 import { removeStalePastedImages, savePastedImage } from "./pasted-image-store";
 import { buildTextContextMenu } from "./text-context-menu";
-import { UpdateManager, type UpdateAdapter } from "./update-manager";
+import { DEFAULT_UPDATE_MANIFEST_URL, UpdateManager, type UpdateAdapter } from "./update-manager";
 import { EncryptedControlPersistence, EncryptedStateFile, type PersistenceStatus } from "./control-persistence";
 import { AppServerClient } from "./app-server";
 import {
@@ -31,6 +31,11 @@ import {
 } from "./environment-migration";
 import { selectGatewayRoot } from "./gateway-module";
 import { SkillsManager } from "./skills-manager";
+import {
+  bundledCodexExecutable,
+  desktopUpdatePlatform,
+  shouldQuitWhenAllWindowsClose,
+} from "./platform/desktop-platform";
 import {
   validateApprovalResolution,
   validateClipboardText,
@@ -529,7 +534,7 @@ async function runStartupEnvironmentMigrations(
 
 function useBundledCodexBinary(): void {
   if (process.env.RHZYCODE_CODEX_PATH) return;
-  const executable = process.platform === "win32" ? "codex.exe" : "codex";
+  const executable = bundledCodexExecutable();
   const bundledPath = join(process.resourcesPath, "codex", executable);
   if (fs.existsSync(bundledPath)) process.env.RHZYCODE_CODEX_PATH = bundledPath;
 }
@@ -565,12 +570,13 @@ app.whenReady().then(async () => {
   credentials.applyToEnvironment();
   const runtimeGatewayConfigPath = credentials.writeRuntimeConfig();
   traceStartup("credentials-applied");
-  const updateUrl = process.env.RHZYCODE_UPDATE_URL?.trim()
-    || "http://192.168.11.103:8791/desktop";
+  const updateManifestUrl = process.env.RHZYCODE_UPDATE_MANIFEST_URL?.trim()
+    || DEFAULT_UPDATE_MANIFEST_URL;
+  const updatePlatform = desktopUpdatePlatform();
   const updates = new UpdateManager(
     autoUpdater as unknown as UpdateAdapter,
-    true,
-    updateUrl,
+    updatePlatform !== null,
+    { manifestUrl: updateManifestUrl, currentVersion: app.getVersion(), platform: updatePlatform || undefined },
   );
   traceStartup("updates-created");
   const environmentSyncPort = Number(process.env.RHZYCODE_SYNC_PORT || 8790);
@@ -689,7 +695,7 @@ app.on("before-quit", (event) => {
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  if (shouldQuitWhenAllWindowsClose()) app.quit();
 });
 
 app.on("activate", () => {

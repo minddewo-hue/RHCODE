@@ -9,6 +9,7 @@ import type {
   UserInputRequest,
 } from "@rhzycode/protocol";
 import { EventEmitter } from "node:events";
+import { desktopHostPlatform } from "../platform/desktop-platform";
 
 const maxEvents = 2_000;
 const maxTimelineItems = 2_000;
@@ -44,7 +45,7 @@ export class ControlStore extends EventEmitter {
     this.hosts.set("local-desktop", {
       id: "local-desktop",
       name: "开发工作站",
-      platform: "windows",
+      platform: desktopHostPlatform(),
       status: "offline",
       lastSeenAt: now,
       activeTaskCount: 0,

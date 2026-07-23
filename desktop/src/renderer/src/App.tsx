@@ -2305,7 +2305,7 @@ function SettingsView({
   return (
     <div className="settings-view">
       <section className="settings-section">
-        <div className="settings-heading"><KeyRound size={18} /><div><strong>Provider credentials</strong><small>Windows secure storage</small></div></div>
+        <div className="settings-heading"><KeyRound size={18} /><div><strong>Provider credentials</strong><small>System secure storage</small></div></div>
         {!status.encryptionAvailable && <p className="gateway-error">Secure credential storage is unavailable.</p>}
         <div className="provider-config-toolbar">
           <button disabled={!status.encryptionAvailable || savingProviderConfig} onClick={addProvider}><Plus size={13} /> Add provider</button>

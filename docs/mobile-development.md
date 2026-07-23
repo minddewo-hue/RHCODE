@@ -39,6 +39,7 @@ mobile/src/
   state/control-reducer.ts     AgentEvent 合并
   storage/secure-session.ts    安全会话存储抽象
   storage/native-secure-session.ts
+  platform/update/              Android/iOS 更新契约、状态机和平台动作
   components/AppDrawer.tsx     对话、电脑、连接和设置侧栏
   components/ChatScreen.tsx    消息、审批、输入请求和发送区
   components/TaskSheets.tsx    新建任务和对话操作
@@ -46,7 +47,7 @@ mobile/src/
 mobile/test/                   Node 单元和接口测试
 ```
 
-共享类型的事实来源是 `packages/protocol/src/index.ts`。控制接口的事实来源是 `desktop/src/main/control-plane/app.ts`。
+共享控制类型的事实来源是 `packages/protocol/src/index.ts`，更新清单的事实来源是 `packages/update-contract`。控制接口的事实来源是 `desktop/src/main/control-plane/app.ts`。
 
 ## 3. 启动与验证
 
@@ -63,6 +64,12 @@ Android：
 adb reverse tcp:8081 tcp:8081
 adb reverse tcp:8790 tcp:8790
 npm run android --workspace @rhzycode/mobile
+```
+
+iOS（必须在安装 Xcode 的 macOS 上）：
+
+```bash
+npm run dev:ios
 ```
 
 物理手机也可以直接访问桌面显示的 WLAN 地址，不需要 ADB reverse。桌面和手机必须处于同一可信局域网。
@@ -165,9 +172,11 @@ GET /v1/snapshot
 | 超时/离线 | 保留会话，指数退避重连 |
 | 响应 schema 无效 | 拒绝数据并显示服务异常 |
 
-## 8. Android 网络
+## 8. 平台网络与更新
 
 本地 IP 通常没有手机信任的证书，因此开发和可信局域网使用 HTTP/WS。`with-private-network-cleartext.cjs` 只为 Android 应用声明 cleartext 能力；KEY 仍是所有业务请求的认证边界。
+
+iOS 通过 `NSLocalNetworkUsageDescription` 请求本地网络访问，并只为本地网络开启 ATS 例外。Android 更新会校验 APK 大小和 SHA-256 后进入系统安装器；iOS 更新只打开版本清单中的 App Store URL，不在应用内下载 IPA。
 
 不要把桌面 `8790` 端口映射到公网。远程部署必须增加可信 HTTPS/WSS、可达地址和网络策略。
 
@@ -180,4 +189,4 @@ GET /v1/snapshot
 - [ ] HTTP KEY 只在 Bearer header，WebSocket KEY 只在 subprotocol。
 - [ ] 401、4001、离线和前后台切换均能恢复到正确状态。
 - [ ] 写命令带 `Idempotency-Key`，失败时不会静默重复执行。
-- [ ] TypeScript、移动端测试、Android bundle 和真机布局验证通过。
+- [ ] TypeScript、移动端测试、Android bundle、iOS archive 和两平台真机布局验证通过。

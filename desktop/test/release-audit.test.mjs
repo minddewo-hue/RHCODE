@@ -73,3 +73,32 @@ test("audits a clean release and rejects sensitive ASAR or resource files", asyn
     /forbidden sensitive files.*\.pem/i,
   );
 });
+
+test("audits the unpacked macOS application layout", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-macos-release-audit-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const desktopDir = path.join(root, "desktop");
+  const source = path.join(root, "source");
+  const appBundle = path.join(desktopDir, "release", "mac-arm64", "RHZYCODE.app");
+  const resources = path.join(appBundle, "Contents", "Resources");
+  const executable = path.join(appBundle, "Contents", "MacOS", "RHZYCODE");
+  fs.mkdirSync(source, { recursive: true });
+  fs.mkdirSync(resources, { recursive: true });
+  fs.mkdirSync(path.dirname(executable), { recursive: true });
+  fs.writeFileSync(path.join(desktopDir, "package.json"), "{\"dependencies\":{}}\n");
+  fs.writeFileSync(path.join(source, "index.js"), "console.log('clean');\n");
+  fs.writeFileSync(executable, "test executable");
+  await createPackage(source, path.join(resources, "app.asar"));
+
+  const result = auditRelease({
+    desktopDir,
+    version: "0.1.0-test",
+    electronVersion: "test-electron",
+    codexVersion: "test-codex",
+    platform: "darwin",
+    arch: "arm64",
+  });
+  assert.equal(result.manifest.platform, "darwin");
+  assert.equal(result.manifest.arch, "arm64");
+  assert.equal(result.manifest.artifacts.some((artifact) => artifact.path.endsWith("Contents/MacOS/RHZYCODE")), true);
+});

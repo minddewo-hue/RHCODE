@@ -9,32 +9,45 @@ const desktopDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 const rootDir = path.resolve(desktopDir, "..");
 const desktopPackage = JSON.parse(fs.readFileSync(path.join(desktopDir, "package.json"), "utf8"));
 const directoryOnly = process.argv.includes("--dir");
+const requestedPlatform = process.argv.find((argument) => argument.startsWith("--platform="))?.split("=", 2)[1] || "windows";
+if (requestedPlatform !== "windows" && requestedPlatform !== "macos") {
+  throw new Error(`Unsupported desktop release platform: ${requestedPlatform}.`);
+}
+const requiredNodePlatform = requestedPlatform === "macos" ? "darwin" : "win32";
+if (process.platform !== requiredNodePlatform) {
+  throw new Error(`${requestedPlatform} releases must be built on ${requiredNodePlatform}. Current platform: ${process.platform}.`);
+}
+const requestedArch = process.argv.find((argument) => argument.startsWith("--arch="))?.split("=", 2)[1]
+  || (requestedPlatform === "windows" ? "x64" : process.arch === "arm64" ? "arm64" : "x64");
+if (requestedArch !== "x64" && requestedArch !== "arm64") {
+  throw new Error(`Unsupported desktop release architecture: ${requestedArch}.`);
+}
+const releaseArch = requestedArch === "arm64" ? Arch.arm64 : Arch.x64;
 const signingRequired = process.env.RHZYCODE_REQUIRE_SIGNING === "1";
 const signingConfigured = Boolean(
   process.env.CSC_LINK || process.env.WIN_CSC_LINK || process.env.CSC_NAME,
 );
-const defaultUpdateUrl = "http://192.168.11.103:8791/desktop";
+const defaultUpdateUrl = `https://minio.gshbzw.com/wxfile/rhzycode/${requestedPlatform}`;
 const configuredUpdateUrl = process.env.RHZYCODE_UPDATE_URL?.trim() || "";
 const updateUrl = configuredUpdateUrl || defaultUpdateUrl;
-const unsignedLocalUpdatesAllowed = isPrivateNetworkUpdateUrl(updateUrl)
-  && (process.env.RHZYCODE_ALLOW_UNSIGNED_LOCAL_UPDATES === "1" || !configuredUpdateUrl);
 const electronDist = resolveElectronDist(desktopPackage.devDependencies.electron);
 if (signingRequired && !signingConfigured) {
   throw new Error(
     "Code signing is required, but CSC_LINK, WIN_CSC_LINK, or CSC_NAME is not configured.",
   );
 }
-if (updateUrl && !signingConfigured && !unsignedLocalUpdatesAllowed) {
-  throw new Error("Unsigned update publishing is allowed only for an explicitly enabled private-network URL.");
-}
-const iconPath = path.join(desktopDir, "build", "icon.png");
-const iconResult = spawnSync(
-  "powershell.exe",
-  ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(desktopDir, "scripts", "generate-icon.ps1"), "-OutputPath", iconPath],
-  { encoding: "utf8" },
-);
+const iconPath = requestedPlatform === "macos"
+  ? path.join(desktopDir, "build", "icon.icns")
+  : path.join(desktopDir, "build", "icon.png");
+const iconResult = requestedPlatform === "macos"
+  ? spawnSync(process.execPath, [path.join(desktopDir, "scripts", "generate-mac-icon.mjs")], { encoding: "utf8" })
+  : spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(desktopDir, "scripts", "generate-icon.ps1"), "-OutputPath", iconPath],
+      { encoding: "utf8" },
+    );
 if (iconResult.status !== 0 || !fs.existsSync(iconPath)) {
-  throw new Error(`Unable to generate the release icon: ${iconResult.stderr.trim()}`);
+  throw new Error(`Unable to generate the ${requestedPlatform} release icon: ${iconResult.stderr.trim()}`);
 }
 const codexPath = resolveCodexPath();
 const expectedVersion = JSON.parse(
@@ -56,7 +69,9 @@ if (/"api_key"\s*:/i.test(gatewayConfigText)) {
   throw new Error("The release gateway config contains an inline API key.");
 }
 
-const codeModeHost = path.join(path.dirname(codexPath), "codex-code-mode-host.exe");
+const codexExecutableName = requestedPlatform === "windows" ? "codex.exe" : "codex";
+const codeModeHostName = requestedPlatform === "windows" ? "codex-code-mode-host.exe" : "codex-code-mode-host";
+const codeModeHost = path.join(path.dirname(codexPath), codeModeHostName);
 const extraResources = [
   {
     from: gatewayConfig,
@@ -72,24 +87,28 @@ const extraResources = [
   },
   {
     from: codexPath,
-    to: "codex/codex.exe",
+    to: `codex/${codexExecutableName}`,
   },
 ];
 if (fs.existsSync(codeModeHost)) {
   extraResources.push({
     from: codeModeHost,
-    to: "codex/codex-code-mode-host.exe",
+    to: `codex/${codeModeHostName}`,
   });
 }
 
 const artifacts = await build({
   projectDir: desktopDir,
-  targets: Platform.WINDOWS.createTarget(directoryOnly ? "dir" : "nsis", Arch.x64),
+  targets: requestedPlatform === "windows"
+    ? Platform.WINDOWS.createTarget(directoryOnly ? "dir" : "nsis", releaseArch)
+    : Platform.MAC.createTarget(directoryOnly ? "dir" : ["dmg", "zip"], releaseArch),
   config: {
     appId: "ai.rhzycode.desktop",
     productName: "RHZYCODE",
     electronDist,
-    artifactName: "${productName}-Setup-${version}-${arch}.${ext}",
+    artifactName: requestedPlatform === "windows"
+      ? "${productName}-Setup-${version}-${arch}.${ext}"
+      : "${productName}-${version}-${arch}.${ext}",
     asar: true,
     forceCodeSigning: signingRequired,
     npmRebuild: false,
@@ -116,6 +135,13 @@ const artifacts = await build({
       createDesktopShortcut: true,
       createStartMenuShortcut: true,
     },
+    mac: {
+      category: "public.app-category.developer-tools",
+      icon: iconPath,
+      hardenedRuntime: true,
+      minimumSystemVersion: "12.0",
+      notarize: signingRequired,
+    },
   },
 });
 
@@ -127,6 +153,8 @@ const audit = auditRelease({
   codexVersion: expectedVersion,
   signingRequired,
   updateConfigured: Boolean(updateUrl),
+  platform: requiredNodePlatform,
+  arch: requestedArch,
 });
 
 for (const artifact of artifacts) console.log(artifact);
@@ -164,19 +192,4 @@ function resolveElectronDist(expectedVersion) {
     throw new Error(`Electron distribution mismatch: expected ${expectedVersion}, got ${version.stdout.trim() || "unknown"}.`);
   }
   return electronDist;
-}
-
-function isPrivateNetworkUpdateUrl(value) {
-  if (!value) return false;
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-    const host = url.hostname.toLowerCase();
-    if (host === "localhost" || host === "127.0.0.1" || host === "::1") return true;
-    if (/^10\./.test(host) || /^192\.168\./.test(host)) return true;
-    const match = /^172\.(\d+)\./.exec(host);
-    return Boolean(match && Number(match[1]) >= 16 && Number(match[1]) <= 31);
-  } catch {
-    return false;
-  }
 }

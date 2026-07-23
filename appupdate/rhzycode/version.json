@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 2,
+  "publishedAt": "2026-07-23T04:22:18.492Z",
+  "platforms": {
+    "windows": {
+      "version": "0.1.9",
+      "architecture": "x64",
+      "file": "windows/RHZYCODE-Setup-0.1.9-x64.exe",
+      "downloadUrl": "https://minio.gshbzw.com/wxfile/rhzycode/windows/RHZYCODE-Setup-0.1.9-x64.exe",
+      "feedUrl": "https://minio.gshbzw.com/wxfile/rhzycode/windows",
+      "metadataUrl": "https://minio.gshbzw.com/wxfile/rhzycode/windows/latest.yml",
+      "bytes": 196519041,
+      "sha256": "e2ac1b2d40c9e64ad21109669d701c1f61d3217fb380dd3d040fa1f79a51294f",
+      "releaseNotes": "RHZYCODE Windows release"
+    },
+    "android": {
+      "version": "0.1.12",
+      "versionCode": 13,
+      "file": "android/RHZYCODE-Android-0.1.12.apk",
+      "downloadUrl": "https://minio.gshbzw.com/wxfile/rhzycode/android/RHZYCODE-Android-0.1.12.apk",
+      "bytes": 80861490,
+      "sha256": "1a115d2a339f65586c5a73e0b47c8675fbe63745e7e6e38be1c34cd969d06044",
+      "releaseNotes": "RHZYCODE Android release"
+    }
+  }
+}

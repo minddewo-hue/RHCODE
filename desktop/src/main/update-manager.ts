@@ -1,6 +1,15 @@
 import { EventEmitter } from "node:events";
+import {
+  compareVersions,
+  parseUpdateForPlatform,
+  type DesktopUpdate,
+  type DesktopUpdatePlatform,
+} from "@rhzycode/update-contract";
+
+export { compareVersions } from "@rhzycode/update-contract";
 
 export const DESKTOP_UPDATE_INTERVAL_MS = 2 * 60 * 60 * 1_000;
+export const DEFAULT_UPDATE_MANIFEST_URL = "https://minio.gshbzw.com/wxfile/rhzycode/version.json";
 
 export function isDesktopUpdateWindow(date: Date): boolean {
   const hour = date.getHours();
@@ -36,6 +45,14 @@ export interface UpdateAdapter {
   quitAndInstall(): void;
 }
 
+interface UpdateManagerOptions {
+  manifestUrl?: string;
+  currentVersion?: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+  platform?: DesktopUpdatePlatform;
+}
+
 export class UpdateManager extends EventEmitter {
   private status: UpdateStatus;
   private initialCheck: NodeJS.Timeout | null = null;
@@ -44,7 +61,7 @@ export class UpdateManager extends EventEmitter {
   constructor(
     private readonly adapter: UpdateAdapter,
     enabled: boolean,
-    updateUrl?: string,
+    private readonly options: UpdateManagerOptions = {},
   ) {
     super();
     this.status = {
@@ -55,10 +72,7 @@ export class UpdateManager extends EventEmitter {
       error: null,
     };
     if (!enabled) return;
-    if (updateUrl) {
-      adapter.setFeedURL?.({ provider: "generic", url: updateUrl });
-      adapter.forceDevUpdateConfig = true;
-    }
+    if (!options.platform) throw new Error("An enabled desktop updater requires a supported platform.");
     adapter.autoDownload = false;
     adapter.autoInstallOnAppQuit = true;
     this.bindEvents();
@@ -86,6 +100,18 @@ export class UpdateManager extends EventEmitter {
     this.requireEnabled();
     this.setStatus({ state: "checking", percent: null, error: null });
     try {
+      const latest = await fetchDesktopUpdate({
+        manifestUrl: this.options.manifestUrl,
+        fetchImpl: this.options.fetchImpl,
+        timeoutMs: this.options.timeoutMs,
+        platform: this.options.platform!,
+      });
+      if (compareVersions(latest.version, this.options.currentVersion || "0.0.0") <= 0) {
+        this.setStatus({ state: "not_available", version: latest.version, percent: null, error: null });
+        return this.getStatus();
+      }
+      this.adapter.setFeedURL?.({ provider: "generic", url: latest.feedUrl });
+      this.adapter.forceDevUpdateConfig = true;
       await this.adapter.checkForUpdates();
     } catch (error) {
       this.setError(error);
@@ -147,5 +173,30 @@ export class UpdateManager extends EventEmitter {
 
   private requireEnabled(): void {
     if (!this.status.enabled) throw new Error("Automatic updates are not configured for this build.");
+  }
+}
+
+export async function fetchDesktopUpdate(options: {
+  manifestUrl?: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+  platform: DesktopUpdatePlatform;
+}): Promise<DesktopUpdate> {
+  const manifestUrl = options.manifestUrl || DEFAULT_UPDATE_MANIFEST_URL;
+  const fetchImpl = options.fetchImpl || fetch;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 8_000);
+  try {
+    const url = new URL(manifestUrl);
+    url.searchParams.set("_", String(Date.now()));
+    const response = await fetchImpl(url, {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`Update service returned HTTP ${response.status}.`);
+    return parseUpdateForPlatform(await response.json(), options.platform);
+  } finally {
+    clearTimeout(timeout);
   }
 }

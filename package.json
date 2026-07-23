@@ -13,9 +13,13 @@
   "scripts": {
     "dev:desktop": "npm run dev --workspace @rhzycode/desktop",
     "dev:mobile": "npm run start --workspace @rhzycode/mobile",
+    "dev:ios": "npm run ios --workspace @rhzycode/mobile",
     "update:serve": "node appupdate/server.mjs",
     "update:build:desktop": "node appupdate/scripts/build-desktop.mjs",
     "update:build:mobile": "node appupdate/scripts/build-mobile.mjs",
+    "update:build:mac": "node appupdate/scripts/build-macos.mjs",
+    "update:build:ios": "node appupdate/scripts/build-ios.mjs",
+    "update:stage": "node appupdate/scripts/publish.mjs --dry-run",
     "update:publish": "node appupdate/scripts/publish.mjs",
     "update:release": "npm run update:build:desktop && npm run update:build:mobile && npm run update:publish",
     "gateway:test": "node --test desktop/model-gateway/test/*.test.js",
@@ -24,6 +28,8 @@
     "build": "npm run build --workspace @rhzycode/protocol && npm run build --workspace @rhzycode/desktop",
     "pack:desktop": "npm run pack:win --workspace @rhzycode/desktop",
     "dist:desktop": "npm run dist:win --workspace @rhzycode/desktop",
+    "pack:mac": "npm run pack:mac --workspace @rhzycode/desktop",
+    "dist:mac": "npm run dist:mac --workspace @rhzycode/desktop",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "check": "npm run typecheck && npm run test"

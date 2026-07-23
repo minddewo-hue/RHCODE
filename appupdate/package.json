@@ -3,8 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@rhzycode/update-contract": "*"
+  },
   "scripts": {
     "start": "node server.mjs",
+    "build:macos": "node scripts/build-macos.mjs",
+    "build:ios": "node scripts/build-ios.mjs",
+    "publish": "node scripts/publish.mjs",
+    "stage": "node scripts/publish.mjs --dry-run",
     "test": "node --test test/*.test.mjs"
   }
 }

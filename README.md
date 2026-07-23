@@ -1,15 +1,17 @@
 # RHZYCODE
 
-RHZYCODE 是一个以 Windows 桌面端为本地 Agent Host、以 Android 客户端为远程控制端的跨平台编程助手。桌面端负责运行 Codex App Server、模型网关、项目文件操作和命令执行；移动端通过可信局域网连接桌面端，查看任务、发送消息、处理审批并管理对话。
+RHZYCODE 是一个以桌面端为本地 Agent Host、以移动客户端为远程控制端的跨平台编程助手。当前已发布 Windows 和 Android；代码结构、构建入口与更新契约已扩展到 macOS 和 iOS，Apple 签名与商店发布仍需在 macOS 构建环境完成。
 
 ## 当前版本
 
 | 客户端 | 版本 | 发布产物 |
 | --- | --- | --- |
-| Windows Desktop | `0.1.3` | NSIS x64 安装程序 |
-| Android | `0.1.6`（versionCode `7`） | APK |
+| Windows Desktop | `0.1.9` | NSIS x64 安装程序 |
+| Android | `0.1.12`（versionCode `13`） | APK |
+| macOS Desktop | 未发布 | DMG + ZIP 构建入口已就绪 |
+| iOS | 未发布 | Xcode Archive / App Store 构建入口已就绪 |
 
-发布元数据由 `appupdate/channel.json` 管理，安装包默认写入本地发布目录且不提交到 Git。
+发布元数据由 `appupdate/rhzycode/version.json` 管理，安装包发布到 MinIO 的 `wxfile/rhzycode/` 前缀且不提交到 Git。
 
 ## 主要功能
 
@@ -17,34 +19,35 @@ RHZYCODE 是一个以 Windows 桌面端为本地 Agent Host、以 Android 客户
 - 本地项目操作：创建和恢复任务、浏览项目目录、执行命令、应用文件修改、终止运行任务及查看执行过程。
 - 完整任务管理：对话搜索、重命名、归档、恢复和永久删除；空对话也能在桌面端与移动端同步。
 - 桌面与手机同步：使用桌面生成的长期访问 KEY，通过 HTTP/WebSocket 同步线程、消息、审批、用户输入和运行状态。
-- 图片与文件附件：桌面支持文件选择和粘贴图片；Android 支持拍照、相册和文件选择，消息中显示可点击的图片缩略图。
+- 图片与文件附件：桌面支持文件选择和粘贴图片；Android/iOS 支持拍照、相册和文件选择，消息中显示可点击的图片缩略图。
 - 内置终端：桌面端提供项目终端和实时输出。
-- 应用更新：桌面端支持检查、下载并重启安装；Android 端校验 APK 大小和 SHA-256 后调用系统安装界面。
+- 应用更新：Windows/macOS 使用平台更新 feed；Android 校验 APK 后调用系统安装界面；iOS 跳转 App Store。
 - 单实例桌面程序：重复启动时恢复并聚焦已有窗口。
 
 ## 系统结构
 
 ```text
-Android Client
+Android / iOS Client
     |  Bearer KEY + HTTP / WebSocket
     v
 Desktop Control Plane
     |-- Electron Renderer
     |-- Agent Host ------ Codex App Server (JSONL / stdio)
     |-- Model Gateway --- configured model provider
-    |-- DPAPI storage --- credentials, access KEY, control state
+    |-- System secure storage --- credentials, access KEY, control state
     `-- Update Manager
 ```
 
-桌面端是任务执行和持久化的权威节点。移动端不直接访问模型供应商，也不会接收供应商 API Key。共享接口和运行时校验统一定义在 `packages/protocol`。
+桌面端是任务执行和持久化的权威节点。移动端不直接访问模型供应商，也不会接收供应商 API Key。共享控制接口定义在 `packages/protocol`，四平台更新清单定义在 `packages/update-contract`。
 
 ## 仓库目录
 
 ```text
-desktop/                    Electron 桌面端、Agent Host、控制面和模型网关
-mobile/                     Expo / React Native Android 客户端及本地更新模块
+desktop/                    Electron Windows/macOS 桌面端、Agent Host、控制面和模型网关
+mobile/                     Expo / React Native Android/iOS 客户端及平台适配
 packages/protocol/          桌面与移动端共享的协议和 Zod 校验结构
-appupdate/                  Windows、Android 构建发布脚本与局域网更新服务
+packages/update-contract/   Windows、macOS、Android、iOS 共享更新契约
+appupdate/                  四平台构建发布脚本与旧更新服务兼容层
 docs/                       架构、开发、连接、安全和发布文档
 ```
 
@@ -52,7 +55,7 @@ docs/                       架构、开发、连接、安全和发布文档
 
 基础要求：
 
-- Windows 10/11
+- Windows 10/11；构建 macOS/iOS 时需要 macOS 和 Xcode
 - Node.js 20 或更高版本
 - npm 11 或更高版本
 - 可执行的 Codex CLI；桌面发布使用 `desktop/codex-version.json` 固定的版本
@@ -106,7 +109,7 @@ npm run android --workspace @rhzycode/mobile
 SUB2API_API_KEY=replace-with-your-key
 ```
 
-安装版应在桌面设置中保存密钥。密钥由 Electron `safeStorage` 和 Windows DPAPI 加密。
+安装版应在桌面设置中保存密钥。密钥由 Electron `safeStorage` 调用操作系统安全存储加密（Windows 使用 DPAPI，macOS 使用 Keychain 后端）。
 
 ## 首次启动迁移
 
@@ -130,14 +133,23 @@ npm run dist:desktop
 npm run update:build:mobile
 ```
 
-汇总已有桌面和 Android 产物并更新发布通道：
+在 macOS 构建机上构建 macOS 和 iOS：
 
-```powershell
-npm run update:publish
-npm run update:serve
+```bash
+npm run dist:mac
+RHZYCODE_IOS_EXPORT_OPTIONS_PLIST=/secure/ExportOptions.plist npm run update:build:ios
 ```
 
-更新服务默认监听 `8791`，提供桌面更新通道、Android manifest、APK 和字节范围下载。生产发布应使用正式代码签名证书和 Android keystore；仓库默认开发配置不能替代生产签名。
+Apple 平台的签名、公证、App Store 和发布清单配置见 [docs/apple-platforms.md](docs/apple-platforms.md)。
+
+汇总已有桌面和 Android 产物并直接发布到 MinIO：
+
+```powershell
+npm run update:stage
+npm run update:publish
+```
+
+新客户端直接读取公网 MinIO 版本清单。`npm run update:serve` 只用于尚未迁移的旧客户端，不再保存或提供本地安装包。生产发布应使用正式代码签名证书和 Android keystore；仓库默认开发配置不能替代生产签名。
 
 ## 验证命令
 
@@ -158,6 +170,8 @@ npm run smoke:agent --workspace @rhzycode/desktop -- --live
 ## 文档
 
 - [系统架构](docs/architecture.md)
+- [项目结构与依赖边界](docs/project-structure.md)
+- [macOS 与 iOS 准备说明](docs/apple-platforms.md)
 - [桌面端开发](docs/desktop-development.md)
 - [移动端开发](docs/mobile-development.md)
 - [桌面与手机连接](docs/mobile-connection.md)
@@ -171,5 +185,5 @@ npm run smoke:agent --workspace @rhzycode/desktop -- --live
 
 - 不要提交 `.env`、供应商密钥、访问 KEY、证书私钥、Codex 登录状态或本机控制状态。
 - 不要将明文局域网控制端口暴露到互联网。
-- Android APK 和 Windows EXE 在正式分发前必须使用各自的生产签名证书。
+- Android APK、Windows EXE、macOS 应用和 iOS IPA 在正式分发前必须使用各平台的生产签名身份。
 - 更改协议、权限、附件或远程命令时，必须同步更新运行时校验和两端测试。

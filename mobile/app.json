@@ -2,17 +2,25 @@
   "expo": {
     "name": "RHZYCODE",
     "slug": "rhzycode",
-    "version": "0.1.10",
+    "version": "0.1.12",
     "icon": "./assets/icon.png",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "ai.rhzy.code"
+      "bundleIdentifier": "ai.rhzy.code",
+      "buildNumber": "1",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSLocalNetworkUsageDescription": "RHZYCODE connects to your desktop agent on the local network.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
     },
     "android": {
       "package": "ai.rhzy.code",
-      "versionCode": 11,
+      "versionCode": 13,
       "permissions": [
         "REQUEST_INSTALL_PACKAGES"
       ],
@@ -46,7 +54,7 @@
       "./plugins/with-private-network-cleartext.cjs"
     ],
     "extra": {
-      "updateManifestUrl": "http://192.168.11.103:8791/manifest.json"
+      "updateManifestUrl": "https://minio.gshbzw.com/wxfile/rhzycode/version.json"
     }
   }
 }

@@ -72,6 +72,7 @@ import {
   type RolloutGeneratedImage,
 } from "./generated-image-rollout";
 import { loadRolloutThreadState } from "./rollout-thread-state";
+import { desktopHostPlatform } from "./platform/desktop-platform";
 import {
   ManagedFileStore,
   resolveArtifactPaths,
@@ -859,7 +860,7 @@ export class DesktopRuntime extends EventEmitter {
       controlPlane.store.upsertHost({
         id: "local-desktop",
         name: os.hostname(),
-        platform: platformName(),
+        platform: desktopHostPlatform(),
         status: "online",
         lastSeenAt: new Date().toISOString(),
         activeTaskCount: 0,
@@ -1733,7 +1734,7 @@ export class DesktopRuntime extends EventEmitter {
     this.controlPlane?.store.upsertHost({
       id: "local-desktop",
       name: os.hostname(),
-      platform: platformName(),
+      platform: desktopHostPlatform(),
       status: activeTaskCount > 0 ? "busy" : "online",
       lastSeenAt: new Date().toISOString(),
       activeTaskCount,
@@ -2249,11 +2250,6 @@ function validateAttachments(attachments: ComposerAttachment[]): ComposerAttachm
   });
 }
 
-function platformName(): "windows" | "macos" | "linux" {
-  if (process.platform === "win32") return "windows";
-  if (process.platform === "darwin") return "macos";
-  return "linux";
-}
 
 function isLoopbackHost(host: string): boolean {
   const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");

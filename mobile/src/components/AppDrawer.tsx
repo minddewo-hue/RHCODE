@@ -22,7 +22,7 @@ import type { ConnectionStatus, ControlPlaneConnectionState } from "../hooks/use
 import type { MobileSession } from "../storage/secure-session";
 import { colors } from "../ui/theme";
 import { registeredProjectPaths } from "../state/project-list";
-import type { MobileUpdateStatus } from "../update/mobile-update";
+import type { MobileUpdateStatus } from "../platform/update/mobile-update";
 
 export type DrawerPage = "threads" | "archived" | "computers" | "connection" | "settings";
 
@@ -465,7 +465,11 @@ function SettingsPage(props: AppDrawerProps) {
       >
         {["checking", "downloading", "awaiting_permission", "installing"].includes(props.updateStatus.state)
           ? <ActivityIndicator color={colors.inkMuted} size="small" />
-          : <Feather color={colors.inkMuted} name={props.updateStatus.state === "available" ? "download" : "refresh-cw"} size={16} />}
+          : <Feather
+              color={colors.inkMuted}
+              name={props.updateStatus.state === "available" && props.updateStatus.latest.platform === "ios" ? "external-link" : props.updateStatus.state === "available" ? "download" : "refresh-cw"}
+              size={16}
+            />}
         <Text style={styles.settingLinkText}>{updateActionLabel(props.updateStatus)}</Text>
         <Feather color={colors.inkMuted} name="chevron-right" size={16} />
       </Pressable>
@@ -481,7 +485,7 @@ function SettingsPage(props: AppDrawerProps) {
 }
 
 function mobileUpdateLabel(status: MobileUpdateStatus): string {
-  if (status.state === "checking") return "正在检查本机更新服务";
+  if (status.state === "checking") return "正在检查应用更新";
   if (status.state === "downloading") return `正在下载 ${status.latest.version}`;
   if (status.state === "awaiting_permission") return "等待允许安装未知应用";
   if (status.state === "installing") return "已启动系统安装程序";
@@ -492,7 +496,11 @@ function mobileUpdateLabel(status: MobileUpdateStatus): string {
 }
 
 function updateActionLabel(status: MobileUpdateStatus): string {
-  if (status.state === "available") return `下载并安装 ${status.latest.version}`;
+  if (status.state === "available") {
+    return status.latest.platform === "ios"
+      ? `前往 App Store 更新 ${status.latest.version}`
+      : `下载并安装 ${status.latest.version}`;
+  }
   if (status.state === "downloading") return "正在下载更新";
   if (status.state === "awaiting_permission") return "等待安装权限";
   if (status.state === "installing") return "正在启动安装";

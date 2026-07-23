@@ -11,7 +11,7 @@
 - 内嵌模型网关的生命周期、模型目录、Provider 状态和凭据入口。
 - 本机线程、Turn、审批、结构化用户输入、附件、终端及活动时间线。
 - 桌面内嵌控制面、移动端长期 KEY、事件回放和轮换。
-- Windows DPAPI 持久化、自动更新、Windows 打包与签名门禁。
+- Electron `safeStorage` 持久化、自动更新、Windows/macOS 打包与签名门禁。
 - `desktop/test`、桌面冒烟脚本及桌面相关的控制面测试。
 
 ### 1.2 未经协调禁止修改的范围
@@ -69,9 +69,9 @@ Electron Main
     |     |-- AppServerClient -- JSONL/stdin/stdout --> codex app-server
     |     |-- GatewayModule --> 内嵌 desktop/model-gateway
     |     `-- 内嵌 Control Plane --> HTTP/WS 或 HTTPS/WSS --> 已授权手机
-    |-- ProviderCredentialStore --> Electron safeStorage / Windows DPAPI
-    |-- EncryptedControlPersistence --> Windows DPAPI
-    |-- MobileAccessManager + EncryptedStateFile --> Windows DPAPI
+    |-- ProviderCredentialStore --> Electron safeStorage / OS secure storage
+    |-- EncryptedControlPersistence --> Electron safeStorage
+    |-- MobileAccessManager + EncryptedStateFile --> Electron safeStorage
     `-- UpdateManager --> electron-updater
 ```
 
@@ -81,7 +81,8 @@ Electron Main
 
 | 文件 | 职责 |
 | --- | --- |
-| `desktop/src/main/index.ts` | Electron 启动、窗口安全选项、隔离路径、DPAPI 对象、IPC 注册、清理退出 |
+| `desktop/src/main/index.ts` | Electron 启动、窗口安全选项、隔离路径、系统加密对象、IPC 注册、清理退出 |
+| `desktop/src/main/platform/desktop-platform.ts` | Windows/macOS/Linux 主机名、更新通道、Codex 文件名和窗口生命周期适配 |
 | `desktop/src/main/runtime.ts` | 网关/App Server/控制面编排；线程、Turn、审批、输入、附件、终端和事件映射 |
 | `desktop/src/main/app-server.ts` | 启动 `codex app-server --stdio`，处理 JSONL RPC、超时、响应和诊断 |
 | `desktop/src/main/gateway-module.ts` | 内嵌网关生命周期、60 秒 Provider 主动探测和状态事件 |
@@ -129,7 +130,7 @@ $env:RHZYCODE_SYNC_PORT = "8890"
 npm run dev:desktop
 ```
 
-- `RHZYCODE_USER_DATA_DIR`：覆盖 Electron `userData`，隔离 DPAPI 状态、凭据和日志。
+- `RHZYCODE_USER_DATA_DIR`：覆盖 Electron `userData`，隔离安全存储状态、凭据和日志。
 - `RHZYCODE_CODEX_HOME`：隔离 App Server 的 `CODEX_HOME`。不要指向默认 `.codex`。
 - `RHZYCODE_SYNC_HOST` / `RHZYCODE_SYNC_PORT`：控制面监听地址；默认 `127.0.0.1:8790`。
 - `RHZYCODE_GATEWAY_HOME`：可选外部网关目录；目录必须包含 `gateway.config.json`。
@@ -171,6 +172,13 @@ npm test --workspace @rhzycode/desktop
 # Windows 解包目录和 NSIS 安装包
 npm run pack:desktop
 npm run dist:desktop
+```
+
+macOS 打包必须在 macOS 上执行：
+
+```bash
+npm run pack:mac
+npm run dist:mac
 ```
 
 开发模式 renderer 通常由 Vite 提供，主进程读取 `ELECTRON_RENDERER_URL`；打包模式加载 `out/renderer/index.html`。不要在业务代码中硬编码 Vite 地址。
@@ -283,8 +291,8 @@ Renderer startTurn
 
 ### 6.3 持久化
 
-- `control-state.bin`：DPAPI 加密的快照和耐久事件。
-- `mobile-access-state.bin`：DPAPI 加密的长期 KEY 和命令审计。
+- `control-state.bin`：Electron `safeStorage` 加密的快照和耐久事件。
+- `mobile-access-state.bin`：Electron `safeStorage` 加密的长期 KEY 和命令审计。
 - `gateway-credentials.json`：值是 safeStorage 加密后的 Base64，不是明文凭据。
 - 默认均位于 Electron `userData`；开发时由 `RHZYCODE_USER_DATA_DIR` 隔离。
 
@@ -300,7 +308,7 @@ Renderer startTurn
 - 文件/图片附件，最多 20 个。
 - App Server PTY 终端、stdin、resize、输出缓冲和终止。
 - 内嵌多模型网关、启动/停止/重启和 Provider 主动健康探测。
-- Provider 凭据 DPAPI 存储，renderer 只见状态。
+- Provider 凭据由系统安全存储加密，renderer 只见状态。
 - 控制快照/事件加密持久化和事件断线回放。
 - 长期移动 KEY、加密持久化、命令审计和立即轮换。
 - 远程线程/Turn、结构化答案和线程生命周期命令，安全默认策略、幂等重放和非敏感审计。
@@ -315,7 +323,7 @@ Renderer startTurn
 
 ### 8.1 连接信息
 
-桌面 Settings 的 Mobile connection 显示本机 LAN IP、端口和一个 `rhzy_...` 长期 KEY。KEY 通过 DPAPI 加密保存，在用户手动重新生成前持续有效。手机直接用 KEY 认证，不存在额外的兑换请求。
+桌面 Settings 的 Mobile connection 显示本机 LAN IP、端口和一个 `rhzy_...` 长期 KEY。KEY 通过 Electron `safeStorage` 加密保存，在用户手动重新生成前持续有效。手机直接用 KEY 认证，不存在额外的兑换请求。
 
 ### 8.2 HTTP/WSS API
 
@@ -388,7 +396,7 @@ npm run dev:desktop
 - 所有 renderer 输入在主进程边界重新验证；不要把 preload 当成可信验证层。
 - 凭据保存前要求 `safeStorage.isEncryptionAvailable()`；不可回退到明文。
 - API Key 不得出现在 `CredentialStatus`、错误文本、Provider 健康结果或 renderer state 中。
-- 长期 KEY 只保存在 DPAPI 加密状态文件中；renderer 仅在设置页按用户请求显示。
+- 长期 KEY 只保存在系统安全存储加密的状态文件中；renderer 仅在设置页按用户请求显示。
 - 移动访问状态恢复时忽略格式异常的 KEY 和审计记录。
 - 用户秘密答案只响应给活跃 App Server RPC，不进入事件历史或控制快照。
 - 附件只允许绝对路径，限制为 20 项；后续若读取或上传文件，必须新增大小、类型、路径范围和符号链接检查。
@@ -459,7 +467,7 @@ npm run dist:desktop
 ```powershell
 $env:CSC_LINK = "C:\secure\rhzycode-signing.pfx"
 $env:CSC_KEY_PASSWORD = "<从安全环境注入>"
-$env:RHZYCODE_UPDATE_URL = "https://updates.example.com/rhzycode/windows"
+$env:RHZYCODE_UPDATE_URL = "https://minio.gshbzw.com/wxfile/rhzycode/windows"
 $env:RHZYCODE_REQUIRE_SIGNING = "1"
 npm run dist:desktop
 ```
@@ -467,8 +475,8 @@ npm run dist:desktop
 规则：
 
 - `RHZYCODE_REQUIRE_SIGNING=1` 但无签名身份时打包必须失败。
-- 配置 `RHZYCODE_UPDATE_URL` 但无签名身份时也必须失败。
-- 更新源来自打包生成的 `app-update.yml`，运行时环境变量不能替换已签名构建的源。
+- `RHZYCODE_REQUIRE_SIGNING=1` 时无签名身份必须失败。
+- 客户端先读取 MinIO 统一版本清单，再使用其中的 Windows feed。
 - 发布前验证 Codex 二进制版本严格为 0.145.0。
 - 检查安装包和 `app.asar` 不含敏感配置、用户状态、TLS 文件或密钥。
 
@@ -501,7 +509,7 @@ npm run dist:desktop
 
 状态：Settings 只显示 `restored`、`partial`、`missing`、`invalid`、`unavailable` 恢复枚举；损坏状态安全回退为空，不向 renderer 发送路径或解密内容。
 
-- 为 DPAPI 不可用、文件损坏、恢复丢弃记录增加不含敏感数据的状态提示。
+- 为系统安全存储不可用、文件损坏、恢复丢弃记录增加不含敏感数据的状态提示。
 - 保持失败时安全回退为空状态，不输出解密内容。
 
 验收：损坏文件不会阻止应用启动；UI 能识别“未恢复”；日志不含快照、移动 KEY、项目内容或凭据。
@@ -552,7 +560,7 @@ npm run dist:desktop
 5. 线程：新建、恢复、搜索、重命名、归档、恢复和删除按受影响范围验证。
 6. Turn：流式输出、审批、失败重试、打断及 sandbox 映射按受影响范围验证。
 7. 控制面：快照与事件序列一致；重连按 `lastSequence` 回放；重启不恢复待处理 RPC。
-8. 移动访问：KEY 生成、DPAPI 恢复、轮换、401 和 WSS `4001` 行为无回归。
+8. 移动访问：KEY 生成、加密恢复、轮换、401 和 WSS `4001` 行为无回归。
 9. 传输：可信局域网 HTTP/WS 可用；托管 HTTPS/WSS 用可信证书联调。
 10. 自动化：至少运行桌面 typecheck/test；共享变更运行全仓 `check` 和 `build`。
 11. 发行：影响主进程、资源或依赖时运行 `pack:desktop` 和 `smoke:mobile-access`；发布时再运行 `dist:desktop`。

@@ -28,7 +28,7 @@ function run(command, args, cwd) {
       ANDROID_HOME: androidHome,
       ANDROID_SDK_ROOT: androidHome,
       NODE_ENV: process.env.NODE_ENV || "production",
-      EXPO_PUBLIC_UPDATE_URL: "http://192.168.11.103:8791/manifest.json",
+      EXPO_PUBLIC_UPDATE_URL: "https://minio.gshbzw.com/wxfile/rhzycode/version.json",
     },
   });
   if (result.error) console.error(result.error);

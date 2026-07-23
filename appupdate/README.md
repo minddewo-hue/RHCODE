@@ -1,36 +1,40 @@
-# RHZYCODE Local Update Service
+# RHZYCODE MinIO updates
 
-The complete Chinese build, publishing, validation, security, and troubleshooting
-guide is in [`docs/update-system.md`](../docs/update-system.md).
+Release files are published under the public MinIO prefix `wxfile/rhzycode/`.
+Windows, macOS, Android, and iOS read the same version manifest:
 
-The service listens on `0.0.0.0:8791` and advertises
-`http://192.168.11.103:8791` to desktop and Android clients.
+`https://minio.gshbzw.com/wxfile/rhzycode/version.json`
 
 ## Commands
 
 ```powershell
 npm run update:build:desktop
 npm run update:build:mobile
+# Run these on macOS when producing Apple artifacts:
+npm run update:build:mac
+npm run update:build:ios
+npm run update:stage
 npm run update:publish
-npm run update:serve
 ```
 
-`npm run update:release` runs both builds and publishes the resulting channel.
-Increment the desktop and mobile versions before publishing a new release. Android
-also requires an incremented `expo.android.versionCode`.
+`update:stage` creates the local mirror in `appupdate/rhzycode/` without making
+network changes. `update:publish` uploads configured platform packages and desktop
+updater metadata, then replaces `version.json` last. Apple entries are optional until
+their artifacts and App Store URL are supplied; see the platform guide.
 
-Start the update service manually when the machine is serving releases:
+Publishing credentials are read only from these environment variables:
 
 ```powershell
-npm run update:serve
+$env:RHZYCODE_MINIO_ACCESS_KEY = "<access-key>"
+$env:RHZYCODE_MINIO_SECRET_KEY = "<secret-key>"
+npm run update:publish
 ```
 
-Desktop checks once after launch, then every two hours while local time is between
-10:00 and 20:00. Android checks once shortly after each cold launch. Both clients
-also retain their manual check action.
+Do not commit credentials. Endpoint, bucket, region, prefix, and credential
+variable names are configured in `appupdate/config.json`.
 
-Health and update metadata are available at:
+`npm run update:serve` is only a migration bridge for already-installed builds
+that still use `http://192.168.11.103:8791`. New builds access MinIO directly.
 
-- `http://192.168.11.103:8791/health`
-- `http://192.168.11.103:8791/manifest.json`
-- `http://192.168.11.103:8791/desktop/latest.yml`
+See [`docs/update-system.md`](../docs/update-system.md) for the full release flow.
+Apple build and signing details are in [`docs/apple-platforms.md`](../docs/apple-platforms.md).

@@ -18,8 +18,16 @@ The Agent Host owns local process lifecycle and converts version-specific App Se
 - Do not expose the App Server WebSocket listener directly to a public network.
 - Persist events with monotonic sequence numbers so reconnecting clients can replay missed activity.
 - Keep provider credentials on the Agent Host, gateway, or encrypted worker secret store. Never send them to a mobile client.
-- Encrypt desktop control snapshots, the persistent mobile access key, and audit records with Windows DPAPI.
+- Encrypt desktop control snapshots, the persistent mobile access key, and audit records with Electron `safeStorage`; Windows uses DPAPI and macOS uses the system Keychain backend.
 - Authenticate mobile HTTP requests with the desktop key as a bearer token and WebSocket sessions with a dedicated subprotocol.
+
+## Platform boundaries
+
+- `desktop/src/main/platform` maps Node/Electron platform details into RHZYCODE domain names and native lifecycle behavior.
+- `mobile/src/platform` owns Android/iOS behavior that cannot be expressed by the shared React Native layer.
+- `packages/protocol` is the control-plane contract; `packages/update-contract` is the release-manifest contract.
+- Platform-specific installers and signing tools remain outside the shared runtime. Unsupported native modules must not fail during application module loading.
+- Apple artifacts are built only on macOS. Cross-platform unit tests validate contracts on any host, but do not replace signed-device verification.
 
 ## Delivery phases
 

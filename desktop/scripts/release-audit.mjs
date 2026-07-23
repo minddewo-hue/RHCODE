@@ -23,14 +23,21 @@ export function auditRelease({
   codexVersion,
   signingRequired = false,
   updateConfigured,
+  platform = "win32",
+  arch = "x64",
 }) {
   const releaseDir = path.join(desktopDir, "release");
-  const unpackedDir = path.join(releaseDir, "win-unpacked");
-  const resourcesDir = path.join(unpackedDir, "resources");
+  const macAppBundle = platform === "darwin" ? findMacAppBundle(releaseDir) : null;
+  const unpackedDir = platform === "darwin" ? macAppBundle : path.join(releaseDir, "win-unpacked");
+  const resourcesDir = platform === "darwin"
+    ? path.join(unpackedDir || "", "Contents", "Resources")
+    : path.join(unpackedDir, "resources");
   const asarPath = path.join(resourcesDir, "app.asar");
-  const unpackedExecutable = path.join(unpackedDir, "RHZYCODE.exe");
+  const unpackedExecutable = platform === "darwin"
+    ? path.join(unpackedDir || "", "Contents", "MacOS", "RHZYCODE")
+    : path.join(unpackedDir, "RHZYCODE.exe");
   if (!fs.existsSync(asarPath) || !fs.existsSync(unpackedExecutable)) {
-    throw new Error("Release audit requires release/win-unpacked with app.asar and RHZYCODE.exe.");
+    throw new Error(`Release audit could not find the unpacked ${platform} application, app.asar, and executable.`);
   }
 
   uncache(asarPath);
@@ -71,7 +78,10 @@ export function auditRelease({
     ...(artifactPaths || []),
     ...(artifactPaths == null ? walkFiles(releaseDir).filter((filePath) => {
       const extension = path.extname(filePath).toLowerCase();
-      return path.dirname(filePath) === releaseDir && (extension === ".exe" || extension === ".blockmap");
+      const releaseExtensions = platform === "darwin"
+        ? new Set([".dmg", ".zip", ".blockmap", ".yml"])
+        : new Set([".exe", ".blockmap", ".yml"]);
+      return path.dirname(filePath) === releaseDir && releaseExtensions.has(extension);
     }) : []),
   ]);
   const artifacts = [...artifactCandidates]
@@ -83,15 +93,19 @@ export function auditRelease({
         path: relativePath,
         bytes: fs.statSync(filePath).size,
         sha256: hashFile(filePath),
-        ...(extension === ".exe" ? { authenticode: getAuthenticodeStatus(filePath) } : {}),
+        ...(platform === "win32" && extension === ".exe" ? { authenticode: getAuthenticodeStatus(filePath) } : {}),
       };
     })
     .sort((left, right) => left.path.localeCompare(right.path));
 
   if (signingRequired) {
-    const invalidSignatures = artifacts.filter((artifact) => artifact.authenticode && artifact.authenticode !== "Valid");
-    if (invalidSignatures.length > 0) {
-      throw new Error(`Required Authenticode validation failed: ${invalidSignatures.map((value) => value.path).join(", ")}`);
+    if (platform === "darwin") {
+      verifyMacCodeSignature(unpackedDir);
+    } else {
+      const invalidSignatures = artifacts.filter((artifact) => artifact.authenticode && artifact.authenticode !== "Valid");
+      if (invalidSignatures.length > 0) {
+        throw new Error(`Required Authenticode validation failed: ${invalidSignatures.map((value) => value.path).join(", ")}`);
+      }
     }
   }
 
@@ -100,8 +114,8 @@ export function auditRelease({
     generatedAt: new Date().toISOString(),
     product: "RHZYCODE",
     version,
-    platform: "win32",
-    arch: "x64",
+    platform,
+    arch,
     electronVersion,
     codexVersion,
     updateConfigured: expectsUpdater,
@@ -150,6 +164,21 @@ function walkFiles(root) {
   return files;
 }
 
+function findMacAppBundle(releaseDir) {
+  if (!fs.existsSync(releaseDir)) return null;
+  const pending = [releaseDir];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const entryPath = path.join(current, entry.name);
+      if (entry.name === "RHZYCODE.app") return entryPath;
+      if (path.relative(releaseDir, entryPath).split(path.sep).length < 3) pending.push(entryPath);
+    }
+  }
+  return null;
+}
+
 function hashFile(filePath) {
   return createHash("sha256").update(fs.readFileSync(filePath)).digest("hex").toUpperCase();
 }
@@ -172,6 +201,18 @@ function getAuthenticodeStatus(filePath) {
   return result.status === 0 ? result.stdout.trim() || "UnknownError" : "UnknownError";
 }
 
+function verifyMacCodeSignature(appBundle) {
+  if (process.platform !== "darwin") {
+    throw new Error("macOS code signature verification requires macOS.");
+  }
+  const result = spawnSync("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appBundle], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(`Required macOS code signature validation failed: ${result.stderr.trim()}`);
+  }
+}
+
 const isMain = process.argv[1]
   && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 if (isMain) {
@@ -184,6 +225,8 @@ if (isMain) {
     electronVersion: packageJson.devDependencies.electron,
     codexVersion,
     signingRequired: process.env.RHZYCODE_REQUIRE_SIGNING === "1",
+    platform: process.platform === "darwin" ? "darwin" : "win32",
+    arch: process.arch === "arm64" ? "arm64" : "x64",
   });
   console.log(`Release audit passed: ${result.manifestPath}`);
 }

@@ -1,4 +1,5 @@
 import { requireNativeModule } from "expo-modules-core";
+import { Platform } from "react-native";
 
 interface DownloadResult {
   bytes: number;
@@ -12,4 +13,13 @@ interface UpdateInstallerModule {
   installDownloaded(): Promise<void>;
 }
 
-export default requireNativeModule<UpdateInstallerModule>("UpdateInstaller");
+const unsupportedInstaller: UpdateInstallerModule = {
+  download: async () => { throw new Error("Direct package installation is only available on Android."); },
+  canInstallPackages: async () => false,
+  requestInstallPermission: async () => undefined,
+  installDownloaded: async () => { throw new Error("Direct package installation is only available on Android."); },
+};
+
+export default Platform.OS === "android"
+  ? requireNativeModule<UpdateInstallerModule>("UpdateInstaller")
+  : unsupportedInstaller;

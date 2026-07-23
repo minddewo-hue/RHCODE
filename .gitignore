@@ -17,12 +17,18 @@ desktop/release/
 
 # Generated application packages and exported bundles
 appupdate/artifacts/
+appupdate/rhzycode/windows/
+appupdate/rhzycode/android/
+appupdate/rhzycode/macos/
 mobile/releases/
+mobile/release-ios/
 mobile/dist-*/
 mobile/android/.kotlin/
 mobile/modules/**/android/build/
 mobile/*.png
 mobile/*.xml
+desktop/build/icon.icns
+desktop/build/icon.iconset/
 
 # Generated validation output and local end-to-end driver state
 /validation/

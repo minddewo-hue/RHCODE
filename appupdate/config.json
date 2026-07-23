@@ -1,7 +1,13 @@
 {
-  "host": "0.0.0.0",
-  "port": 8791,
-  "publicBaseUrl": "http://192.168.11.103:8791",
-  "artifactsDirectory": "artifacts",
-  "channelFile": "channel.json"
+  "endpoint": "https://minio.gshbzw.com",
+  "bucket": "wxfile",
+  "region": "us-east-1",
+  "objectPrefix": "rhzycode",
+  "manifestFile": "version.json",
+  "accessKeyEnv": "RHZYCODE_MINIO_ACCESS_KEY",
+  "secretKeyEnv": "RHZYCODE_MINIO_SECRET_KEY",
+  "legacyServer": {
+    "host": "0.0.0.0",
+    "port": 8791
+  }
 }

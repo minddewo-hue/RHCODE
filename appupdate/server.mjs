@@ -1,38 +1,25 @@
-import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { publicObjectUrl } from "./scripts/minio-client.mjs";
+import { parseUpdateForPlatform } from "@rhzycode/update-contract";
 
 const serviceRoot = path.dirname(fileURLToPath(import.meta.url));
-const mimeTypes = new Map([
-  [".apk", "application/vnd.android.package-archive"],
-  [".blockmap", "application/octet-stream"],
-  [".exe", "application/octet-stream"],
-  [".json", "application/json; charset=utf-8"],
-  [".yml", "application/yaml; charset=utf-8"],
-  [".yaml", "application/yaml; charset=utf-8"],
-]);
 
 export function loadConfig(root = serviceRoot) {
-  const value = JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8"));
-  return {
-    host: String(value.host || "0.0.0.0"),
-    port: Number(value.port || 8791),
-    publicBaseUrl: String(value.publicBaseUrl || "").replace(/\/+$/, ""),
-    artifactsDirectory: String(value.artifactsDirectory || "artifacts"),
-    channelFile: String(value.channelFile || "channel.json"),
-  };
+  return JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8"));
 }
 
-export function createUpdateServer({ root = serviceRoot, config = loadConfig(root) } = {}) {
-  const artifactsRoot = path.resolve(root, config.artifactsDirectory);
-  const channelPath = path.resolve(root, config.channelFile);
+export function createLegacyUpdateServer({ config = loadConfig(), fetchImpl = fetch } = {}) {
+  const prefix = String(config.objectPrefix).replace(/^\/+|\/+$/g, "");
+  const manifestUrl = publicObjectUrl(config, `${prefix}/${config.manifestFile}`);
+  const windowsUrl = publicObjectUrl(config, `${prefix}/windows`).replace(/\/+$/, "");
+  const androidUrl = publicObjectUrl(config, `${prefix}/android`).replace(/\/+$/, "");
 
   return http.createServer((request, response) => {
-    void handleRequest(request, response, { artifactsRoot, channelPath, config }).catch((error) => {
-      if (!response.headersSent) sendJson(response, 500, { error: "internal_error" });
-      else response.destroy();
-      console.error(`[appupdate] ${error instanceof Error ? error.stack || error.message : String(error)}`);
+    void handleRequest(request, response, { manifestUrl, windowsUrl, androidUrl, fetchImpl }).catch((error) => {
+      sendJson(response, 502, { error: "minio_unavailable", message: error instanceof Error ? error.message : String(error) });
     });
   });
 }
@@ -41,141 +28,81 @@ async function handleRequest(request, response, context) {
   const requestUrl = new URL(request.url || "/", "http://localhost");
   if (request.method !== "GET" && request.method !== "HEAD") {
     response.setHeader("Allow", "GET, HEAD");
-    sendJson(response, 405, { error: "method_not_allowed" });
+    sendJson(response, 405, { error: "method_not_allowed" }, request.method === "HEAD");
     return;
   }
-
   if (requestUrl.pathname === "/" || requestUrl.pathname === "/health") {
-    sendJson(response, 200, {
-      status: "ok",
-      service: "RHZYCODE Update Service",
-      baseUrl: context.config.publicBaseUrl,
-    }, request.method === "HEAD");
+    sendJson(response, 200, { status: "ok", service: "RHZYCODE MinIO compatibility service", manifestUrl: context.manifestUrl }, request.method === "HEAD");
     return;
   }
-
   if (requestUrl.pathname === "/manifest.json") {
-    let channel;
-    try {
-      channel = JSON.parse(fs.readFileSync(context.channelPath, "utf8"));
-    } catch {
-      sendJson(response, 503, { error: "channel_not_published" });
-      return;
-    }
-    const manifest = publicManifest(channel, context.config.publicBaseUrl);
-    response.setHeader("Cache-Control", "no-store");
-    sendJson(response, 200, manifest, request.method === "HEAD");
+    const upstream = await context.fetchImpl(context.manifestUrl, { cache: "no-store", headers: { Accept: "application/json" } });
+    if (!upstream.ok) throw new Error(`MinIO manifest returned HTTP ${upstream.status}.`);
+    const manifest = await upstream.json();
+    sendJson(response, 200, legacyManifest(manifest), request.method === "HEAD");
     return;
   }
-
-  const relativePath = decodeURIComponent(requestUrl.pathname).replace(/^\/+/, "");
-  if (!relativePath.startsWith("desktop/") && !relativePath.startsWith("mobile/")) {
-    sendJson(response, 404, { error: "not_found" });
+  if (requestUrl.pathname === "/desktop/latest.yml") {
+    redirect(response, `${context.windowsUrl}/latest.yml`);
     return;
   }
-  const filePath = path.resolve(context.artifactsRoot, relativePath);
-  if (!isWithin(context.artifactsRoot, filePath)) {
-    sendJson(response, 400, { error: "invalid_path" });
+  const desktopFile = singleFile(requestUrl.pathname, "/desktop/");
+  if (desktopFile) {
+    redirect(response, `${context.windowsUrl}/${encodeURIComponent(desktopFile)}`);
     return;
   }
-  await sendFile(request, response, filePath);
+  const androidFile = singleFile(requestUrl.pathname, "/mobile/");
+  if (androidFile) {
+    redirect(response, `${context.androidUrl}/${encodeURIComponent(androidFile)}`);
+    return;
+  }
+  sendJson(response, 404, { error: "not_found" }, request.method === "HEAD");
 }
 
-function publicManifest(channel, baseUrl) {
-  const absoluteUrl = (relativePath) => `${baseUrl}/${String(relativePath).replace(/^\/+/, "")}`;
+function legacyManifest(value) {
+  const android = parseUpdateForPlatform(value, "android");
+  const { platform: _platform, downloadUrl, ...metadata } = android;
   return {
     schemaVersion: 1,
-    publishedAt: channel.publishedAt,
-    desktop: channel.desktop ? {
-      ...channel.desktop,
-      feedUrl: `${baseUrl}/desktop`,
-      downloadUrl: absoluteUrl(channel.desktop.path),
-    } : null,
-    android: channel.android ? {
-      ...channel.android,
-      apkUrl: absoluteUrl(channel.android.path),
-    } : null,
+    publishedAt: value.publishedAt,
+    android: { ...metadata, apkUrl: downloadUrl },
   };
 }
 
-async function sendFile(request, response, filePath) {
-  let stat;
-  try {
-    stat = await fs.promises.stat(filePath);
-  } catch {
-    sendJson(response, 404, { error: "artifact_not_found" });
-    return;
-  }
-  if (!stat.isFile()) {
-    sendJson(response, 404, { error: "artifact_not_found" });
-    return;
-  }
-
-  const range = parseRange(request.headers.range, stat.size);
-  if (range === false) {
-    response.statusCode = 416;
-    response.setHeader("Content-Range", `bytes */${stat.size}`);
-    response.end();
-    return;
-  }
-
-  const extension = path.extname(filePath).toLowerCase();
-  const start = range?.start ?? 0;
-  const end = range?.end ?? stat.size - 1;
-  const contentLength = Math.max(0, end - start + 1);
-  response.statusCode = range ? 206 : 200;
-  response.setHeader("Accept-Ranges", "bytes");
-  response.setHeader("Cache-Control", extension === ".yml" || extension === ".yaml" ? "no-cache" : "public, max-age=3600");
-  response.setHeader("Content-Length", contentLength);
-  response.setHeader("Content-Type", mimeTypes.get(extension) || "application/octet-stream");
-  if (range) response.setHeader("Content-Range", `bytes ${start}-${end}/${stat.size}`);
-  if (extension === ".apk" || extension === ".exe") {
-    response.setHeader("Content-Disposition", `attachment; filename="${path.basename(filePath)}"`);
-  }
-  if (request.method === "HEAD") {
-    response.end();
-    return;
-  }
-  fs.createReadStream(filePath, { start, end }).pipe(response);
+function singleFile(pathname, prefix) {
+  if (!pathname.startsWith(prefix)) return null;
+  const name = decodeURIComponent(pathname.slice(prefix.length));
+  return name && !name.includes("/") && name !== "." && name !== ".." ? name : null;
 }
 
-function parseRange(value, size) {
-  if (!value) return null;
-  const match = /^bytes=(\d*)-(\d*)$/.exec(value.trim());
-  if (!match) return false;
-  const start = match[1] ? Number(match[1]) : 0;
-  const end = match[2] ? Number(match[2]) : size - 1;
-  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || start >= size) {
-    return false;
-  }
-  return { start, end: Math.min(end, size - 1) };
+function redirect(response, location) {
+  response.statusCode = 302;
+  response.setHeader("Access-Control-Allow-Origin", "*");
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("Location", location);
+  response.end();
 }
 
 function sendJson(response, statusCode, value, headOnly = false) {
+  if (response.headersSent) return;
   const body = Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
   response.statusCode = statusCode;
   response.setHeader("Access-Control-Allow-Origin", "*");
+  response.setHeader("Cache-Control", "no-store");
   response.setHeader("Content-Type", "application/json; charset=utf-8");
   response.setHeader("Content-Length", body.length);
   if (headOnly) response.end();
   else response.end(body);
 }
 
-function isWithin(root, candidate) {
-  const relative = path.relative(root, candidate);
-  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-}
-
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 if (isMain) {
   const config = loadConfig();
-  const server = createUpdateServer({ config });
-  server.on("error", (error) => {
-    console.error(`[appupdate] Unable to start: ${error instanceof Error ? error.message : String(error)}`);
-    process.exitCode = 1;
-  });
-  server.listen(config.port, config.host, () => {
-    console.log(`[appupdate] listening on ${config.host}:${config.port}`);
-    console.log(`[appupdate] public URL ${config.publicBaseUrl}`);
+  const host = String(config.legacyServer?.host || "0.0.0.0");
+  const port = Number(config.legacyServer?.port || 8791);
+  const server = createLegacyUpdateServer({ config });
+  server.listen(port, host, () => {
+    console.log(`[appupdate] legacy compatibility service listening on ${host}:${port}`);
+    console.log(`[appupdate] new clients access ${publicObjectUrl(config, `${config.objectPrefix}/${config.manifestFile}`)} directly`);
   });
 }

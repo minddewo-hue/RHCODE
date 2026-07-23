@@ -12,6 +12,7 @@ interface AgentMessage {
 }
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const workspaceRoot = path.resolve(desktopRoot, "..");
 const gatewayRoot = process.env.RHZYCODE_GATEWAY_HOME || desktopRoot;
 const codexHome = process.env.RHZYCODE_SMOKE_CODEX_HOME ||
   path.join(os.tmpdir(), "rhzycode-smoke-codex-home");

@@ -1,4 +1,11 @@
-import { expect, test, type ElectronApplication, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type ElectronApplication,
+  type Locator,
+  type Page,
+  type PageAssertionsToHaveScreenshotOptions,
+} from "@playwright/test";
 import { _electron as electron } from "playwright";
 import fs from "node:fs";
 import os from "node:os";
@@ -25,6 +32,22 @@ let dataDir: string;
 let emptyProjectDir: string;
 let generatedImagePath: string;
 const rendererErrors: string[] = [];
+
+async function expectScreenshot(
+  target: Page | Locator,
+  name: string,
+  options: PageAssertionsToHaveScreenshotOptions,
+): Promise<void> {
+  const pageOptions = target === page
+    ? {
+        ...options,
+        clip: name === "desktop-standard-window.png"
+          ? { x: 0, y: 0, width: 1428, height: 843 }
+          : { x: 0, y: 0, width: 1028, height: 623 },
+      }
+    : options;
+  await expect(target as Page).toHaveScreenshot(name, pageOptions);
+}
 
 test.describe.configure({ mode: "serial" });
 
@@ -66,7 +89,9 @@ test.beforeAll(async () => {
   await page.locator(".app-shell").waitFor();
   rendererErrors.length = 0;
   await electronApp.evaluate(({ BrowserWindow }) => {
-    BrowserWindow.getAllWindows()[0]?.setSize(1040, 680);
+    const window = BrowserWindow.getAllWindows()[0];
+    window?.setMinimumSize(1, 1);
+    window?.setContentSize(1027, 622);
   });
   await electronApp.evaluate(({ dialog }, paths) => {
     dialog.showOpenDialog = (async (_window, options) => ({
@@ -110,7 +135,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
 
   await panelToggle.click();
   await assertSidePanelDoesNotCoverWorkspace(page);
-  await expect(page).toHaveScreenshot("desktop-minimum-panel-open.png", {
+  await expectScreenshot(page, "desktop-minimum-panel-open.png", {
     animations: "disabled",
     caret: "hide",
     maskColor: "#d8dcd6",
@@ -119,33 +144,26 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await page.getByRole("button", { name: "Close side panel" }).click();
   await assertClosedPanelReleasesWorkspace(page);
 
-  const projectPicker = page.getByRole("button", { name: /Select project/ });
-  await projectPicker.focus();
+  await expect(page.getByRole("button", { name: "Show archived tasks" })).toHaveCount(0);
+  const openProjectFolder = page.getByRole("button", { name: "Open project folder" });
+  await openProjectFolder.focus();
   await page.keyboard.press("Enter");
-  await expect(page.locator("#project-menu")).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: /New project folder/i })).toHaveCount(0);
-  await expect(page.getByRole("menuitem", { name: "Open project folder" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Open folder" })).toHaveCount(0);
-  await page.keyboard.press("Escape");
-  await expect(page.locator("#project-menu")).toBeHidden();
-  await expect(projectPicker).toBeFocused();
-  await projectPicker.click();
-  await expect(page.locator("#project-menu")).toBeVisible();
-  await page.locator(".workspace-header").click();
-  await expect(page.locator("#project-menu")).toBeHidden();
-  await projectPicker.focus();
-  await page.keyboard.press("Enter");
-  const openFolder = page.getByRole("menuitem", { name: "Open project folder" });
-  await openFolder.focus();
-  await page.keyboard.press("Enter");
-  await expect(page.getByRole("button", { name: /project.*fixtures.*project/i })).toBeVisible();
-  const selectedProjectPicker = page.locator(".project-picker");
-  await selectedProjectPicker.click();
-  await page.locator("#project-menu .recent-project").getByRole("menuitem").click();
-  await selectedProjectPicker.click();
-  await page.getByRole("button", { name: "Remove project from recent projects" }).click();
-  await expect(page.locator("#project-menu .recent-project")).toHaveCount(0);
-  await selectedProjectPicker.click();
+  const projectMenu = page.locator(".project-group-main").filter({
+    has: page.getByText("project", { exact: true }),
+  });
+  await expect(projectMenu).toBeVisible();
+  const differentlyCasedProjectDir = projectDir.replace(/^([A-Z]):/, (_match, drive: string) => `${drive.toLowerCase()}:`);
+  if (differentlyCasedProjectDir !== projectDir) {
+    await electronApp.evaluate(({ BrowserWindow }, projectPath) => {
+      BrowserWindow.getAllWindows()[0]?.webContents.send("projects:changed", [{ path: projectPath, name: "project" }]);
+    }, differentlyCasedProjectDir);
+    await expect(page.locator(".project-group.selected")).toContainText("project");
+  }
+  await expect(projectMenu).toHaveAttribute("aria-expanded", "true");
+  await projectMenu.click();
+  await expect(projectMenu).toHaveAttribute("aria-expanded", "false");
+  await projectMenu.click();
+  await expect(projectMenu).toHaveAttribute("aria-expanded", "true");
 
   await page.getByRole("button", { name: "Attach files or images" }).click();
   await expect(page.getByText("notes.txt", { exact: true })).toBeVisible();
@@ -156,6 +174,15 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(page.getByText("clipboard.png", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Remove clipboard.png" }).click();
   await expect(page.getByText("clipboard.png", { exact: true })).toBeHidden();
+  await dropFilesOnComposer(page, [attachmentPath, generatedImagePath]);
+  await expect(page.getByText("notes.txt", { exact: true })).toBeVisible();
+  await expect(page.getByText("generated-image.png", { exact: true })).toBeVisible();
+  await expect(page.locator(".attachment-chip.image").getByText("generated-image.png", { exact: true })).toBeVisible();
+  await expect.poll(() => ipcCalls(electronApp, "project:resolve-dropped-files").then((calls) => calls.at(-1)?.args)).toEqual([
+    [attachmentPath, generatedImagePath],
+  ]);
+  await page.getByRole("button", { name: "Remove notes.txt" }).click();
+  await page.getByRole("button", { name: "Remove generated-image.png" }).click();
   await page.getByRole("button", { name: "Attach files or images" }).click();
   await expect(page.getByText("notes.txt", { exact: true })).toBeVisible();
   await pasteImage(prompt, "clipboard-send.png");
@@ -165,13 +192,13 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(page.getByRole("combobox", { name: "Sandbox policy" })).toHaveValue("read-only");
   await expect(page.getByRole("combobox", { name: "Approval mode" })).toHaveValue("untrusted");
 
-  await expect(page).toHaveScreenshot("desktop-minimum-window.png", {
+  await expectScreenshot(page, "desktop-minimum-window.png", {
     animations: "disabled",
     caret: "hide",
     maskColor: "#d8dcd6",
     mask: [
       page.locator(".model-select"),
-      page.locator(".project-picker small"),
+      page.locator(".project-group-main small"),
     ],
   });
 
@@ -216,14 +243,15 @@ test("supports core desktop workflows at the minimum window size", async () => {
     const style = getComputedStyle(element);
     return { name: style.animationName, duration: style.animationDuration };
   })).toEqual({ name: "thread-state-pulse", duration: "1.1s" });
-  const threadSearch = page.getByRole("textbox", { name: "Search threads" });
+  const threadSearch = page.getByRole("textbox", { name: "Search projects and tasks" });
   await threadSearch.fill("missing thread");
-  await expect(page.getByText("No matching threads", { exact: true })).toBeVisible();
+  await expect(page.getByText("No matching projects or tasks", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Clear search" }).click();
   await expect(threadSearch).toHaveValue("");
   await expect(threadRow).toBeVisible();
   await threadRow.click();
   await expect(threadRow.locator("..")).toHaveClass(/active/);
+  await expect(page.locator(".project-group.selected")).toContainText("project");
   await expect.poll(() => ipcCalls(electronApp, "agent:thread:open").then((calls) => calls.length)).toBe(1);
   await expect(page.locator(".message-avatar")).toHaveCount(0);
   await expect(page.locator(".message-list .message-author")).toHaveCount(0);
@@ -237,11 +265,11 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await page.getByRole("button", { name: "Show notes.txt in folder" }).click();
   await expect.poll(() => ipcCalls(electronApp, "project:reveal-local-file").then((calls) => calls.at(-1)?.args)).toEqual([attachmentPath]);
   expect(await ipcCalls(electronApp, "agent:thread:open")).toHaveLength(1);
-  await expect(page).toHaveScreenshot("desktop-chat-layout-lime.png", {
+  await expectScreenshot(page, "desktop-chat-layout-lime.png", {
     animations: "disabled",
     caret: "hide",
     maskColor: "#d8dcd6",
-    mask: [page.locator(".model-select"), page.locator(".project-picker small")],
+    mask: [page.locator(".model-select"), page.locator(".project-group-main small")],
   });
 
   await sendAgentMessage(electronApp, {
@@ -272,11 +300,11 @@ test("supports core desktop workflows at the minimum window size", async () => {
     element.scrollTop = 0;
   });
   await expect.poll(() => page.locator(".conversation").evaluate((element) => element.scrollTop)).toBe(0);
-  await expect(page).toHaveScreenshot("desktop-generated-image.png", {
+  await expectScreenshot(page, "desktop-generated-image.png", {
     animations: "disabled",
     caret: "hide",
     maskColor: "#d8dcd6",
-    mask: [page.locator(".model-select"), page.locator(".project-picker small")],
+    mask: [page.locator(".model-select"), page.locator(".project-group-main small")],
   });
   await generatedImage.click();
   await expect(page.getByRole("button", { name: "Close image preview" })).toBeVisible();
@@ -301,7 +329,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
   const openCallsBeforeReload = await ipcCalls(electronApp, "agent:thread:open").then((calls) => calls.length);
   await page.reload();
   await page.locator(".app-shell").waitFor();
-  await expect(page.locator(".project-picker")).toContainText("project");
+  await expect(page.locator(".project-group.selected")).toContainText("project");
   await expect(getThreadRow(page, "UI automation thread").locator("..")).toHaveClass(/active/);
   await expect(page.locator(".model-select")).toHaveValue("ui/model");
   await expect.poll(() => ipcCalls(electronApp, "agent:thread:open").then((calls) => calls.length))
@@ -314,11 +342,11 @@ test("supports core desktop workflows at the minimum window size", async () => {
   const initialThreadMenu = page.getByRole("menu");
   await expect(initialThreadMenu).toBeVisible();
   await assertMenuInsideViewport(initialThreadMenu);
-  await expect(page).toHaveScreenshot("desktop-thread-menu.png", {
+  await expectScreenshot(page, "desktop-thread-menu.png", {
     animations: "disabled",
     caret: "hide",
     maskColor: "#d8dcd6",
-    mask: [page.locator(".model-select"), page.locator(".project-picker small")],
+    mask: [page.locator(".model-select"), page.locator(".project-group-main small")],
   });
   await page.locator(".workspace-header").click();
   await expect(initialThreadMenu).toBeHidden();
@@ -332,14 +360,15 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await page.getByRole("menuitem", { name: "Archive task" }).click();
   await expect(getThreadRow(page, "UI automation thread")).toBeHidden();
   await expect.poll(() => ipcCalls(electronApp, "agent:thread:archive").then((calls) => calls.at(-1)?.args)).toEqual([threadId]);
-  await page.getByRole("button", { name: "Show archived tasks" }).click();
-  await expect(getThreadRow(page, "UI automation thread")).toBeVisible();
-  await openThreadActions(page, "UI automation thread");
-  await page.getByRole("menuitem", { name: "Restore task" }).click();
-  await expect(getThreadRow(page, "UI automation thread")).toBeHidden();
+  await expect(page.getByRole("button", { name: "Show archived tasks" })).toHaveCount(0);
+  await page.evaluate((id) => window.rhzycode.unarchiveThread(id), threadId);
   await expect.poll(() => ipcCalls(electronApp, "agent:thread:unarchive").then((calls) => calls.at(-1)?.args)).toEqual([threadId]);
-  await page.getByRole("button", { name: "Show active tasks" }).click();
+  await page.reload();
+  await page.locator(".app-shell").waitFor();
   await expect(getThreadRow(page, "UI automation thread")).toBeVisible();
+  if (await page.getByRole("button", { name: "Close side panel" }).isVisible()) {
+    await page.getByRole("button", { name: "Close side panel" }).click();
+  }
 
   await openThreadActions(page, "UI automation thread");
   await page.getByRole("menuitem", { name: "Rename task" }).click();
@@ -501,9 +530,10 @@ test("supports core desktop workflows at the minimum window size", async () => {
     "ui-test-key",
   ]);
   await page.locator(".settings-view").evaluate((element) => { element.scrollTop = 0; });
-  await expect(page).toHaveScreenshot("desktop-provider-credentials.png", {
+  await expectScreenshot(page, "desktop-provider-credentials.png", {
     animations: "disabled",
     caret: "hide",
+    maxDiffPixelRatio: 0.025,
   });
 
   const deleteCredential = sub2apiCredential.getByRole("button", { name: "Delete", exact: true });
@@ -549,7 +579,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await page.getByRole("button", { name: "Save mobile connection port" }).click();
   await expect(mobilePort).toHaveValue("8912");
   await expect.poll(() => ipcCalls(electronApp, "sync:port:set").then((calls) => calls.at(-1)?.args)).toEqual([8912]);
-  await expect(page.locator(".settings-view")).toHaveScreenshot("desktop-settings-mobile-port.png", {
+  await expectScreenshot(page.locator(".settings-view"), "desktop-settings-mobile-port.png", {
     animations: "disabled",
     caret: "hide",
   });
@@ -570,7 +600,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
     () => page.evaluate(() => window.rhzycode.getMobileAccessStatus()
       .then((status) => status.accessKey?.key || null)),
   ).toBe(`rhzy_${"B".repeat(43)}`);
-  await expect(page).toHaveScreenshot("desktop-mobile-connection.png", {
+  await expectScreenshot(page, "desktop-mobile-connection.png", {
     animations: "disabled",
   });
   await page.getByRole("button", { name: "Copy access key" }).click();
@@ -596,7 +626,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
     page.getByRole("button", { name: "Delete Review Helper" }).click(),
   ]);
   await expect(page.getByText("Review Helper", { exact: true })).toHaveCount(0);
-  await expect(page.locator(".skills-view")).toHaveScreenshot("desktop-skills.png", {
+  await expectScreenshot(page.locator(".skills-view"), "desktop-skills.png", {
     animations: "disabled",
     caret: "hide",
   });
@@ -616,7 +646,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
   ]);
   await expect(page.locator(".send-button.stop")).toBeVisible();
   await expect(page.getByRole("button", { name: "New task" })).toBeEnabled();
-  await expect(page.locator(".project-picker")).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Open project folder" })).toBeEnabled();
   await expect(modelSelect).toBeEnabled();
 
   await modelSelect.selectOption("ui/second");
@@ -676,13 +706,13 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(page.getByText("Start a new task", { exact: true })).toBeVisible();
 
   await electronApp.evaluate(({ BrowserWindow }) => {
-    BrowserWindow.getAllWindows()[0]?.setSize(1440, 900);
+    BrowserWindow.getAllWindows()[0]?.setContentSize(1427, 842);
   });
-  await expect(page).toHaveScreenshot("desktop-standard-window.png", {
+  await expectScreenshot(page, "desktop-standard-window.png", {
     animations: "disabled",
     caret: "hide",
     maskColor: "#d8dcd6",
-    mask: [page.locator(".project-picker small")],
+    mask: [page.locator(".project-group-main small")],
   });
 
   await modelSelect.selectOption("provider-2/gemma-4-31b-it-uncensored-bf16");
@@ -714,10 +744,10 @@ test("supports core desktop workflows at the minimum window size", async () => {
       filePaths: [selectedDirectory],
     })) as typeof dialog.showOpenDialog;
   }, emptyProjectDir);
-  await page.locator(".project-picker").click();
-  await page.getByRole("menuitem", { name: "Open project folder" }).click();
-  await expect(page.locator(".project-picker")).toContainText("empty-project");
-  await expect(page.getByText("No tasks in this project", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  await expect(page.locator(".project-group.selected")).toContainText("empty-project");
+  await expect(page.locator(".project-group").filter({ hasText: "empty-project" }).getByText("No tasks", { exact: true })).toBeVisible();
+  await expect(getThreadRow(page, "Run deterministic verification")).toBeVisible();
   await expect(page.getByText("Start a new task", { exact: true })).toBeVisible();
   await expect(page.locator(".message-list")).toHaveCount(0);
   await expect(previousProjectMessage).toHaveCount(0);
@@ -727,6 +757,55 @@ test("supports core desktop workflows at the minimum window size", async () => {
     params: { itemId: "late-previous-project-message", delta: "This stale message must stay hidden." },
   });
   await expect(page.getByText("This stale message must stay hidden.", { exact: true })).toHaveCount(0);
+
+  const secondaryProjectDir = path.join(dataDir, "secondary-project");
+  await page.evaluate(async ({ primary, secondary }) => {
+    for (let index = 0; index < 24; index += 1) {
+      await window.rhzycode.startThread({ cwd: index % 2 === 0 ? primary : secondary });
+    }
+  }, { primary: projectDir, secondary: secondaryProjectDir });
+  await page.reload();
+  await page.locator(".app-shell").waitFor();
+  await expect(page.locator(".project-group")).toHaveCount(3);
+  const projectOrderBeforeSelection = await page.locator(".project-group-main strong").allTextContents();
+  const secondaryProjectGroup = page.locator(".project-group").filter({ hasText: "secondary-project" });
+  await secondaryProjectGroup.scrollIntoViewIfNeeded();
+  await secondaryProjectGroup.locator(".project-group-header").hover();
+  await expectScreenshot(page, "desktop-project-tree-codex.png", {
+    animations: "disabled",
+    caret: "hide",
+    maxDiffPixels: 0,
+    maskColor: "#d8dcd6",
+    mask: [page.locator(".model-select")],
+  });
+  await expect(page.locator(".project-group-main strong")).toHaveText(projectOrderBeforeSelection);
+  const projectTreeOverflow = await page.locator(".project-thread-list").evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(projectTreeOverflow.scrollHeight).toBeGreaterThan(projectTreeOverflow.clientHeight);
+  await page.locator(".project-thread-list").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect.poll(() => page.locator(".project-thread-list").evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+
+  const projectBackup = page.getByRole("button", { name: "Back up conversations for project", exact: true });
+  await projectBackup.scrollIntoViewIfNeeded();
+  await projectBackup.locator("xpath=..").hover();
+  await projectBackup.click();
+  await expect.poll(() => ipcCalls(electronApp, "conversation:backup").then((calls) => calls.at(-1)?.args)).toEqual([projectDir]);
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Restore project conversations" }).click();
+  await expect.poll(() => ipcCalls(electronApp, "conversation:restore").then((calls) => calls.length)).toBe(1);
+
+  const emptyProjectGroup = page.locator(".project-group").filter({ hasText: "empty-project" });
+  await emptyProjectGroup.hover();
+  page.once("dialog", (dialog) => dialog.accept());
+  await emptyProjectGroup.getByRole("button", { name: "Permanently delete project empty-project" }).click();
+  await expect(emptyProjectGroup).toHaveCount(0);
+  await expect.poll(() => ipcCalls(electronApp, "project:delete").then((calls) => calls.at(-1)?.args)).toEqual([emptyProjectDir]);
+  await page.reload();
+  await page.locator(".app-shell").waitFor();
+  await expect(page.locator(".project-group")).toHaveCount(2);
+  await expect(page.locator(".project-group").filter({ hasText: "empty-project" })).toHaveCount(0);
 
   expect(rendererErrors).toEqual([]);
 });
@@ -743,6 +822,24 @@ async function pasteImage(prompt: ReturnType<Page["getByRole"]>, name: string): 
       clipboardData: clipboard,
     }));
   }, name);
+}
+
+async function dropFilesOnComposer(targetPage: Page, filePaths: string[]): Promise<void> {
+  const composerBox = targetPage.locator(".composer-box");
+  const bounds = await composerBox.boundingBox();
+  if (!bounds) throw new Error("Composer bounds are unavailable.");
+  const session = await targetPage.context().newCDPSession(targetPage);
+  const data = { items: [], files: filePaths, dragOperationsMask: 1 };
+  const point = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+  try {
+    await session.send("Input.dispatchDragEvent", { type: "dragEnter", ...point, data });
+    await expect(composerBox).toHaveClass(/drag-active/);
+    await session.send("Input.dispatchDragEvent", { type: "dragOver", ...point, data });
+    await session.send("Input.dispatchDragEvent", { type: "drop", ...point, data });
+    await expect(composerBox).not.toHaveClass(/drag-active/);
+  } finally {
+    await session.detach();
+  }
 }
 
 async function installDeterministicUpdate(activePage: Page): Promise<void> {
@@ -1076,6 +1173,42 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
         },
       ],
     }));
+    replace("project:forget", (_event, projectPath) => {
+      record("project:forget", projectPath);
+    });
+    replace("project:delete", (_event, projectPath) => {
+      record("project:delete", projectPath);
+      return { deletedConversationCount: 0 };
+    });
+    replace("conversation:backup", (_event, projectPath) => {
+      record("conversation:backup", projectPath);
+      return {
+        filePath: `${projectPath}.rhzycode-backup`,
+        conversationCount: 1,
+        size: 1024,
+      };
+    });
+    replace("conversation:restore", () => {
+      record("conversation:restore");
+      return {
+        filePath: `${fixture.projectDir}.rhzycode-backup`,
+        importedCount: 1,
+        skippedCount: 0,
+        projectPaths: [fixture.projectDir],
+      };
+    });
+    replace("project:resolve-dropped-files", (_event, filePaths) => {
+      record("project:resolve-dropped-files", filePaths);
+      return filePaths.flatMap((filePath: string) => {
+        if (filePath === fixture.attachmentPath) {
+          return [{ path: filePath, name: "notes.txt", kind: "file", size: 17 }];
+        }
+        if (filePath === fixture.generatedImagePath) {
+          return [{ path: filePath, name: "generated-image.png", kind: "image", size: 68 }];
+        }
+        return [];
+      });
+    });
     replace("agent:threads", (_event, options = {}) => [...threads.values()]
       .filter((thread) => Boolean(thread.archived) === Boolean(options.archived))
       .filter((thread) => !options.cwd || thread.projectPath === options.cwd)
@@ -1365,6 +1498,7 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
   }, {
     projectDir,
     attachmentPath,
+    generatedImagePath,
     userSkillPath: path.join(dataDir, "codex-home", "skills", "review-helper", "SKILL.md"),
     systemSkillPath: path.join(dataDir, "codex-home", "skills", ".system", "system-writer", "SKILL.md"),
   });

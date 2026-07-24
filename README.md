@@ -6,8 +6,8 @@ RHZYCODE 是一个以桌面端为本地 Agent Host、以移动客户端为远程
 
 | 客户端 | 版本 | 发布产物 |
 | --- | --- | --- |
-| Windows Desktop | `0.1.9` | NSIS x64 安装程序 |
-| Android | `0.1.12`（versionCode `13`） | APK |
+| Windows Desktop | `0.1.10` | NSIS x64 安装程序 |
+| Android | `0.1.13`（versionCode `14`） | APK |
 | macOS Desktop | 未发布 | DMG + ZIP 构建入口已就绪 |
 | iOS | 未发布 | Xcode Archive / App Store 构建入口已就绪 |
 

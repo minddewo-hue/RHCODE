@@ -181,6 +181,27 @@ function registerIpc(
   ipcMain.handle("agent:thread:delete", (_event, threadId: unknown) =>
     activeRuntime.deleteThread(validateIdentifier(threadId, "threadId")),
   );
+  ipcMain.handle("conversation:backup", async (_event, projectPath: unknown) => {
+    const validatedProjectPath = validateProjectPath(projectPath);
+    const projectName = basename(validatedProjectPath).replace(/[^a-zA-Z0-9._-]+/g, "-") || "project";
+    const date = new Date().toISOString().slice(0, 10);
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      title: "Back up project conversations",
+      defaultPath: join(app.getPath("documents"), `${projectName}-conversations-${date}.rhzycode-backup`),
+      filters: [{ name: "RHZYCODE conversation backup", extensions: ["rhzycode-backup"] }],
+    });
+    if (result.canceled || !result.filePath) return null;
+    return activeRuntime.backupProjectConversations(validatedProjectPath, result.filePath);
+  });
+  ipcMain.handle("conversation:restore", async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: "Restore project conversations",
+      properties: ["openFile"],
+      filters: [{ name: "RHZYCODE conversation backup", extensions: ["rhzycode-backup"] }],
+    });
+    if (result.canceled || !result.filePaths[0]) return null;
+    return activeRuntime.restoreProjectConversations(validateLocalFilePath(result.filePaths[0]));
+  });
   ipcMain.handle("agent:turn:start", (_event, params: unknown) =>
     activeRuntime.startTurn(validateStartTurn(params)),
   );
@@ -348,26 +369,23 @@ function registerIpc(
     activeRuntime.rememberProjectDirectory(validateProjectPath(projectPath)));
   ipcMain.handle("project:forget", (_event, projectPath: unknown) =>
     activeRuntime.forgetProjectDirectory(validateProjectPath(projectPath)));
+  ipcMain.handle("project:delete", (_event, projectPath: unknown) =>
+    activeRuntime.deleteProjectDirectory(validateProjectPath(projectPath)));
   ipcMain.handle("project:choose-files", async () => {
     const result = await dialog.showOpenDialog(mainWindow!, {
       properties: ["openFile", "multiSelections"],
       title: "Choose files or images",
     });
     if (result.canceled) return [];
-    return result.filePaths.flatMap((filePath): ComposerAttachment[] => {
-      try {
-        const stat = fs.statSync(filePath);
-        if (!stat.isFile()) return [];
-        return [{
-          path: filePath,
-          name: filePath.split(/[\\/]/).at(-1) || filePath,
-          kind: isImagePath(filePath) ? "image" : "file",
-          size: stat.size,
-        }];
-      } catch {
-        return [];
-      }
+    return attachmentsFromFilePaths(result.filePaths);
+  });
+  ipcMain.handle("project:resolve-dropped-files", (_event, value: unknown) => {
+    if (!Array.isArray(value) || value.length > 20) throw new Error("Dropped files are invalid.");
+    const filePaths = value.map((entry) => {
+      if (typeof entry !== "string" || !isAbsolute(entry)) throw new Error("Dropped file path is invalid.");
+      return entry;
     });
+    return attachmentsFromFilePaths(filePaths);
   });
   ipcMain.handle("project:save-pasted-image", (_event, input: unknown) =>
     savePastedImage(pastedImageDirectory(), input));
@@ -444,6 +462,23 @@ async function chooseProjectDirectory(): Promise<string | null> {
 function isImagePath(filePath: string): boolean {
   return new Set([".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"])
     .has(extname(filePath).toLowerCase());
+}
+
+function attachmentsFromFilePaths(filePaths: string[]): ComposerAttachment[] {
+  return filePaths.flatMap((filePath): ComposerAttachment[] => {
+    try {
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile()) return [];
+      return [{
+        path: filePath,
+        name: basename(filePath),
+        kind: isImagePath(filePath) ? "image" : "file",
+        size: stat.size,
+      }];
+    } catch {
+      return [];
+    }
+  });
 }
 
 function validateLocalFilePath(value: unknown): string {

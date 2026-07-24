@@ -41,7 +41,7 @@ function createRuntimeHarness(codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 
   internals.loadedThreadIds.add("thread-1");
   store.onEvent((event) => internals.handleSyncEvent(event));
   runtime.agent.respond = (id, result) => responses.push({ id, result });
-  return { runtime, internals, store, responses };
+  return { runtime, internals, store, responses, codexHome };
 }
 
 function remoteContext(): RemoteCommandContext {
@@ -295,7 +295,7 @@ test("deletes a local empty thread whose rollout file has no metadata yet", asyn
   assert.equal(store.snapshot().threads.some((thread) => thread.id === emptyThread.id), false);
 });
 
-test("preserves a local empty thread when App Server deletion fails", async () => {
+test("permanently removes a local thread when only App Server index cleanup fails", async () => {
   const { runtime, internals, store } = createRuntimeHarness();
   const emptyThread: ThreadSummary = {
     id: "thread-empty",
@@ -312,10 +312,136 @@ test("preserves a local empty thread when App Server deletion fails", async () =
     throw new Error("App Server unavailable");
   };
 
-  await assert.rejects(() => runtime.deleteThread(emptyThread.id), /App Server unavailable/);
+  await runtime.deleteThread(emptyThread.id);
 
-  assert.equal(internals.threads.has(emptyThread.id), true);
-  assert.equal(store.snapshot().threads.some((thread) => thread.id === emptyThread.id), true);
+  assert.equal(internals.threads.has(emptyThread.id), false);
+  assert.equal(store.snapshot().threads.some((thread) => thread.id === emptyThread.id), false);
+});
+
+test("permanently deletes a thread rollout from disk", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-thread-delete-"));
+  const codexHome = path.join(root, "home");
+  const { runtime } = createRuntimeHarness(codexHome);
+  const rolloutPath = path.join(codexHome, "sessions", "rollout-thread-1.jsonl");
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+  fs.writeFileSync(rolloutPath, `${JSON.stringify({
+    type: "session_meta",
+    payload: { id: "thread-1", cwd: path.resolve(".") },
+  })}\n`, "utf8");
+  runtime.agent.request = async () => ({} as never);
+
+  await runtime.deleteThread("thread-1");
+
+  assert.equal(fs.existsSync(rolloutPath), false);
+});
+
+test("permanently deletes every project conversation but keeps source files", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-project-delete-"));
+  const codexHome = path.join(root, "home");
+  const projectPath = path.join(root, "project");
+  const sourceFile = path.join(projectPath, "keep.txt");
+  const activeRollout = path.join(codexHome, "sessions", "rollout-thread-1.jsonl");
+  const archivedRollout = path.join(codexHome, "archived_sessions", "rollout-thread-archived.jsonl");
+  const { runtime, internals, store } = createRuntimeHarness(codexHome);
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(projectPath, { recursive: true });
+  fs.writeFileSync(sourceFile, "keep", "utf8");
+  for (const [filePath, id] of [[activeRollout, "thread-1"], [archivedRollout, "thread-archived"]]) {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, `${JSON.stringify({
+      type: "session_meta",
+      payload: { id, cwd: projectPath },
+    })}\n`, "utf8");
+  }
+  const projectThread = {
+    ...internals.threads.get("thread-1")!,
+    projectPath,
+    status: "running" as const,
+  };
+  internals.threads.set(projectThread.id, projectThread);
+  store.upsertThread(projectThread);
+  runtime.rememberProjectDirectory(projectPath);
+  const deletedThreadIds: string[] = [];
+  runtime.agent.request = async (method, params) => {
+    assert.equal(method, "thread/delete");
+    deletedThreadIds.push(String((params as { threadId?: string }).threadId));
+    return {} as never;
+  };
+
+  const result = await runtime.deleteProjectDirectory(projectPath);
+
+  assert.equal(result.deletedConversationCount, 2);
+  assert.deepEqual(new Set(deletedThreadIds), new Set(["thread-1", "thread-archived"]));
+  assert.equal(fs.existsSync(activeRollout), false);
+  assert.equal(fs.existsSync(archivedRollout), false);
+  assert.equal(fs.readFileSync(sourceFile, "utf8"), "keep");
+  assert.equal(runtime.listProjectDirectories().some((project) => project.path === projectPath), false);
+  assert.equal(store.snapshot().threads.some((thread) => thread.projectPath === projectPath), false);
+});
+
+test("finishes project deletion when App Server has lost its thread index", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-project-delete-index-"));
+  const codexHome = path.join(root, "home");
+  const projectPath = path.join(root, "project");
+  const rolloutPath = path.join(codexHome, "sessions", "rollout-index-missing.jsonl");
+  const { runtime, internals, store } = createRuntimeHarness(codexHome);
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(projectPath, { recursive: true });
+  fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+  fs.writeFileSync(rolloutPath, `${JSON.stringify({
+    type: "session_meta",
+    payload: { id: "index-missing", cwd: projectPath },
+  })}\n`, "utf8");
+  internals.threads.delete("thread-1");
+  store.removeThread("thread-1");
+  runtime.rememberProjectDirectory(projectPath);
+  runtime.agent.request = async () => {
+    throw new Error("thread not found in state database");
+  };
+
+  const result = await runtime.deleteProjectDirectory(projectPath);
+
+  assert.equal(result.deletedConversationCount, 1);
+  assert.equal(fs.existsSync(rolloutPath), false);
+  assert.equal(runtime.listProjectDirectories().some((project) => project.path === projectPath), false);
+});
+
+test("lists restored disk conversations when App Server index is empty", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-restored-list-"));
+  const codexHome = path.join(root, "home");
+  const projectPath = path.join(root, "project");
+  const rolloutPath = path.join(codexHome, "sessions", "2026", "07", "24", "rollout-restored-thread.jsonl");
+  const { runtime, internals, store } = createRuntimeHarness(codexHome);
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(projectPath, { recursive: true });
+  fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+  fs.writeFileSync(rolloutPath, [
+    JSON.stringify({
+      timestamp: "2026-07-24T08:00:00.000Z",
+      type: "session_meta",
+      payload: { id: "restored-thread", cwd: projectPath },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-24T08:00:01.000Z",
+      type: "response_item",
+      payload: { type: "message", role: "user", text: "Restore this project conversation" },
+    }),
+    "",
+  ].join("\n"), "utf8");
+  internals.threads.delete("thread-1");
+  store.removeThread("thread-1");
+  runtime.agent.request = async (method) => method === "thread/list"
+    ? { data: [] } as never
+    : {} as never;
+
+  const threads = await runtime.listThreads({ cwd: projectPath });
+
+  assert.equal(threads.length, 1);
+  assert.equal(threads[0]?.id, "restored-thread");
+  assert.equal(threads[0]?.title, "Restore this project conversation");
+  assert.equal(store.snapshot().threads[0]?.id, "restored-thread");
+  assert.equal(runtime.listProjectDirectories().some((project) => project.path === projectPath), true);
 });
 
 test("restores local images as message previews instead of placeholder text", async () => {

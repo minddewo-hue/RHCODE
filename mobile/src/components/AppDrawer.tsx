@@ -3,8 +3,6 @@ import type { ThreadSummary } from "@rhzycode/protocol";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Animated,
-  Easing,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
@@ -21,7 +19,7 @@ import { buildControlUrl } from "../auth/control-access";
 import type { ConnectionStatus, ControlPlaneConnectionState } from "../hooks/use-control-plane";
 import type { MobileSession } from "../storage/secure-session";
 import { colors } from "../ui/theme";
-import { registeredProjectPaths } from "../state/project-list";
+import { filterThreadsInOrder, groupThreadsByProject, isSameProjectPath, projectPathKey, registeredProjectPaths } from "../state/project-list";
 import type { MobileUpdateStatus } from "../platform/update/mobile-update";
 
 export type DrawerPage = "threads" | "archived" | "computers" | "connection" | "settings";
@@ -95,34 +93,61 @@ export function AppDrawer(props: AppDrawerProps) {
 
 function ThreadList(props: AppDrawerProps) {
   const [searching, setSearching] = useState(false);
-  const [projectMenuVisible, setProjectMenuVisible] = useState(false);
+  const [collapsedProjectKeys, setCollapsedProjectKeys] = useState<Set<string>>(() => new Set());
+  const projectLongPressHandledRef = useRef(false);
   const projects = useMemo(
     () => registeredProjectPaths(props.projectPaths),
     [props.projectPaths],
   );
-  const visibleThreads = useMemo(
-    () => searching || !props.selectedProjectPath
-      ? props.threads
-      : props.threads.filter((thread) => thread.projectPath === props.selectedProjectPath),
-    [props.selectedProjectPath, props.threads, searching],
-  );
-  const filtered = useMemo(
-    () => filterThreads(visibleThreads, searching ? props.search : ""),
-    [props.search, searching, visibleThreads],
+  const projectGroups = useMemo(
+    () => groupThreadsByProject(projects, props.threads, searching ? props.search : ""),
+    [projects, props.search, props.threads, searching],
   );
 
   useEffect(() => {
     if (props.visible) return;
     setSearching(false);
-    setProjectMenuVisible(false);
     props.onSearchChange("");
   }, [props.onSearchChange, props.visible]);
+
+  useEffect(() => {
+    if (!props.selectedProjectPath) return;
+    const selectedKey = projectPathKey(props.selectedProjectPath);
+    setCollapsedProjectKeys((current) => {
+      if (!current.has(selectedKey)) return current;
+      const next = new Set(current);
+      next.delete(selectedKey);
+      return next;
+    });
+  }, [props.selectedProjectPath]);
 
   const closeSearch = () => {
     props.onSearchChange("");
     setSearching(false);
     Keyboard.dismiss();
   };
+
+  const selectAndToggleProject = (projectPath: string) => {
+    const key = projectPathKey(projectPath);
+    if (!props.selectedProjectPath || !isSameProjectPath(props.selectedProjectPath, projectPath)) {
+      props.onSelectProject(projectPath);
+      setCollapsedProjectKeys((current) => {
+        if (!current.has(key)) return current;
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+      return;
+    }
+    setCollapsedProjectKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const projectActionsDisabled = !props.canManageThreads || props.connectionStatus !== "online";
 
   return (
     <View style={styles.page}>
@@ -151,110 +176,101 @@ function ThreadList(props: AppDrawerProps) {
           <DrawerIcon
             accessibilityLabel="搜索对话"
             icon="search"
-            onPress={() => {
-              setProjectMenuVisible(false);
-              setSearching(true);
-            }}
+            onPress={() => setSearching(true)}
           />
         </View>
-      )}
-
-      {!searching && (
-        <>
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => setProjectMenuVisible((current) => !current)}
-            style={({ pressed }) => [styles.projectSwitcher, pressed && styles.projectSwitcherPressed]}
-          >
-            <View style={styles.projectIcon}>
-              <Feather color={colors.accent} name="folder" size={16} />
-            </View>
-            <View style={styles.projectSwitcherText}>
-              <Text numberOfLines={1} style={styles.projectName}>
-                {props.selectedProjectPath ? projectName(props.selectedProjectPath) : "所有项目"}
-              </Text>
-              <Text numberOfLines={1} style={styles.projectPath}>
-                {props.selectedProjectPath || `${projects.length} 个项目`}
-              </Text>
-            </View>
-            <Feather color={colors.inkMuted} name={projectMenuVisible ? "chevron-up" : "chevron-down"} size={16} />
-          </Pressable>
-          {projectMenuVisible && (
-            <View style={[styles.projectMenu, { height: Math.min((projects.length + 2) * 42, 224) }]}>
-              <ScrollView nestedScrollEnabled>
-              <Pressable
-                accessibilityLabel="选择项目"
-                accessibilityRole="button"
-                onPress={() => {
-                  setProjectMenuVisible(false);
-                  props.onOpenProjects();
-                }}
-                style={({ pressed }) => [styles.projectOption, styles.projectActionOption, pressed && styles.navRowPressed]}
-              >
-                <Feather color={colors.inkMuted} name="folder-plus" size={15} />
-                <Text numberOfLines={1} style={styles.projectOptionText}>选择项目</Text>
-                <Feather color={colors.inkFaint} name="chevron-right" size={15} />
-              </Pressable>
-              <ProjectOption
-                label="所有项目"
-                selected={!props.selectedProjectPath}
-                onPress={() => {
-                  props.onSelectProject(null);
-                  setProjectMenuVisible(false);
-                }}
-              />
-              {projects.map((path) => (
-                <ProjectOption
-                  key={path}
-                  label={projectName(path)}
-                  onRemove={props.canManageThreads && props.connectionStatus === "online"
-                    ? () => props.onRemoveProject(path)
-                    : undefined}
-                  selected={props.selectedProjectPath === path}
-                  onPress={() => {
-                    props.onSelectProject(path);
-                    setProjectMenuVisible(false);
-                  }}
-                />
-              ))}
-              </ScrollView>
-            </View>
-          )}
-        </>
       )}
 
       <ScrollView style={styles.threadScroll} contentContainerStyle={styles.threadList} keyboardShouldPersistTaps="handled">
-        <View style={styles.threadSectionHeader}>
-          <Text style={[styles.sectionLabel, styles.threadSectionLabel]}>{searching ? "搜索结果" : "对话"}</Text>
+        <View style={styles.projectSectionHeader}>
+          <View style={styles.projectSectionTitleWrap}>
+            <Text style={styles.projectSectionTitle}>{searching ? "搜索结果" : "项目"}</Text>
+            <View style={styles.projectSectionCount}><Text style={styles.projectSectionCountText}>{projectGroups.length}</Text></View>
+          </View>
           {!searching && (
-            <Pressable
-              accessibilityLabel="新建对话"
-              accessibilityRole="button"
-              disabled={!props.canManageThreads || props.connectionStatus !== "online"}
-              hitSlop={8}
-              onPress={props.onNewThread}
-              style={({ pressed }) => [
-                styles.newThreadButton,
-                (!props.canManageThreads || props.connectionStatus !== "online") && styles.disabled,
-                pressed && styles.morePressed,
-              ]}
-            >
-              <Ionicons color={colors.ink} name="add" size={20} />
-            </Pressable>
+            <View style={styles.projectSectionActions}>
+              <Pressable
+                accessibilityLabel="添加项目"
+                disabled={projectActionsDisabled}
+                hitSlop={6}
+                onPress={props.onOpenProjects}
+                style={({ pressed }) => [styles.projectSectionAction, projectActionsDisabled && styles.disabled, pressed && styles.morePressed]}
+              >
+                <Feather color={colors.ink} name="folder-plus" size={17} />
+              </Pressable>
+              <Pressable
+                accessibilityLabel="新建对话"
+                disabled={projectActionsDisabled}
+                hitSlop={6}
+                onPress={props.onNewThread}
+                style={({ pressed }) => [styles.projectSectionAction, projectActionsDisabled && styles.disabled, pressed && styles.morePressed]}
+              >
+                <Ionicons color={colors.ink} name="add" size={20} />
+              </Pressable>
+            </View>
           )}
         </View>
-        {filtered.length === 0 ? (
-          <Text style={styles.emptyLabel}>{searching && props.search ? "没有匹配的对话" : "还没有对话"}</Text>
-        ) : filtered.map((thread) => (
-          <ThreadRow
-            canManage={props.canManageThreads}
-            current={thread.id === props.selectedThreadId}
-            key={thread.id}
-            onActions={() => props.onThreadActions(thread, false)}
-            onPress={() => props.onSelectThread(thread)}
-            thread={thread}
-          />
-        ))}
+        {projectGroups.length === 0 ? (
+          <Text style={styles.emptyLabel}>{searching && props.search ? "没有匹配的项目或对话" : "还没有项目"}</Text>
+        ) : projectGroups.map((group) => {
+          const selected = !!props.selectedProjectPath && isSameProjectPath(props.selectedProjectPath, group.path);
+          const collapsed = collapsedProjectKeys.has(group.key) && !searching;
+          return (
+            <View key={group.key} style={styles.projectGroup}>
+              <View style={[styles.projectGroupHeader, selected && styles.projectGroupHeaderSelected]}>
+                <Pressable
+                  accessibilityActions={projectActionsDisabled ? undefined : [{ name: "longpress", label: `移除项目 ${projectName(group.path)}` }]}
+                  accessibilityLabel={`${collapsed ? "展开" : "折叠"}项目 ${projectName(group.path)}${projectActionsDisabled ? "" : "，长按移除"}`}
+                  accessibilityRole="button"
+                  accessibilityState={{ expanded: !collapsed, selected }}
+                  delayLongPress={600}
+                  onAccessibilityAction={(event) => {
+                    if (event.nativeEvent.actionName === "longpress" && !projectActionsDisabled) {
+                      props.onRemoveProject(group.path);
+                    }
+                  }}
+                  onLongPress={projectActionsDisabled ? undefined : () => {
+                    projectLongPressHandledRef.current = true;
+                    props.onRemoveProject(group.path);
+                  }}
+                  onPress={() => {
+                    if (projectLongPressHandledRef.current) return;
+                    selectAndToggleProject(group.path);
+                  }}
+                  onPressIn={() => {
+                    projectLongPressHandledRef.current = false;
+                  }}
+                  style={({ pressed }) => [styles.projectGroupMain, pressed && (selected ? styles.projectGroupMainSelectedPressed : styles.projectGroupMainPressed)]}
+                >
+                  <View style={styles.projectGroupText}>
+                    <Text numberOfLines={1} style={[styles.projectGroupName, selected && styles.projectGroupNameSelected]}>{projectName(group.path)}</Text>
+                    <Text numberOfLines={1} style={[styles.projectGroupPath, selected && styles.projectGroupPathSelected]}>{group.path}</Text>
+                  </View>
+                  <View style={[styles.projectCount, selected && styles.projectCountSelected]}>
+                    <Text style={[styles.projectCountText, selected && styles.projectCountTextSelected]}>{group.threads.length}</Text>
+                  </View>
+                  <Feather color={selected ? "#dbe9df" : colors.inkMuted} name={collapsed ? "chevron-right" : "chevron-down"} size={16} />
+                </Pressable>
+              </View>
+              {!collapsed && (
+                <View style={styles.projectThreads}>
+                  {group.threads.length === 0 ? (
+                    <Text style={styles.projectEmpty}>暂无对话</Text>
+                  ) : group.threads.map((thread) => (
+                    <ThreadRow
+                      canManage={props.canManageThreads}
+                      current={thread.id === props.selectedThreadId}
+                      key={thread.id}
+                      onActions={() => props.onThreadActions(thread, false)}
+                      onPress={() => props.onSelectThread(thread)}
+                      thread={thread}
+                    />
+                  ))}
+                </View>
+              )}
+            </View>
+          );
+        })}
       </ScrollView>
 
       <View style={styles.drawerNav}>
@@ -306,7 +322,7 @@ function DrawerSubpage(props: AppDrawerProps) {
 }
 
 function ArchivedPage(props: AppDrawerProps) {
-  const filtered = useMemo(() => filterThreads(props.archivedThreads, ""), [props.archivedThreads]);
+  const filtered = useMemo(() => filterThreadsInOrder(props.archivedThreads, ""), [props.archivedThreads]);
   return (
     <>
       <View style={styles.archiveHeading}>
@@ -528,10 +544,6 @@ function ThreadRow({
     >
       <View style={styles.threadText}>
         <Text numberOfLines={1} style={[styles.threadTitle, current && styles.threadTitleCurrent]}>{thread.title}</Text>
-        <View style={styles.threadMetaRow}>
-          <ThreadStatusDot status={thread.status} />
-          <Text numberOfLines={1} style={styles.threadMeta}>{threadStatus(thread.status)} · {relativeTime(thread.updatedAt)}</Text>
-        </View>
       </View>
       {canManage && (
         <Pressable
@@ -547,53 +559,6 @@ function ThreadRow({
         </Pressable>
       )}
     </Pressable>
-  );
-}
-
-function ThreadStatusDot({ status }: { status: ThreadSummary["status"] }) {
-  const pulse = useRef(new Animated.Value(0)).current;
-  const running = status === "running";
-
-  useEffect(() => {
-    if (!running) {
-      pulse.setValue(0);
-      return undefined;
-    }
-
-    const animation = Animated.loop(Animated.timing(pulse, {
-      toValue: 1,
-      duration: 1_100,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }));
-    animation.start();
-    return () => animation.stop();
-  }, [pulse, running]);
-
-  return (
-    <View style={styles.threadStatusIndicator}>
-      {running && (
-        <Animated.View
-          style={[
-            styles.threadStatusPulse,
-            {
-              opacity: pulse.interpolate({ inputRange: [0, 0.55, 1], outputRange: [0.72, 0.2, 0] }),
-              transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 2.8] }) }],
-            },
-          ]}
-        />
-      )}
-      <Animated.View
-        style={[
-          styles.threadStatusDot,
-          threadDot(status),
-          running ? {
-            opacity: pulse.interpolate({ inputRange: [0, 0.5, 1], outputRange: [1, 0.72, 1] }),
-            transform: [{ scale: pulse.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.9, 1.25, 0.9] }) }],
-          } : undefined,
-        ]}
-      />
-    </View>
   );
 }
 
@@ -632,43 +597,6 @@ function ComputerConnectionRow({
   );
 }
 
-function ProjectOption({
-  label,
-  selected,
-  onPress,
-  onRemove,
-}: {
-  label: string;
-  selected: boolean;
-  onPress: () => void;
-  onRemove?: () => void;
-}) {
-  return (
-    <View style={[styles.projectOption, selected && styles.projectOptionSelected]}>
-      <Pressable
-        accessibilityRole="radio"
-        accessibilityState={{ selected }}
-        onPress={onPress}
-        style={({ pressed }) => [styles.projectOptionSelect, pressed && styles.navRowPressed]}
-      >
-        <Feather color={selected ? colors.accent : colors.inkMuted} name="folder" size={15} />
-        <Text numberOfLines={1} style={[styles.projectOptionText, selected && styles.projectOptionTextSelected]}>{label}</Text>
-        {selected && <Feather color={colors.accent} name="check" size={15} />}
-      </Pressable>
-      {onRemove && (
-        <Pressable
-          accessibilityLabel={`移除项目 ${label}`}
-          hitSlop={6}
-          onPress={onRemove}
-          style={({ pressed }) => [styles.projectRemove, pressed && styles.morePressed]}
-        >
-          <Feather color={colors.danger} name="x" size={15} />
-        </Pressable>
-      )}
-    </View>
-  );
-}
-
 function NavRow({ icon, label, trailing, onPress }: { icon: React.ComponentProps<typeof Feather>["name"]; label: string; trailing?: string; onPress: () => void }) {
   return (
     <Pressable onPress={onPress} style={({ pressed }) => [styles.navRow, pressed && styles.navRowPressed]}>
@@ -697,26 +625,8 @@ function InlineMessage({ message, tone }: { message: string; tone: "error" | "su
   );
 }
 
-function filterThreads(threads: ThreadSummary[], search: string): ThreadSummary[] {
-  const term = search.trim().toLocaleLowerCase();
-  return [...threads]
-    .filter((thread) => !term || `${thread.title} ${thread.projectPath}`.toLocaleLowerCase().includes(term))
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-}
-
 function projectName(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).at(-1) || path;
-}
-
-function relativeTime(value: string): string {
-  const elapsed = Math.max(0, Date.now() - new Date(value).getTime());
-  const minutes = Math.floor(elapsed / 60_000);
-  if (minutes < 1) return "刚刚";
-  if (minutes < 60) return `${minutes} 分钟前`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  const days = Math.floor(hours / 24);
-  return days < 7 ? `${days} 天前` : new Date(value).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
 }
 
 function connectionDot(status: ConnectionStatus) {
@@ -755,25 +665,6 @@ function connectionLabel(status: ConnectionStatus): string {
   }[status];
 }
 
-function threadDot(status: ThreadSummary["status"]) {
-  if (status === "running") return { backgroundColor: colors.accent };
-  if (status === "waiting_for_approval" || status === "waiting_for_input") return { backgroundColor: colors.warning };
-  if (status === "failed") return { backgroundColor: colors.danger };
-  return { backgroundColor: colors.inkFaint };
-}
-
-function threadStatus(status: ThreadSummary["status"]): string {
-  return {
-    idle: "空闲",
-    running: "运行中",
-    waiting_for_approval: "等待审批",
-    waiting_for_input: "等待回答",
-    completed: "已完成",
-    failed: "失败",
-    interrupted: "已停止",
-  }[status];
-}
-
 const styles = StyleSheet.create({
   modalRoot: { flex: 1, flexDirection: "row", backgroundColor: colors.overlay },
   panel: { width: "86%", maxWidth: 380, backgroundColor: colors.sidebar, shadowColor: "#000", shadowOffset: { width: 4, height: 0 }, shadowOpacity: 0.12, shadowRadius: 14, elevation: 14 },
@@ -785,38 +676,40 @@ const styles = StyleSheet.create({
   drawerIcon: { width: 38, height: 38, borderRadius: 6, alignItems: "center", justifyContent: "center" },
   searchHeader: { height: 46, marginHorizontal: 10, marginVertical: 6, paddingHorizontal: 2, borderWidth: 1, borderColor: colors.border, borderRadius: 8, flexDirection: "row", alignItems: "center", backgroundColor: colors.surface },
   headerSearchInput: { flex: 1, minWidth: 0, height: 42, paddingHorizontal: 6, color: colors.ink, fontSize: 14, letterSpacing: 0 },
-  projectSwitcher: { minHeight: 48, marginHorizontal: 12, marginTop: 4, paddingHorizontal: 10, borderRadius: 7, flexDirection: "row", alignItems: "center", backgroundColor: colors.surface },
-  projectSwitcherPressed: { backgroundColor: colors.pressed },
-  projectIcon: { width: 30, height: 30, borderRadius: 6, alignItems: "center", justifyContent: "center", backgroundColor: colors.accentSoft, marginRight: 9 },
-  projectSwitcherText: { flex: 1, minWidth: 0, paddingVertical: 6 },
-  projectName: { color: colors.ink, fontSize: 13, lineHeight: 18, fontWeight: "600", letterSpacing: 0 },
-  projectPath: { color: colors.inkMuted, fontSize: 10, lineHeight: 14, marginTop: 1, letterSpacing: 0 },
-  projectMenu: { maxHeight: 224, marginHorizontal: 12, marginTop: 5, borderWidth: 1, borderColor: colors.border, borderRadius: 7, backgroundColor: colors.surface },
-  projectOption: { height: 42, flexDirection: "row", alignItems: "center" },
-  projectOptionSelect: { minWidth: 0, flex: 1, height: 42, paddingLeft: 10, paddingRight: 8, flexDirection: "row", alignItems: "center", gap: 9 },
-  projectRemove: { width: 38, height: 38, marginRight: 2, borderRadius: 5, alignItems: "center", justifyContent: "center" },
-  projectActionOption: { paddingHorizontal: 10, gap: 9, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
-  projectOptionSelected: { backgroundColor: colors.accentSoft },
-  projectOptionText: { flex: 1, color: colors.ink, fontSize: 12, lineHeight: 17, letterSpacing: 0 },
-  projectOptionTextSelected: { color: colors.accent, fontWeight: "600" },
   threadScroll: { flex: 1 },
-  threadList: { paddingHorizontal: 8, paddingTop: 17, paddingBottom: 18 },
+  threadList: { paddingHorizontal: 8, paddingTop: 4, paddingBottom: 18 },
+  projectSectionHeader: { height: 40, paddingLeft: 7, paddingRight: 3, flexDirection: "row", alignItems: "center" },
+  projectSectionTitleWrap: { minWidth: 0, flex: 1, flexDirection: "row", alignItems: "center", gap: 7 },
+  projectSectionTitle: { color: colors.inkMuted, fontSize: 11, lineHeight: 15, fontWeight: "700", letterSpacing: 0 },
+  projectSectionCount: { minWidth: 19, height: 19, paddingHorizontal: 5, borderRadius: 10, alignItems: "center", justifyContent: "center", backgroundColor: "#e5e9e6" },
+  projectSectionCountText: { color: "#5f6962", fontSize: 9, lineHeight: 12, fontWeight: "700", letterSpacing: 0 },
+  projectSectionActions: { flexDirection: "row", alignItems: "center", gap: 2 },
+  projectSectionAction: { width: 34, height: 34, borderRadius: 6, alignItems: "center", justifyContent: "center" },
+  projectGroup: { marginBottom: 9 },
+  projectGroupHeader: { minHeight: 52, overflow: "hidden", borderWidth: 1, borderColor: "#dfe4e0", borderRadius: 7, flexDirection: "row", alignItems: "stretch", backgroundColor: "#f0f2f1" },
+  projectGroupHeaderSelected: { borderColor: "#365f49", backgroundColor: "#365f49" },
+  projectGroupMain: { minWidth: 0, flex: 1, minHeight: 50, paddingLeft: 12, paddingRight: 7, flexDirection: "row", alignItems: "center", gap: 8 },
+  projectGroupMainPressed: { backgroundColor: "#e8ece9" },
+  projectGroupMainSelectedPressed: { backgroundColor: "#315842" },
+  projectGroupText: { minWidth: 0, flex: 1, paddingVertical: 6 },
+  projectGroupName: { color: "#222a25", fontSize: 13, lineHeight: 18, fontWeight: "700", letterSpacing: 0 },
+  projectGroupNameSelected: { color: colors.inverse },
+  projectGroupPath: { marginTop: 1, color: "#79827c", fontSize: 10, lineHeight: 14, letterSpacing: 0 },
+  projectGroupPathSelected: { color: "#c8d8cd" },
+  projectCount: { minWidth: 23, height: 23, paddingHorizontal: 6, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface },
+  projectCountSelected: { backgroundColor: "rgba(255, 255, 255, 0.12)" },
+  projectCountText: { color: "#59645d", fontSize: 10, lineHeight: 13, fontWeight: "700", letterSpacing: 0 },
+  projectCountTextSelected: { color: colors.inverse },
+  projectThreads: { paddingTop: 4, paddingLeft: 12 },
+  projectEmpty: { minHeight: 40, paddingHorizontal: 10, paddingVertical: 10, color: colors.inkFaint, fontSize: 11, lineHeight: 16, letterSpacing: 0 },
   sectionLabel: { color: colors.inkMuted, fontSize: 11, lineHeight: 15, fontWeight: "600", letterSpacing: 0, marginHorizontal: 8, marginBottom: 7, textTransform: "uppercase" },
-  threadSectionHeader: { height: 30, marginHorizontal: 8, marginBottom: 3, flexDirection: "row", alignItems: "center" },
-  threadSectionLabel: { flex: 1, minWidth: 0, marginHorizontal: 0, marginBottom: 0 },
-  newThreadButton: { width: 30, height: 30, borderRadius: 6, alignItems: "center", justifyContent: "center" },
   emptyLabel: { color: colors.inkMuted, fontSize: 13, lineHeight: 19, paddingHorizontal: 8, paddingVertical: 12, letterSpacing: 0 },
-  threadRow: { minHeight: 56, borderRadius: 7, paddingLeft: 10, paddingRight: 5, paddingVertical: 8, flexDirection: "row", alignItems: "center" },
-  threadRowCurrent: { backgroundColor: "#e3e3df" },
+  threadRow: { minHeight: 44, borderRadius: 7, paddingLeft: 10, paddingRight: 5, paddingVertical: 5, flexDirection: "row", alignItems: "center" },
+  threadRowCurrent: { paddingLeft: 7, borderLeftWidth: 3, borderLeftColor: colors.accent, backgroundColor: "#e5eee8" },
   threadRowPressed: { backgroundColor: colors.pressed },
   threadText: { flex: 1, minWidth: 0 },
   threadTitle: { color: colors.ink, fontSize: 13, lineHeight: 18, fontWeight: "500", letterSpacing: 0 },
   threadTitleCurrent: { fontWeight: "600" },
-  threadMetaRow: { flexDirection: "row", alignItems: "center", marginTop: 4 },
-  threadStatusIndicator: { width: 13, height: 13, marginRight: 2, alignItems: "center", justifyContent: "center" },
-  threadStatusPulse: { position: "absolute", width: 5, height: 5, borderRadius: 3, backgroundColor: colors.accent },
-  threadStatusDot: { width: 5, height: 5, borderRadius: 3 },
-  threadMeta: { color: colors.inkMuted, fontSize: 10, lineHeight: 14, letterSpacing: 0 },
   moreButton: { width: 34, height: 34, borderRadius: 5, alignItems: "center", justifyContent: "center", marginLeft: 3 },
   morePressed: { backgroundColor: colors.pressed },
   drawerNav: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border, paddingHorizontal: 8, paddingTop: 4 },

@@ -6,10 +6,10 @@ import {
   Brain,
   Check,
   ChevronDown,
+  ChevronRight,
   CircleStop,
   Copy,
   Download,
-  FolderGit2,
   File,
   FolderOpen,
   GitBranch,
@@ -33,7 +33,9 @@ import {
   Smartphone,
   Settings,
   Square,
+  SquareCode,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import type {
@@ -63,7 +65,7 @@ import type {
   SyncStatus,
   UpdateStatus,
 } from "../../shared/desktop-api";
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent } from "react";
 import {
   activityFromTimeline,
   activityLabel,
@@ -75,13 +77,16 @@ import {
   formatFileSize,
   getErrorMessage,
   groupModelsBySource,
+  groupThreadsByProject,
   isActiveThreadStatus,
   isComposerRunning,
+  isSameProjectPath,
   modelReasoningEfforts,
   notificationThreadId,
   providerDisplayName,
   providerCredentialPresentation,
   storedApprovalPolicy,
+  storedForgottenProjects,
   storedLastProject,
   storedLastThread,
   storedRecentProjects,
@@ -170,8 +175,8 @@ export function App() {
   const [projectPath, setProjectPath] = useState(() => storedLastProject());
   const [threadId, setThreadId] = useState<string | null>(null);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
-  const [showArchivedThreads, setShowArchivedThreads] = useState(false);
   const [threadSearch, setThreadSearch] = useState("");
+  const [collapsedProjectPaths, setCollapsedProjectPaths] = useState<Set<string>>(() => new Set());
   const [threadActionsId, setThreadActionsId] = useState<string | null>(null);
   const [threadMenuPosition, setThreadMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
@@ -186,8 +191,9 @@ export function App() {
   const [resolvingUserInputId, setResolvingUserInputId] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [recentProjects, setRecentProjects] = useState<string[]>(() => storedRecentProjects());
-  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [forgottenProjectPaths, setForgottenProjectPaths] = useState<string[]>(() => storedForgottenProjects());
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [composerDragActive, setComposerDragActive] = useState(false);
   const [approvalPolicy, setApprovalPolicy] = useState<ApprovalPolicy>(() => storedApprovalPolicy());
   const [sandboxMode, setSandboxMode] = useState<SandboxMode>(() => storedSandboxMode());
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(() => storedReasoningEffort());
@@ -196,7 +202,6 @@ export function App() {
   const [activeThreadIds, setActiveThreadIds] = useState<Set<string>>(() => new Set());
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [rightView, setRightView] = useState<"activity" | "settings" | "skills">("activity");
-  const projectPickerRef = useRef<HTMLButtonElement | null>(null);
   const threadActionsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const conversationRef = useRef<HTMLElement | null>(null);
   const selectedModelRef = useRef(selectedModel);
@@ -205,12 +210,10 @@ export function App() {
   const loadedThreadIdRef = useRef<string | null>(null);
   const openingThreadIdRef = useRef<string | null>(null);
   const navigationRevisionRef = useRef(0);
-  const threadSearchRef = useRef(threadSearch);
-  const showArchivedThreadsRef = useRef(false);
   const followConversationRef = useRef(true);
   const lastPrompt = useRef("");
   const composerDraftsRef = useRef(new Map<string, ComposerDraft>());
-  const forgottenProjectPathsRef = useRef(new Set<string>());
+  const composerDragDepthRef = useRef(0);
 
   useEffect(() => {
     selectedModelRef.current = selectedModel;
@@ -227,14 +230,6 @@ export function App() {
   }, [projectPath, threadId]);
 
   useEffect(() => {
-    threadSearchRef.current = threadSearch;
-  }, [threadSearch]);
-
-  useEffect(() => {
-    showArchivedThreadsRef.current = showArchivedThreads;
-  }, [showArchivedThreads]);
-
-  useEffect(() => {
     const unsubscribers = [
       window.rhzycode.onAgentStatus(setAgentStatus),
       window.rhzycode.onGatewayStatus(setGatewayStatus),
@@ -244,7 +239,11 @@ export function App() {
       window.rhzycode.onUpdateStatus(setUpdateStatus),
       window.rhzycode.onMobileAccessStatus(setMobileAccessStatus),
       window.rhzycode.onProjectsChanged((projects) => {
-        const paths = projects.map((project) => project.path).slice(0, 50);
+        const forgotten = storedForgottenProjects();
+        const paths = projects
+          .map((project) => project.path)
+          .filter((path) => !forgotten.some((entry) => isSameProjectPath(entry, path)))
+          .slice(0, 50);
         setRecentProjects(paths);
         localStorage.setItem("rhzycode.recentProjects", JSON.stringify(paths));
       }),
@@ -267,7 +266,7 @@ export function App() {
       });
     }, 220);
     return () => window.clearTimeout(timeout);
-  }, [agentStatus.state, projectPath, showArchivedThreads, threadSearch]);
+  }, [agentStatus.state]);
 
   useEffect(() => {
     if (!followConversationRef.current) return;
@@ -279,7 +278,24 @@ export function App() {
   }, [messages]);
 
   useEffect(() => {
-    if (!projectMenuOpen && !threadActionsId) return;
+    const preventFileNavigation = (event: DragEvent) => {
+      if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
+      event.preventDefault();
+      if (event.type === "drop") {
+        composerDragDepthRef.current = 0;
+        setComposerDragActive(false);
+      }
+    };
+    window.addEventListener("dragover", preventFileNavigation);
+    window.addEventListener("drop", preventFileNavigation);
+    return () => {
+      window.removeEventListener("dragover", preventFileNavigation);
+      window.removeEventListener("drop", preventFileNavigation);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!threadActionsId) return;
 
     const closeThreadMenu = (restoreFocus: boolean) => {
       setThreadActionsId(null);
@@ -291,9 +307,6 @@ export function App() {
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      if (projectMenuOpen && !target.closest(".project-picker-wrap")) {
-        setProjectMenuOpen(false);
-      }
       if (threadActionsId && !target.closest(".thread-actions-menu, .thread-actions-toggle")) {
         closeThreadMenu(false);
       }
@@ -303,10 +316,6 @@ export function App() {
       if (threadActionsId) {
         event.preventDefault();
         closeThreadMenu(true);
-      } else if (projectMenuOpen) {
-        event.preventDefault();
-        setProjectMenuOpen(false);
-        window.requestAnimationFrame(() => projectPickerRef.current?.focus());
       }
     };
     const handleViewportChange = (event?: Event) => {
@@ -325,7 +334,7 @@ export function App() {
       document.removeEventListener("scroll", handleViewportChange, true);
       window.removeEventListener("resize", handleViewportChange);
     };
-  }, [projectMenuOpen, threadActionsId]);
+  }, [threadActionsId]);
 
   const activeModel = useMemo(
     () => models.find((model) => model.model === selectedModel),
@@ -335,6 +344,15 @@ export function App() {
     () => groupModelsBySource(models, credentialStatus.providers),
     [credentialStatus.providers, models],
   );
+  const projectGroups = useMemo(() => {
+    const isForgotten = (path: string) => forgottenProjectPaths.some((entry) => isSameProjectPath(entry, path));
+    return groupThreadsByProject(
+      recentProjects.filter((path) => !isForgotten(path)),
+      isForgotten(projectPath) ? "" : projectPath,
+      threads.filter((thread) => !isForgotten(thread.projectPath)),
+      threadSearch,
+    );
+  }, [forgottenProjectPaths, projectPath, recentProjects, threadSearch, threads]);
   const reasoningEfforts = useMemo(() => modelReasoningEfforts(activeModel), [activeModel]);
 
   useEffect(() => {
@@ -350,9 +368,7 @@ export function App() {
   function setWorkspaceProject(path: string): void {
     selectedProjectPathRef.current = path;
     setProjectPath(path);
-    if (path && !forgottenProjectPathsRef.current.has(path)) {
-      localStorage.setItem("rhzycode.lastProject", path);
-    }
+    if (path) localStorage.setItem("rhzycode.lastProject", path);
   }
 
   function setWorkspaceThread(id: string | null): void {
@@ -406,7 +422,7 @@ export function App() {
 
   function applyThreadDetail(detail: ThreadDetail, availableModels: ModelOption[] = models): void {
     const changedThread = selectedThreadIdRef.current !== detail.thread.id
-      || selectedProjectPathRef.current !== detail.thread.projectPath;
+      || !isSameProjectPath(selectedProjectPathRef.current, detail.thread.projectPath);
     if (changedThread) {
       saveComposerDraft();
       restoreComposerDraft(detail.thread.projectPath, detail.thread.id);
@@ -468,16 +484,19 @@ export function App() {
       setUpdateStatus(updates);
       setMobileAccessStatus(mobileAccess);
       setPersistenceStatus(persistence);
+      const forgottenProjects = storedForgottenProjects();
+      const isForgottenProject = (path: string) =>
+        forgottenProjects.some((entry) => isSameProjectPath(entry, path));
       const storedProjects = [...new Set([
         selectedProjectPathRef.current,
         ...storedRecentProjects(),
-      ].filter(Boolean))];
+      ].filter((path) => path && !isForgottenProject(path)))];
       const rememberedStoredProjects = (await Promise.allSettled(
         storedProjects.map((path) => window.rhzycode.rememberProject(path)),
       )).flatMap((result) => result.status === "fulfilled" ? [result.value.path] : []);
       const synchronizedProjects = [
-        ...projects.map((project) => project.path),
-        ...rememberedStoredProjects.filter((path) => !projects.some((project) => project.path === path)),
+        ...projects.map((project) => project.path).filter((path) => !isForgottenProject(path)),
+        ...rememberedStoredProjects.filter((path) => !projects.some((project) => isSameProjectPath(project.path, path))),
       ].slice(0, 50);
       setRecentProjects(synchronizedProjects);
       setApprovals(snapshot.approvals);
@@ -488,19 +507,19 @@ export function App() {
       if (status.state !== "connected") return;
       const refreshedProjects = await window.rhzycode.listProjects();
       const connectedProjects = [
-        ...refreshedProjects.map((project) => project.path),
+        ...refreshedProjects.map((project) => project.path).filter((path) => !isForgottenProject(path)),
         ...rememberedStoredProjects.filter((path) =>
-          !refreshedProjects.some((project) => project.path === path)),
+          !refreshedProjects.some((project) => isSameProjectPath(project.path, path))),
       ].slice(0, 50);
       setRecentProjects(connectedProjects);
-      const restoredProject = connectedProjects.includes(selectedProjectPathRef.current)
+      const restoredProject = connectedProjects.find((path) => isSameProjectPath(path, selectedProjectPathRef.current))
         ? selectedProjectPathRef.current
         : connectedProjects[0] || "";
       const revision = ++navigationRevisionRef.current;
       setWorkspaceProject(restoredProject);
       const [response, availableThreads] = await Promise.all([
         window.rhzycode.listModels(),
-        window.rhzycode.listThreads(restoredProject ? { cwd: restoredProject } : {}),
+        window.rhzycode.listThreads(),
       ]);
       const available = response.data || [];
       setModels(available);
@@ -517,8 +536,9 @@ export function App() {
       if (initialModel) localStorage.setItem("rhzycode.selectedModel", initialModel);
 
       const preferredThreadId = restoredProject ? storedLastThread(restoredProject) : null;
-      const preferredThread = availableThreads.find((thread) => thread.id === preferredThreadId)
-        || availableThreads[0];
+      const projectThreads = availableThreads.filter((thread) => isSameProjectPath(thread.projectPath, restoredProject));
+      const preferredThread = projectThreads.find((thread) => thread.id === preferredThreadId)
+        || projectThreads[0];
       if (preferredThread) await loadThreadDetail(preferredThread.id, revision, available);
       else if (revision === navigationRevisionRef.current) resetConversation();
     } catch (error) {
@@ -527,13 +547,7 @@ export function App() {
   }
 
   async function loadThreads(): Promise<void> {
-    const requestedProject = projectPath;
-    const availableThreads = await window.rhzycode.listThreads({
-      ...(requestedProject ? { cwd: requestedProject } : {}),
-      ...(threadSearch.trim() ? { searchTerm: threadSearch.trim() } : {}),
-      ...(showArchivedThreads ? { archived: true } : {}),
-    });
-    if (requestedProject === selectedProjectPathRef.current) setThreads(availableThreads);
+    setThreads(await window.rhzycode.listThreads());
   }
 
   async function chooseProject(): Promise<string | null> {
@@ -545,22 +559,19 @@ export function App() {
 
   async function selectProject(path: string): Promise<void> {
     const revision = ++navigationRevisionRef.current;
-    setProjectMenuOpen(false);
     saveComposerDraft();
     setWorkspaceProject(path);
     rememberProject(path);
     resetConversation();
     followConversationRef.current = true;
     try {
-      const availableThreads = await window.rhzycode.listThreads({
-        cwd: path,
-        ...(showArchivedThreadsRef.current ? { archived: true } : {}),
-      });
+      const availableThreads = await window.rhzycode.listThreads();
       if (revision !== navigationRevisionRef.current) return;
       setThreads(availableThreads);
       const preferredThreadId = storedLastThread(path);
-      const preferredThread = availableThreads.find((thread) => thread.id === preferredThreadId)
-        || availableThreads[0];
+      const projectThreads = availableThreads.filter((thread) => isSameProjectPath(thread.projectPath, path));
+      const preferredThread = projectThreads.find((thread) => thread.id === preferredThreadId)
+        || projectThreads[0];
       if (preferredThread) await loadThreadDetail(preferredThread.id, revision);
     } catch (error) {
       if (revision === navigationRevisionRef.current) {
@@ -570,34 +581,135 @@ export function App() {
   }
 
   function rememberProject(path: string) {
-    forgottenProjectPathsRef.current.delete(path);
-    if (selectedProjectPathRef.current === path) {
+    if (isSameProjectPath(selectedProjectPathRef.current, path)) {
       localStorage.setItem("rhzycode.lastProject", path);
     }
     setRecentProjects((current) => {
-      const next = [path, ...current.filter((entry) => entry !== path)].slice(0, 50);
+      const next = current.some((entry) => isSameProjectPath(entry, path)) ? current : [...current, path].slice(0, 50);
       localStorage.setItem("rhzycode.recentProjects", JSON.stringify(next));
+      return next;
+    });
+    setForgottenProjectPaths((current) => {
+      const next = current.filter((entry) => !isSameProjectPath(entry, path));
+      if (next.length === current.length) return current;
+      localStorage.setItem("rhzycode.forgottenProjects", JSON.stringify(next));
       return next;
     });
     void window.rhzycode.rememberProject(path).catch(() => undefined);
   }
 
-  function forgetProject(path: string) {
-    forgottenProjectPathsRef.current.add(path);
-    setRecentProjects((current) => {
-      const next = current.filter((entry) => entry !== path);
-      localStorage.setItem("rhzycode.recentProjects", JSON.stringify(next));
+  async function removeProject(path: string): Promise<void> {
+    const name = basename(path);
+    if (!window.confirm(
+      `Permanently delete "${name}" from RHZYCODE and delete all of its conversations from this computer?\n\nThe project source files in ${path} will not be deleted. This cannot be undone.`,
+    )) return;
+
+    closeThreadActions();
+    try {
+      const result = await window.rhzycode.deleteProject(path);
+      setThreads((current) => current.filter((thread) => !isSameProjectPath(thread.projectPath, path)));
+      for (const key of composerDraftsRef.current.keys()) {
+        if (isSameProjectPath(key.split("\0", 1)[0] || "", path)) composerDraftsRef.current.delete(key);
+      }
+      try {
+        const lastThreads = JSON.parse(localStorage.getItem("rhzycode.lastThreads") || "{}") as Record<string, unknown>;
+        const remaining = Object.fromEntries(
+          Object.entries(lastThreads).filter(([project]) => !isSameProjectPath(project, path)),
+        );
+        localStorage.setItem("rhzycode.lastThreads", JSON.stringify(remaining));
+      } catch {
+        localStorage.removeItem("rhzycode.lastThreads");
+      }
+      setForgottenProjectPaths((current) => {
+        const next = current.some((entry) => isSameProjectPath(entry, path))
+          ? current
+          : [...current, path].slice(-50);
+        localStorage.setItem("rhzycode.forgottenProjects", JSON.stringify(next));
+        return next;
+      });
+      setRecentProjects((current) => {
+        const next = current.filter((entry) => !isSameProjectPath(entry, path));
+        localStorage.setItem("rhzycode.recentProjects", JSON.stringify(next));
+        return next;
+      });
+      setCollapsedProjectPaths((current) => new Set(
+        [...current].filter((entry) => !isSameProjectPath(entry, path)),
+      ));
+
+      if (isSameProjectPath(selectedProjectPathRef.current, path)) {
+        localStorage.removeItem("rhzycode.lastProject");
+        const fallback = projectGroups.find((group) => !isSameProjectPath(group.path, path));
+        if (fallback) void selectProject(fallback.path);
+        else {
+          navigationRevisionRef.current += 1;
+          setWorkspaceProject("");
+          resetConversation();
+        }
+      }
+      upsertActivity(
+        `project-delete-${Date.now()}`,
+        "Project deleted",
+        `${result.deletedConversationCount} conversation${result.deletedConversationCount === 1 ? "" : "s"} permanently deleted. Project source files were kept.`,
+        "done",
+      );
+    } catch (error) {
+      const message = getErrorMessage(error);
+      upsertActivity(`project-remove-error-${Date.now()}`, "Project deletion failed", message, "error");
+      window.alert(`Project deletion failed: ${message}`);
+    }
+  }
+
+  async function backupProject(path: string): Promise<void> {
+    closeThreadActions();
+    try {
+      const result = await window.rhzycode.backupProjectConversations(path);
+      if (!result) return;
+      upsertActivity(
+        `conversation-backup-${Date.now()}`,
+        "Conversation backup complete",
+        `${result.conversationCount} conversation${result.conversationCount === 1 ? "" : "s"} saved to ${result.filePath}`,
+        "done",
+      );
+      window.alert(`Conversation backup complete: ${result.conversationCount} saved.`);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      upsertActivity(`conversation-backup-error-${Date.now()}`, "Conversation backup failed", message, "error");
+      window.alert(`Conversation backup failed: ${message}`);
+    }
+  }
+
+  async function restoreConversationBackup(): Promise<void> {
+    closeThreadActions();
+    try {
+      const result = await window.rhzycode.restoreProjectConversations();
+      if (!result) return;
+      for (const restoredProjectPath of result.projectPaths) rememberProject(restoredProjectPath);
+      await loadThreads();
+      if (!selectedProjectPathRef.current && result.projectPaths[0]) {
+        await selectProject(result.projectPaths[0]);
+      }
+      const detail = `${result.importedCount} restored, ${result.skippedCount} already present`;
+      upsertActivity(`conversation-restore-${Date.now()}`, "Conversation restore complete", detail, "done");
+      window.alert(`Conversation restore complete: ${detail}.`);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      upsertActivity(`conversation-restore-error-${Date.now()}`, "Conversation restore failed", message, "error");
+      window.alert(`Conversation restore failed: ${message}`);
+    }
+  }
+
+  function toggleProjectGroup(path: string) {
+    closeThreadActions();
+    setCollapsedProjectPaths((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
       return next;
     });
-    if (selectedProjectPathRef.current === path) {
-      localStorage.removeItem("rhzycode.lastProject");
-    }
-    void window.rhzycode.forgetProject(path).catch(() => undefined);
   }
 
   function startNewTask() {
     navigationRevisionRef.current += 1;
-    setProjectMenuOpen(false);
     closeThreadActions();
     setOpeningThreadId(null);
     saveComposerDraft();
@@ -666,6 +778,54 @@ export function App() {
     }
   }
 
+  function composerDragEnter(event: ReactDragEvent<HTMLDivElement>): void {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    composerDragDepthRef.current += 1;
+    setComposerDragActive(true);
+  }
+
+  function composerDragOver(event: ReactDragEvent<HTMLDivElement>): void {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function composerDragLeave(event: ReactDragEvent<HTMLDivElement>): void {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    composerDragDepthRef.current = Math.max(0, composerDragDepthRef.current - 1);
+    if (composerDragDepthRef.current === 0) setComposerDragActive(false);
+  }
+
+  async function dropComposerFiles(event: ReactDragEvent<HTMLDivElement>): Promise<void> {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    composerDragDepthRef.current = 0;
+    setComposerDragActive(false);
+
+    const droppedFiles = Array.from(event.dataTransfer.files);
+    if (droppedFiles.length === 0) return;
+    const availableSlots = Math.max(0, 20 - attachments.length);
+    if (availableSlots === 0) {
+      upsertActivity(`attachment-error-${Date.now()}`, "Attachment limit reached", "A task can include at most 20 attachments.", "error");
+      return;
+    }
+
+    try {
+      const selected = await window.rhzycode.resolveDroppedFiles(droppedFiles.slice(0, availableSlots));
+      appendAttachments(selected);
+      if (selected.length === 0) {
+        upsertActivity(`attachment-error-${Date.now()}`, "Attachment unavailable", "The drop did not contain a readable local file.", "error");
+      } else if (droppedFiles.length > availableSlots) {
+        upsertActivity(`attachment-error-${Date.now()}`, "Attachment limit reached", "Only the first available attachments were added.", "error");
+      }
+    } catch (error) {
+      upsertActivity(`attachment-error-${Date.now()}`, "Attachment unavailable", getErrorMessage(error), "error");
+    }
+  }
+
   function beginRename(thread: ThreadSummary) {
     closeThreadActions();
     setRenamingThreadId(thread.id);
@@ -691,7 +851,7 @@ export function App() {
       window.alert("Stop the running task before deleting it.");
       return;
     }
-    if (!window.confirm(`Permanently delete "${thread?.title || "this thread"}"? This cannot be undone.`)) return;
+    if (!window.confirm(`Permanently delete "${thread?.title || "this thread"}" and its data from this computer?\n\nThis cannot be undone.`)) return;
     closeThreadActions();
     try {
       await window.rhzycode.deleteThread(selectedThreadId);
@@ -722,40 +882,12 @@ export function App() {
     }
   }
 
-  async function restoreArchivedThread(selectedThreadId: string) {
-    closeThreadActions();
-    try {
-      await window.rhzycode.unarchiveThread(selectedThreadId);
-      setThreads((current) => current.filter((entry) => entry.id !== selectedThreadId));
-    } catch (error) {
-      upsertActivity(`archive-error-${Date.now()}`, "Restore failed", getErrorMessage(error), "error");
-    }
-  }
-
-  async function switchThreadList(archived: boolean) {
-    closeThreadActions();
-    setShowArchivedThreads(archived);
-    showArchivedThreadsRef.current = archived;
-    setThreadSearch("");
-    resetConversation();
-    try {
-      const availableThreads = await window.rhzycode.listThreads({
-        ...(selectedProjectPathRef.current ? { cwd: selectedProjectPathRef.current } : {}),
-        ...(archived ? { archived: true } : {}),
-      });
-      setThreads(availableThreads);
-    } catch (error) {
-      upsertActivity(`history-error-${Date.now()}`, "History unavailable", getErrorMessage(error), "error");
-    }
-  }
-
   function closeThreadActions() {
     setThreadActionsId(null);
     setThreadMenuPosition(null);
   }
 
   function toggleThreadActions(event: ReactMouseEvent<HTMLButtonElement>, selectedThreadId: string) {
-    setProjectMenuOpen(false);
     if (threadActionsId === selectedThreadId) {
       closeThreadActions();
       return;
@@ -1246,17 +1378,8 @@ export function App() {
     if (event.type === "thread.updated") {
       const active = isActiveThreadStatus(event.thread.status);
       markThreadActive(event.thread.id, active);
-      const searchTerm = threadSearchRef.current.trim().toLowerCase();
-      const belongsInCurrentList = !showArchivedThreadsRef.current
-        && event.thread.projectPath === selectedProjectPathRef.current
-        && (!searchTerm || event.thread.title.toLowerCase().includes(searchTerm));
       setThreads((current) => {
         const existingIndex = current.findIndex((thread) => thread.id === event.thread.id);
-        if (!belongsInCurrentList) {
-          return existingIndex === -1
-            ? current
-            : current.filter((thread) => thread.id !== event.thread.id);
-        }
         if (existingIndex === -1) return [event.thread, ...current];
         return current.map((thread, index) => index === existingIndex ? event.thread : thread);
       });
@@ -1265,13 +1388,6 @@ export function App() {
       markThreadActive(event.threadId, false);
       setThreads((current) => current.filter((thread) => thread.id !== event.threadId));
       if (event.threadId === selectedThreadIdRef.current) resetConversation();
-      if (showArchivedThreadsRef.current) {
-        void window.rhzycode.listThreads({
-          ...(selectedProjectPathRef.current ? { cwd: selectedProjectPathRef.current } : {}),
-          ...(threadSearchRef.current.trim() ? { searchTerm: threadSearchRef.current.trim() } : {}),
-          archived: true,
-        }).then(setThreads).catch(() => undefined);
-      }
     }
     if (event.type === "approval.requested") {
       setApprovals((current) => [
@@ -1351,55 +1467,32 @@ export function App() {
     <div className={`app-shell ${rightPanelOpen ? "with-panel" : ""}`}>
       <aside className="sidebar">
         <div className="sidebar-header">
-          <div><span className="product-name">RHZYCODE</span><span className="product-channel">DESKTOP</span></div>
-        </div>
-
-        <div className="project-picker-wrap">
-          <button
-            className="project-picker"
-            ref={projectPickerRef}
-            aria-haspopup="menu"
-            aria-expanded={projectMenuOpen}
-            aria-controls="project-menu"
-            onClick={() => { closeThreadActions(); setProjectMenuOpen((value) => !value); }}
-          >
-            <FolderGit2 size={17} />
-            <span>
-              <strong>{projectPath ? basename(projectPath) : "Select project"}</strong>
-              <small>{projectPath || "No working directory selected"}</small>
-            </span>
-            <ChevronDown size={15} />
-          </button>
-          {projectMenuOpen && (
-            <div
-              className="project-menu"
-              id="project-menu"
-              role="menu"
-            >
-              <button role="menuitem" onClick={() => { setProjectMenuOpen(false); void chooseProject(); }}><FolderOpen size={13} /> Open project folder</button>
-              {recentProjects.length > 0 && <span className="project-menu-label">Recent</span>}
-              {recentProjects.map((path) => (
-                <div className="recent-project" key={path}>
-                  <button role="menuitem" onClick={() => void selectProject(path)}><FolderGit2 size={13} /><span><strong>{basename(path)}</strong><small>{path}</small></span></button>
-                  <button title={`Remove ${basename(path)} from recent projects`} onClick={() => forgetProject(path)}><X size={12} /></button>
-                </div>
-              ))}
-            </div>
-          )}
+          <div className="brand-lockup">
+            <span className="product-mark" aria-hidden="true"><SquareCode size={18} /></span>
+            <div><span className="product-name">RHZYCODE</span><span className="product-channel">Desktop workspace</span></div>
+          </div>
         </div>
 
         <div className="section-heading">
-          <span>{showArchivedThreads ? "Archived" : "Tasks"} ({threads.length})</span>
+          <span className="section-title">Projects</span>
           <div>
             <button
-              className={`icon-button compact ${showArchivedThreads ? "selected" : ""}`}
-              title={showArchivedThreads ? "Show active tasks" : "Show archived tasks"}
-              aria-label={showArchivedThreads ? "Show active tasks" : "Show archived tasks"}
-              onClick={() => void switchThreadList(!showArchivedThreads)}
+              className="icon-button compact"
+              title="Restore project conversations"
+              aria-label="Restore project conversations"
+              onClick={() => void restoreConversationBackup()}
             >
-              {showArchivedThreads ? <ArchiveRestore size={15} /> : <Archive size={15} />}
+              <ArchiveRestore size={15} />
             </button>
-            {!showArchivedThreads && <button className="icon-button compact" title="New task" aria-label="New task" onClick={startNewTask}><Plus size={15} /></button>}
+            <button
+              className="icon-button compact"
+              title="Open project folder"
+              aria-label="Open project folder"
+              onClick={() => void chooseProject()}
+            >
+              <FolderOpen size={15} />
+            </button>
+            <button className="icon-button compact primary" title="New task" aria-label="New task" onClick={startNewTask}><Plus size={15} /></button>
           </div>
         </div>
         <label className="thread-search">
@@ -1407,51 +1500,87 @@ export function App() {
           <input
             value={threadSearch}
             onChange={(event) => setThreadSearch(event.target.value)}
-            placeholder={showArchivedThreads ? "Search archived tasks" : "Search threads"}
-            aria-label={showArchivedThreads ? "Search archived tasks" : "Search threads"}
+            placeholder="Search projects and tasks"
+            aria-label="Search projects and tasks"
           />
           {threadSearch && <button title="Clear search" onClick={() => setThreadSearch("")}><X size={12} /></button>}
         </label>
-        <div className="thread-list">
-          {threads.length > 0 ? threads.map((thread) => (
-            <div className={`thread-row-wrap ${thread.id === threadId ? "active" : ""}`} key={thread.id}>
-              {renamingThreadId === thread.id ? (
-                <div className="thread-rename">
-                  <input aria-label={`Rename ${thread.title}`} value={renameValue} maxLength={200} autoFocus onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void submitRename(thread.id); if (event.key === "Escape") setRenamingThreadId(null); }} />
-                  <button title="Save name" disabled={!renameValue.trim()} onClick={() => void submitRename(thread.id)}><Check size={12} /></button>
-                  <button title="Cancel rename" onClick={() => setRenamingThreadId(null)}><X size={12} /></button>
+        <div className="project-thread-list">
+          {projectGroups.length > 0 ? projectGroups.map((group) => {
+            const collapsed = collapsedProjectPaths.has(group.path) && !threadSearch.trim();
+            const contentId = `project-threads-${encodeURIComponent(group.key)}`;
+            return (
+              <section className={`project-group ${isSameProjectPath(group.path, projectPath) ? "selected" : ""}`} key={group.key}>
+                <div className="project-group-header">
+                  <button
+                    className="project-group-main"
+                    aria-label={`${collapsed ? "Expand" : "Collapse"} project ${group.name} tasks ${group.path}`}
+                    aria-controls={contentId}
+                    aria-expanded={!collapsed}
+                    title={group.path}
+                    onClick={() => toggleProjectGroup(group.path)}
+                  >
+                    {collapsed ? <ChevronRight className="project-group-chevron" size={14} /> : <ChevronDown className="project-group-chevron" size={14} />}
+                    <span>
+                      <strong>{group.name}</strong>
+                    </span>
+                  </button>
+                  <button
+                    className="project-backup-toggle"
+                    aria-label={`Back up conversations for ${group.name}`}
+                    title={`Back up conversations for ${group.name}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void backupProject(group.path);
+                    }}
+                  >
+                    <Download size={13} />
+                  </button>
+                  <button
+                    className="project-remove-toggle"
+                    aria-label={`Permanently delete project ${group.name}`}
+                    title={`Permanently delete ${group.name} conversations`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void removeProject(group.path);
+                    }}
+                  >
+                    <Trash2 size={13} />
+                  </button>
                 </div>
-              ) : (
-                <button
-                  className="thread-row"
-                  title={`Model: ${thread.model}`}
-                  disabled={showArchivedThreads}
-                  onClick={() => !showArchivedThreads && void openThread(thread.id)}
-                >
-                  <span className={`thread-state ${thread.status}`} />
-                  <span>
-                    <strong>{thread.title}</strong>
-                  </span>
-                </button>
-              )}
-              {renamingThreadId !== thread.id && (
-                <button className="thread-actions-toggle" title={`Thread actions for ${thread.title}`} aria-label={`Thread actions for ${thread.title}`} aria-haspopup="menu" aria-expanded={threadActionsId === thread.id} onClick={(event) => toggleThreadActions(event, thread.id)}><MoreHorizontal size={14} /></button>
-              )}
-              {threadActionsId === thread.id && threadMenuPosition && (
-                <div className="thread-actions-menu" role="menu" style={threadMenuPosition}>
-                  {showArchivedThreads ? (
-                    <button role="menuitem" onClick={() => void restoreArchivedThread(thread.id)}><ArchiveRestore size={13} /> Restore task</button>
-                  ) : (
-                    <>
-                      <button role="menuitem" onClick={() => beginRename(thread)}><Pencil size={13} /> Rename task</button>
-                      <button role="menuitem" onClick={() => void archiveSelectedThread(thread.id)}><Archive size={13} /> Archive task</button>
-                    </>
-                  )}
-                  <button role="menuitem" className="danger" onClick={() => void permanentlyDeleteThread(thread.id)}><Trash2 size={13} /> Delete task permanently</button>
-                </div>
-              )}
-            </div>
-          )) : <div className="sidebar-empty">{threadSearch ? "No matching threads" : "No tasks in this project"}</div>}
+                {!collapsed && (
+                  <div className="project-group-threads" id={contentId}>
+                    {group.threads.length > 0 ? group.threads.map((thread) => (
+                      <div className={`thread-row-wrap ${thread.id === threadId ? "active" : ""}`} key={thread.id}>
+                        {renamingThreadId === thread.id ? (
+                          <div className="thread-rename">
+                            <input aria-label={`Rename ${thread.title}`} value={renameValue} maxLength={200} autoFocus onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void submitRename(thread.id); if (event.key === "Escape") setRenamingThreadId(null); }} />
+                            <button title="Save name" disabled={!renameValue.trim()} onClick={() => void submitRename(thread.id)}><Check size={12} /></button>
+                            <button title="Cancel rename" onClick={() => setRenamingThreadId(null)}><X size={12} /></button>
+                          </div>
+                        ) : (
+                          <button className="thread-row" title={`Model: ${thread.model}`} onClick={() => void openThread(thread.id)}>
+                            <span className={`thread-state ${thread.status}`} />
+                            <span><strong>{thread.title}</strong></span>
+                          </button>
+                        )}
+                        {renamingThreadId !== thread.id && (
+                          <button className="thread-actions-toggle" title={`Thread actions for ${thread.title}`} aria-label={`Thread actions for ${thread.title}`} aria-haspopup="menu" aria-expanded={threadActionsId === thread.id} onClick={(event) => toggleThreadActions(event, thread.id)}><MoreHorizontal size={14} /></button>
+                        )}
+                        {threadActionsId === thread.id && threadMenuPosition && (
+                          <div className="thread-actions-menu" role="menu" style={threadMenuPosition}>
+                            <button role="menuitem" onClick={() => beginRename(thread)}><Pencil size={13} /> Rename task</button>
+                            <button role="menuitem" onClick={() => void archiveSelectedThread(thread.id)}><Archive size={13} /> Archive task</button>
+                            <button role="menuitem" className="danger" onClick={() => void permanentlyDeleteThread(thread.id)}><Trash2 size={13} /> Delete task permanently</button>
+                          </div>
+                        )}
+                      </div>
+                    )) : <div className="project-group-empty">No tasks</div>}
+                  </div>
+                )}
+              </section>
+            );
+          }) : <div className="sidebar-empty">{threadSearch ? "No matching projects or tasks" : "Open a project folder to begin"}</div>}
         </div>
 
       </aside>
@@ -1536,7 +1665,14 @@ export function App() {
         </section>
 
         <div className="composer-wrap">
-          <div className="composer-box">
+          <div
+            className={`composer-box ${composerDragActive ? "drag-active" : ""}`}
+            onDragEnter={composerDragEnter}
+            onDragLeave={composerDragLeave}
+            onDragOver={composerDragOver}
+            onDrop={(event) => void dropComposerFiles(event)}
+          >
+            {composerDragActive && <div className="composer-drop-overlay" aria-hidden="true"><Upload size={25} /></div>}
             {attachments.length > 0 && (
               <div className="attachment-list">
                 {attachments.map((attachment) => (

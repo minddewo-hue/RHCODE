@@ -430,6 +430,17 @@ function appendInputItem(messages, item) {
       return;
     case "reasoning":
       return;
+    case "image_generation_call": {
+      const revised = typeof item.revised_prompt === "string" ? item.revised_prompt.trim() : "";
+      let marker = "[generated image omitted]";
+      if (typeof item.output === "string" && item.output.trim()) {
+        marker = item.output.trim();
+      } else if (revised) {
+        marker = "[generated image omitted: " + revised.slice(0, 240) + "]";
+      }
+      messages.push({ role: "assistant", content: marker });
+      return;
+    }
     default:
       if (item.role) {
         messages.push({

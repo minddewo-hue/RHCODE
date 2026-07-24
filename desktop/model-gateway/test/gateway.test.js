@@ -1005,6 +1005,63 @@ test("multi-model gateway integration", async (t) => {
     assert.equal(limitedCall.body.parallel_tool_calls, false);
   });
 
+  await t.test("strips oversized image_generation_call.result before native upstream proxy", async () => {
+    const largeResult = "iVBORw0KGgo" + "A".repeat(20000);
+    const before = calls.length;
+    const response = await gatewayFetch(baseUrl, "/v1/responses", {
+      body: {
+        model: "native/model",
+        store: false,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+          {
+            type: "image_generation_call",
+            id: "ig_06efdb4eabc7f958016a6058b2c2f48196b19ee29900f71626",
+            status: "completed",
+            revised_prompt: "poison history image",
+            result: largeResult,
+          },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "你好" }] },
+        ],
+      },
+    });
+    assert.equal(response.status, 200);
+    const call = calls.slice(before).find((entry) => entry.path === "/primary/v1/responses");
+    assert.ok(call, "expected native upstream call");
+    const imageItem = call.body.input.find((item) => item?.type === "image_generation_call");
+    assert.ok(imageItem);
+    assert.equal(imageItem.result, undefined);
+    assert.match(String(imageItem.output || ""), /generated image omitted from history/);
+    const serialized = JSON.stringify(call.body);
+    assert.ok(serialized.length < 5_000, `upstream body still too large: ${serialized.length}`);
+    assert.doesNotMatch(serialized, /iVBORw0KGgoAAAA/);
+  });
+
+  await t.test("chat routes omit image_generation_call base64 from converted messages", async () => {
+    const largeResult = "iVBORw0KGgo" + "A".repeat(20000);
+    const before = calls.length;
+    const response = await gatewayFetch(baseUrl, "/v1/responses", {
+      body: {
+        model: "chat/model",
+        input: [
+          {
+            type: "image_generation_call",
+            id: "ig_chat_history",
+            status: "completed",
+            revised_prompt: "cat sketch",
+            result: largeResult,
+          },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+        ],
+      },
+    });
+    assert.equal(response.status, 200);
+    const call = calls.slice(before).find((entry) => entry.path === "/chat/v1/chat/completions");
+    assert.ok(call, "expected chat upstream call");
+    const serialized = JSON.stringify(call.body.messages || []);
+    assert.doesNotMatch(serialized, /iVBORw0KGgo/);
+    assert.match(serialized, /generated image omitted/);
+  });
   await t.test("normalizes common upstream errors without echoing secrets", async () => {
     const expectedCodes = new Map([
       [401, "upstream_unauthorized"],

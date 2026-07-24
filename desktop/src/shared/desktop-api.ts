@@ -31,6 +31,10 @@ export interface ThreadListOptions {
   archived?: boolean;
 }
 
+export interface ProjectDeletionResult {
+  deletedConversationCount: number;
+}
+
 export interface StartThreadParams {
   cwd: string;
   model?: string;
@@ -268,6 +272,19 @@ export interface TurnStartResult {
   }>;
 }
 
+export interface ConversationBackupResult {
+  filePath: string;
+  conversationCount: number;
+  size: number;
+}
+
+export interface ConversationRestoreResult {
+  filePath: string;
+  importedCount: number;
+  skippedCount: number;
+  projectPaths: string[];
+}
+
 export interface RpcNotification {
   method?: string;
   params?: Record<string, unknown>;
@@ -283,7 +300,9 @@ export interface RhzycodeDesktopApi {
   listProjects(): Promise<ProjectDirectory[]>;
   rememberProject(path: string): Promise<ProjectDirectory>;
   forgetProject(path: string): Promise<void>;
+  deleteProject(path: string): Promise<ProjectDeletionResult>;
   chooseFiles(): Promise<ComposerAttachment[]>;
+  resolveDroppedFiles(files: File[]): Promise<ComposerAttachment[]>;
   savePastedImage(input: PastedImageInput): Promise<ComposerAttachment>;
   readLocalImage(path: string): Promise<string>;
   openLocalFile(path: string): Promise<void>;
@@ -295,6 +314,8 @@ export interface RhzycodeDesktopApi {
   setThreadModel(threadId: string, model: string): Promise<ThreadSummary>;
   renameThread(threadId: string, name: string): Promise<void>;
   deleteThread(threadId: string): Promise<void>;
+  backupProjectConversations(projectPath: string): Promise<ConversationBackupResult | null>;
+  restoreProjectConversations(): Promise<ConversationRestoreResult | null>;
   startTurn(params: StartTurnParams): Promise<TurnStartResult>;
   interruptTurn(threadId: string): Promise<unknown>;
   getGatewayStatus(): Promise<GatewayStatus>;

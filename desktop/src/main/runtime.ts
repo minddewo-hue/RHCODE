@@ -72,6 +72,15 @@ import {
   type RolloutGeneratedImage,
 } from "./generated-image-rollout";
 import { loadRolloutThreadState } from "./rollout-thread-state";
+import {
+  backupProjectConversations as createConversationBackup,
+  deleteConversationSessionFiles,
+  listConversationSessions,
+  listProjectConversationThreadIds,
+  restoreProjectConversations as restoreConversationBackup,
+  type ConversationBackupResult,
+  type ConversationRestoreResult,
+} from "./conversation-backup";
 import { desktopHostPlatform } from "./platform/desktop-platform";
 import {
   ManagedFileStore,
@@ -340,6 +349,50 @@ export class DesktopRuntime extends EventEmitter {
     this.projectDirectories.forget(projectPath);
   }
 
+  async deleteProjectDirectory(projectPath: string): Promise<{ deletedConversationCount: number }> {
+    const diskThreadIds = await listProjectConversationThreadIds(this.codexHome, projectPath);
+    const runtimeThreads = [...this.threads.values()].filter((thread) =>
+      thread.projectPath && comparablePath(thread.projectPath) === comparablePath(projectPath));
+    const threadIds = [...new Set([
+      ...diskThreadIds,
+      ...runtimeThreads.map((thread) => thread.id),
+    ])];
+    for (const thread of runtimeThreads) {
+      if (this.activeTurns.has(thread.id)) await this.interruptTurn(thread.id);
+      else if (this.pendingTurnStarts.has(thread.id)) {
+        throw new Error(`Wait for the task "${thread.title}" to finish starting, then delete the project again.`);
+      }
+    }
+    await Promise.all(threadIds.map((threadId) => this.requestPermanentThreadDeletion(threadId, true)));
+    await deleteConversationSessionFiles(this.codexHome, threadIds);
+    for (const threadId of threadIds) {
+      this.managedFiles.removeThread(threadId);
+      this.removeRuntimeThread(threadId);
+    }
+
+    this.projectDirectories.forget(projectPath);
+    return { deletedConversationCount: threadIds.length };
+  }
+
+  backupProjectConversations(
+    projectPath: string,
+    destinationPath: string,
+  ): Promise<ConversationBackupResult> {
+    return createConversationBackup(this.codexHome, projectPath, destinationPath);
+  }
+
+  async restoreProjectConversations(backupPath: string): Promise<ConversationRestoreResult> {
+    const result = await restoreConversationBackup(this.codexHome, backupPath);
+    for (const projectPath of result.projectPaths) {
+      try {
+        this.projectDirectories.remember(projectPath);
+      } catch {
+        // Restored conversations remain usable even when their original directory was moved.
+      }
+    }
+    return result;
+  }
+
   startTerminal(params: { cwd: string; cols?: number; rows?: number }): TerminalSessionStatus {
     if (this.terminalSession?.running) return this.getTerminalStatus()!;
     const processId = randomUUID();
@@ -504,21 +557,56 @@ export class DesktopRuntime extends EventEmitter {
       }
       return [summary];
     });
-    if (options.archived) return serverThreads;
-
     const serverThreadIds = new Set(serverThreads.map((thread) => thread.id));
+    const diskSessions = (await listConversationSessions(this.codexHome))
+      .filter((session) => session.archived === Boolean(options.archived));
+    const searchTerm = options.searchTerm?.trim().toLowerCase();
+    const matchesOptions = (thread: ThreadSummary) => (
+      (!options.cwd || comparablePath(thread.projectPath) === comparablePath(options.cwd))
+      && (!searchTerm || thread.title.toLowerCase().includes(searchTerm))
+    );
+    const diskThreads = diskSessions.flatMap((session) => {
+      if (serverThreadIds.has(session.threadId)) return [];
+      const existing = this.threads.get(session.threadId);
+      const summary: ThreadSummary = existing || {
+        id: session.threadId,
+        hostId: "local-desktop",
+        title: session.title,
+        projectPath: session.projectPath,
+        model: session.model,
+        status: "completed",
+        updatedAt: session.modifiedAt,
+      };
+      if (!matchesOptions(summary)) return [];
+      if (!session.archived) {
+        this.threads.set(summary.id, summary);
+        this.controlPlane?.store.upsertThread(summary);
+        try {
+          this.projectDirectories.remember(summary.projectPath);
+        } catch {
+          // A restored conversation can outlive a project directory that was moved.
+        }
+      }
+      return [summary];
+    });
+    if (options.archived) {
+      return [...serverThreads, ...diskThreads]
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+        .slice(0, 100);
+    }
+
+    const diskThreadIds = new Set(diskSessions.map((session) => session.threadId));
     const timelineThreadIds = new Set(
       (this.controlPlane?.store.snapshot().timeline || []).map((item) => item.threadId),
     );
-    const searchTerm = options.searchTerm?.trim().toLowerCase();
     const emptyLocalThreads = [...this.threads.values()].filter((thread) =>
       !serverThreadIds.has(thread.id)
+      && !diskThreadIds.has(thread.id)
       && thread.status === "idle"
       && !timelineThreadIds.has(thread.id)
-      && (!options.cwd || comparablePath(thread.projectPath) === comparablePath(options.cwd))
-      && (!searchTerm || thread.title.toLowerCase().includes(searchTerm)),
+      && matchesOptions(thread),
     );
-    return [...serverThreads, ...emptyLocalThreads]
+    return [...serverThreads, ...diskThreads, ...emptyLocalThreads]
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
       .slice(0, 100);
   }
@@ -551,14 +639,25 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   async deleteThread(threadId: string): Promise<void> {
-    try {
-      await this.agent.request("thread/delete", { threadId });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!this.isEmptyLocalThread(threadId) || !isRolloutNotReadyMessage(message)) throw error;
+    if (this.activeTurns.has(threadId)) await this.interruptTurn(threadId);
+    else if (this.pendingTurnStarts.has(threadId)) {
+      throw new Error("Wait for the task to finish starting, then delete the conversation again.");
     }
+    await this.requestPermanentThreadDeletion(threadId, true);
+    await deleteConversationSessionFiles(this.codexHome, [threadId]);
     this.managedFiles.removeThread(threadId);
     this.removeRuntimeThread(threadId);
+  }
+
+  private async requestPermanentThreadDeletion(threadId: string, allowDiskFallback = false): Promise<void> {
+    try {
+      await this.agent.request("thread/delete", { threadId }, 5_000);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (this.isEmptyLocalThread(threadId) && isRolloutNotReadyMessage(message)) return;
+      if (!allowDiskFallback) throw error;
+      this.emit("agent:diagnostic", `App Server index cleanup failed for ${threadId}: ${message}`);
+    }
   }
 
   async openThread(threadId: string): Promise<ThreadDetail> {

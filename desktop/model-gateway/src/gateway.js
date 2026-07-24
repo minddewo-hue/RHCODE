@@ -12,6 +12,7 @@ import {
   streamAnthropicAsResponses,
 } from "./anthropic-adapter.js";
 import { applyGemma31bChatRequestPolicy } from "./gemma-31b-policy.js";
+import { sanitizeResponsesRequestBody } from "./sanitize-responses-input.js";
 
 export function createGatewayServer(config) {
   const state = {
@@ -107,6 +108,18 @@ async function handleResponses({
   }
   if (typeof body.model !== "string" || !body.model) {
     throw new HttpError(400, "The model field is required.", "model_required");
+  }
+
+  const sanitized = sanitizeResponsesRequestBody(body);
+  body = sanitized.body;
+  if (sanitized.strippedCount > 0) {
+    log(config, "info", {
+      event: "request_history_sanitized",
+      request_id: requestId,
+      stripped_count: sanitized.strippedCount,
+      stripped_bytes: sanitized.strippedBytes,
+      reason: "oversized_image_generation_result",
+    });
   }
 
   const model = resolveRequestedModel(config.models, body.model);

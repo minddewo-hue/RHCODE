@@ -38,7 +38,7 @@ import { ProjectPickerSheet, ThreadActionsSheet } from "./components/TaskSheets"
 import { describeControlError, useControlPlane } from "./hooks/use-control-plane";
 import { createNativeSecureSessionStore } from "./storage/native-secure-session";
 import type { MobileSession, MobileSessionState, SecureSessionStore } from "./storage/secure-session";
-import { isRegisteredProject, registeredProjectPaths } from "./state/project-list";
+import { isRegisteredProject, isSameProjectPath, registeredProjectPaths } from "./state/project-list";
 import { colors } from "./ui/theme";
 import { defaultUpdateManifestUrl } from "./platform/update/mobile-update";
 import { useMobileUpdate } from "./platform/update/use-mobile-update";
@@ -339,7 +339,7 @@ function AppContent() {
       const activeDifference = Number(isActive(right)) - Number(isActive(left));
       return activeDifference || right.updatedAt.localeCompare(left.updatedAt);
     });
-    const preferred = ordered.find((thread) => thread.projectPath === selectedProjectPath) || ordered[0];
+    const preferred = ordered.find((thread) => selectedProjectPath && isSameProjectPath(thread.projectPath, selectedProjectPath)) || ordered[0];
     if (preferred) setSelectedThreadId(preferred.id);
     if (preferred) setSelectedProjectPath(preferred.projectPath);
     if (preferred) setNewThreadDraft(false);
@@ -430,10 +430,9 @@ function AppContent() {
     setNewThreadError(null);
     try {
       const result = await taskClient.openProject(projectPath, create);
-      setProjectDirectories((current) => [
-        result.project,
-        ...current.filter((project) => project.path !== result.project.path),
-      ]);
+      setProjectDirectories((current) => current.some((project) => isSameProjectPath(project.path, result.project.path))
+        ? current.map((project) => isSameProjectPath(project.path, result.project.path) ? result.project : project)
+        : [...current, result.project]);
       setSelectedProjectPath(result.project.path);
       setProjectPickerVisible(false);
       setDrawerVisible(false);
@@ -797,7 +796,7 @@ function AppContent() {
     try {
       const result = await taskClient.removeProject(projectPath);
       setProjectDirectories(result.projects);
-      if (selectedProjectPath === projectPath) {
+      if (selectedProjectPath && isSameProjectPath(selectedProjectPath, projectPath)) {
         setSelectedProjectPath(null);
         setNewThreadDraft(false);
       }

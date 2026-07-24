@@ -7,7 +7,9 @@ import {
   formatFileChanges,
   formatFileSize,
   groupModelsBySource,
+  groupThreadsByProject,
   isComposerRunning,
+  isSameProjectPath,
   modelReasoningEfforts,
   notificationThreadId,
   providerCredentialPresentation,
@@ -18,6 +20,8 @@ import {
 test("formats renderer display values", () => {
   assert.equal(basename("C:\\work\\project"), "project");
   assert.equal(basename("/work/project/"), "project");
+  assert.equal(isSameProjectPath("D:\\work_space\\mul_cli", "d:/work_space/mul_cli/"), true);
+  assert.equal(isSameProjectPath("/Work/project", "/work/project"), false);
   assert.equal(formatFileSize(1_024), "1 KB");
   assert.equal(activityLabel("commandExecution"), "Command");
   assert.deepEqual(providerCredentialPresentation("sub2api"), {
@@ -25,6 +29,58 @@ test("formats renderer display values", () => {
     domain: "model.rhzy.ai",
     prefix: "sk-",
   });
+});
+
+test("groups all tasks by project and searches across the project tree", () => {
+  const threads = [
+    {
+      id: "thread-b",
+      hostId: "desktop",
+      title: "Write release notes",
+      projectPath: "D:\\work\\beta",
+      model: "provider/model",
+      status: "completed" as const,
+      updatedAt: "2026-07-23T02:00:00.000Z",
+    },
+    {
+      id: "thread-a",
+      hostId: "desktop",
+      title: "Fix navigation",
+      projectPath: "D:\\work\\alpha",
+      model: "provider/model",
+      status: "completed" as const,
+      updatedAt: "2026-07-23T01:00:00.000Z",
+    },
+    {
+      id: "thread-c",
+      hostId: "desktop",
+      title: "Review navigation",
+      projectPath: "D:\\work\\alpha",
+      model: "provider/model",
+      status: "completed" as const,
+      updatedAt: "2026-07-23T03:00:00.000Z",
+    },
+  ];
+
+  const groups = groupThreadsByProject(
+    ["D:\\work\\alpha", "D:\\work\\empty"],
+    "D:\\WORK\\ALPHA",
+    threads,
+  );
+  assert.deepEqual(groups.map((group) => ({
+    name: group.name,
+    threads: group.threads.map((thread) => thread.id),
+  })), [
+    { name: "alpha", threads: ["thread-a", "thread-c"] },
+    { name: "empty", threads: [] },
+    { name: "beta", threads: ["thread-b"] },
+  ]);
+
+  assert.deepEqual(
+    groupThreadsByProject(groups.map((group) => group.path), "", threads, "release")
+      .map((group) => ({ name: group.name, threads: group.threads.map((thread) => thread.id) })),
+    [{ name: "beta", threads: ["thread-b"] }],
+  );
 });
 
 test("uses every reasoning effort supported by the selected model", () => {

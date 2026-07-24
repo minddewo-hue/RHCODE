@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AgentStatus,
   GatewayStatus,
@@ -24,7 +24,12 @@ const api: RhzycodeDesktopApi = {
   listProjects: () => ipcRenderer.invoke("project:list"),
   rememberProject: (path: string) => ipcRenderer.invoke("project:remember", path),
   forgetProject: (path: string) => ipcRenderer.invoke("project:forget", path),
+  deleteProject: (path: string) => ipcRenderer.invoke("project:delete", path),
   chooseFiles: () => ipcRenderer.invoke("project:choose-files"),
+  resolveDroppedFiles: (files: File[]) => ipcRenderer.invoke(
+    "project:resolve-dropped-files",
+    files.map((file) => webUtils.getPathForFile(file)).filter(Boolean),
+  ),
   savePastedImage: (input) => ipcRenderer.invoke("project:save-pasted-image", input),
   readLocalImage: (path: string) => ipcRenderer.invoke("project:read-local-image", path),
   openLocalFile: (path: string) => ipcRenderer.invoke("project:open-local-file", path),
@@ -38,6 +43,9 @@ const api: RhzycodeDesktopApi = {
   setThreadModel: (threadId: string, model: string) => ipcRenderer.invoke("agent:thread:model", threadId, model),
   renameThread: (threadId: string, name: string) => ipcRenderer.invoke("agent:thread:rename", threadId, name),
   deleteThread: (threadId: string) => ipcRenderer.invoke("agent:thread:delete", threadId),
+  backupProjectConversations: (projectPath: string) =>
+    ipcRenderer.invoke("conversation:backup", projectPath),
+  restoreProjectConversations: () => ipcRenderer.invoke("conversation:restore"),
   startTurn: (params: { threadId: string; text: string; model?: string; approvalPolicy?: "on-request" | "untrusted" | "never"; sandboxMode?: "read-only" | "workspace-write" | "danger-full-access"; reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"; attachments?: Array<{ path: string; name: string; kind: "file" | "image"; size: number }> }) =>
     ipcRenderer.invoke("agent:turn:start", params),
   interruptTurn: (threadId: string) => ipcRenderer.invoke("agent:turn:interrupt", threadId),

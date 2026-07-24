@@ -14,6 +14,13 @@ export interface ModelGroup {
   models: Array<ModelOption & { sourceModelName: string }>;
 }
 
+export interface ProjectThreadGroup {
+  key: string;
+  path: string;
+  name: string;
+  threads: ThreadSummary[];
+}
+
 const modelNameCollator = new Intl.Collator(["zh-CN", "en"], {
   numeric: true,
   sensitivity: "base",
@@ -21,6 +28,48 @@ const modelNameCollator = new Intl.Collator(["zh-CN", "en"], {
 
 export function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).at(-1) || path;
+}
+
+export function isSameProjectPath(left: string, right: string): boolean {
+  return comparableProjectPath(left) === comparableProjectPath(right);
+}
+
+export function groupThreadsByProject(
+  projectPaths: string[],
+  selectedProjectPath: string,
+  threads: ThreadSummary[],
+  searchTerm = "",
+): ProjectThreadGroup[] {
+  const paths = new Map<string, string>();
+  const addPath = (path: string) => {
+    const key = comparableProjectPath(path);
+    if (!paths.has(key)) paths.set(key, path);
+  };
+  for (const path of projectPaths) addPath(path);
+  if (selectedProjectPath) addPath(selectedProjectPath);
+  for (const thread of threads) addPath(thread.projectPath);
+
+  const threadsByProject = new Map<string, ThreadSummary[]>();
+  for (const thread of threads) {
+    const key = comparableProjectPath(thread.projectPath);
+    const group = threadsByProject.get(key) || [];
+    group.push(thread);
+    threadsByProject.set(key, group);
+  }
+
+  const term = searchTerm.trim().toLocaleLowerCase();
+  return [...paths.entries()].flatMap(([key, path]) => {
+    const projectMatches = !term || `${basename(path)} ${path}`.toLocaleLowerCase().includes(term);
+    const projectThreads = (threadsByProject.get(key) || [])
+      .filter((thread) => projectMatches || `${thread.title} ${thread.model}`.toLocaleLowerCase().includes(term));
+    if (term && !projectMatches && projectThreads.length === 0) return [];
+    return [{ key, path, name: basename(path), threads: projectThreads }];
+  });
+}
+
+function comparableProjectPath(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  return /^[a-z]:\//i.test(normalized) ? normalized.toLocaleLowerCase() : normalized;
 }
 
 export function credentialSourceLabel(source: CredentialStatus["providers"][number]["source"]): string {
@@ -265,6 +314,17 @@ export function storedSandboxMode(): SandboxMode {
 export function storedRecentProjects(): string[] {
   try {
     const value = JSON.parse(localStorage.getItem("rhzycode.recentProjects") || "[]");
+    return Array.isArray(value)
+      ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0).slice(0, 50)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+export function storedForgottenProjects(): string[] {
+  try {
+    const value = JSON.parse(localStorage.getItem("rhzycode.forgottenProjects") || "[]");
     return Array.isArray(value)
       ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0).slice(0, 50)
       : [];

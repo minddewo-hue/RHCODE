@@ -3,14 +3,35 @@ dist/
 out/
 .expo/
 .vite/
+.cache/
+.turbo/
 coverage/
 test-results/
 *.log
+*.log.*
+*.pid
+*.pid.lock
+*.sqlite
+*.sqlite-*
+*.tmp
+*.temp
 *.tsbuildinfo
 .DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Runtime logs, diagnostics, and local scratch data
+/logs/
 
 # Local credentials and generated gateway state
-*.env
+.env
+.env.*
+!.env.example
+!.env.*.example
 transferserver/certs/
 transferserver/*.key
 transferserver/*.pem

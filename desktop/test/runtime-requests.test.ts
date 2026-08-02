@@ -1,16 +1,12 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { ControlStore, type RemoteCommandContext } from "../src/main/control-plane/app";
 import type { ThreadSummary } from "@rhzycode/protocol";
-import {
-  DesktopRuntime,
-  resolveAdvertisedSyncHost,
-  resolveSyncTlsConfiguration,
-} from "../src/main/runtime.js";
+import { DesktopRuntime } from "../src/main/runtime.js";
 
 const TEST_GENERATED_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nKsAAAAASUVORK5CYII=";
 
@@ -18,7 +14,11 @@ interface RuntimeInternals {
   controlPlane: { store: ControlStore };
   threads: Map<string, ThreadSummary>;
   activeTurns: Map<string, string>;
+  pendingGatewayFailures: Map<string, { threadId: string; timer: NodeJS.Timeout }>;
+  gatewayFailureGraceMs: number;
   loadedThreadIds: Set<string>;
+  startSync(): Promise<void>;
+  startGatewayAndAgent(): Promise<void>;
   handleAgentMessage(message: unknown): void;
   handleSyncEvent(event: unknown): void;
 }
@@ -56,53 +56,6 @@ function remoteContext(): RemoteCommandContext {
   };
 }
 
-test("requires complete TLS files for non-loopback control", () => {
-  assert.equal(resolveSyncTlsConfiguration("127.0.0.1", {}), undefined);
-  assert.equal(resolveSyncTlsConfiguration("0.0.0.0", {}, undefined, true), undefined);
-  assert.throws(
-    () => resolveSyncTlsConfiguration("192.168.1.20", {}),
-    /Non-loopback control requires HTTPS\/WSS/,
-  );
-  assert.throws(
-    () => resolveSyncTlsConfiguration("127.0.0.1", { RHZYCODE_SYNC_TLS_CERT: "cert.pem" }),
-    /must be configured together/,
-  );
-
-  const paths: string[] = [];
-  const tls = resolveSyncTlsConfiguration(
-    "192.168.1.20",
-    {
-      RHZYCODE_SYNC_TLS_CERT: "cert.pem",
-      RHZYCODE_SYNC_TLS_KEY: "key.pem",
-      RHZYCODE_SYNC_TLS_CA: "ca.pem",
-    },
-    (filePath) => {
-      paths.push(path.basename(filePath));
-      return Buffer.from(path.basename(filePath));
-    },
-  );
-  assert.deepEqual(paths, ["cert.pem", "key.pem", "ca.pem"]);
-  assert.equal(Buffer.isBuffer(tls?.cert), true);
-  assert.equal(Buffer.isBuffer(tls?.key), true);
-  assert.equal(Buffer.isBuffer(tls?.ca), true);
-});
-
-test("advertises a physical private IPv4 address for wildcard mobile sync", () => {
-  const address = (value: string) => ({
-    address: value,
-    netmask: "255.255.255.0",
-    family: "IPv4" as const,
-    mac: "00:00:00:00:00:00",
-    internal: false,
-    cidr: `${value}/24`,
-  });
-  assert.equal(resolveAdvertisedSyncHost("127.0.0.1", {}), "127.0.0.1");
-  assert.equal(resolveAdvertisedSyncHost("0.0.0.0", {
-    "vEthernet (WSL)": [address("172.20.64.1")],
-    "Wi-Fi": [address("192.168.1.25")],
-  }), "192.168.1.25");
-});
-
 test("restores desktop threads without reviving active RPC states", () => {
   const store = new ControlStore();
   store.upsertThread({
@@ -116,12 +69,33 @@ test("restores desktop threads without reviving active RPC states", () => {
   });
 
   const before = store.snapshot().lastSequence;
-  const runtime = new DesktopRuntime(".", ".", "127.0.0.1", 0, store);
+  const runtime = new DesktopRuntime(".", ".", store);
   assert.equal(store.snapshot().threads[0]?.status, "interrupted");
   assert.equal(store.snapshot().lastSequence, before + 1);
   assert.equal(store.listEvents(before)[0]?.type, "thread.updated");
   assert.equal(runtime.getSnapshot().threads[0]?.status, "interrupted");
+  assert.deepEqual(runtime.getRendererBootstrapState(), {
+    threads: runtime.getSnapshot().threads,
+    approvals: [],
+    userInputs: [],
+  });
   assert.deepEqual(runtime.listProjectDirectories(), []);
+});
+
+test("starts the agent without waiting for sync startup", { timeout: 1_000 }, async () => {
+  const { runtime, internals } = createRuntimeHarness();
+  const startupOrder: string[] = [];
+  internals.startSync = () => {
+    startupOrder.push("sync");
+    return new Promise<void>(() => undefined);
+  };
+  internals.startGatewayAndAgent = async () => {
+    startupOrder.push("agent");
+  };
+
+  await runtime.start();
+
+  assert.deepEqual(startupOrder, ["agent", "sync"]);
 });
 
 test("opens a mobile-created empty thread before its rollout exists", async () => {
@@ -178,6 +152,231 @@ test("opens an active thread after its new rollout metadata is written", async (
   assert.equal(detail.thread.id, thread.id);
 });
 
+test("reuses a resumed thread detail until the thread changes", async () => {
+  const { runtime, internals } = createRuntimeHarness();
+  const thread = internals.threads.get("thread-1")!;
+  let resumeCount = 0;
+  runtime.agent.request = async (method) => {
+    assert.equal(method, "thread/resume");
+    resumeCount += 1;
+    return {
+      thread: {
+        id: thread.id,
+        cwd: thread.projectPath,
+        preview: thread.title,
+        status: { type: "idle" },
+        turns: [],
+      },
+      model: thread.model,
+    } as never;
+  };
+
+  const first = await runtime.openThread(thread.id);
+  const second = await runtime.openThread(thread.id);
+  assert.strictEqual(second, first);
+  assert.equal(resumeCount, 1);
+
+  runtime.setThreadModel(thread.id, "test/updated-model");
+  await runtime.openThread(thread.id);
+  assert.equal(resumeCount, 2);
+});
+
+test("reads rollout history without resuming until the next turn is sent", async (context) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-passive-history-"));
+  const { runtime, internals } = createRuntimeHarness(codexHome);
+  const thread = internals.threads.get("thread-1")!;
+  const rolloutPath = path.join(codexHome, "sessions", "rollout-thread-1.jsonl");
+  context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+  fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+  fs.writeFileSync(rolloutPath, [
+    JSON.stringify({
+      timestamp: "2026-07-29T00:00:00.000Z",
+      type: "session_meta",
+      payload: { id: thread.id, cwd: thread.projectPath },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-29T00:00:01.000Z",
+      type: "response_item",
+      payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Existing question" }] },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-29T00:00:02.000Z",
+      type: "response_item",
+      payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Existing answer" }] },
+    }),
+    "",
+  ].join("\n"), "utf8");
+  internals.loadedThreadIds.delete(thread.id);
+  const requests: string[] = [];
+  runtime.agent.request = async (method) => {
+    requests.push(method);
+    if (method === "thread/resume") {
+      return {
+        thread: {
+          id: thread.id,
+          cwd: thread.projectPath,
+          preview: thread.title,
+          status: { type: "idle" },
+          turns: [],
+        },
+        model: thread.model,
+      } as never;
+    }
+    return { turn: { id: "turn-next" } } as never;
+  };
+
+  const detail = await runtime.openThread(thread.id);
+  assert.deepEqual(requests, []);
+  assert.equal(detail.messages.some((message) => message.content === "Existing question"), true);
+
+  await runtime.startTurn({ threadId: thread.id, text: "Continue" });
+  assert.deepEqual(requests, ["thread/resume", "turn/start"]);
+});
+
+test("resumes sparse local history so assistant replies are not dropped", async (context) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-sparse-history-"));
+  const { runtime, internals } = createRuntimeHarness(codexHome);
+  const thread = internals.threads.get("thread-1")!;
+  const rolloutPath = path.join(codexHome, "sessions", "rollout-thread-1.jsonl");
+  context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+  fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+  fs.writeFileSync(rolloutPath, [
+    JSON.stringify({
+      timestamp: "2026-07-30T00:00:00.000Z",
+      type: "session_meta",
+      payload: { id: thread.id, cwd: thread.projectPath },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-30T00:00:01.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Only the question is on disk" }],
+      },
+    }),
+    "",
+  ].join("\n"), "utf8");
+  internals.loadedThreadIds.delete(thread.id);
+  let resumeCount = 0;
+  runtime.agent.request = async (method) => {
+    if (method === "thread/resume") {
+      resumeCount += 1;
+      return {
+        thread: {
+          id: thread.id,
+          cwd: thread.projectPath,
+          preview: thread.title,
+          status: { type: "idle" },
+          turns: [{
+            id: "turn-restored",
+            status: "completed",
+            items: [
+              {
+                id: "user-restored",
+                type: "userMessage",
+                content: [{ type: "text", text: "Only the question is on disk" }],
+              },
+              {
+                id: "assistant-restored",
+                type: "agentMessage",
+                text: "Restored assistant reply",
+              },
+            ],
+          }],
+        },
+        model: thread.model,
+      } as never;
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const detail = await runtime.openThread(thread.id);
+  assert.equal(resumeCount, 1);
+  assert.deepEqual(detail.messages.map((message) => [message.role, message.content]), [
+    ["user", "Only the question is on disk"],
+    ["assistant", "Restored assistant reply"],
+  ]);
+
+  const remote = await runtime.remoteCommandHandlers().openThread(thread.id, remoteContext());
+  assert.deepEqual(
+    remote.timeline
+      .filter((item) => item.kind === "user" || item.kind === "assistant")
+      .map((item) => [item.kind, item.content]),
+    [
+      ["user", "Only the question is on disk"],
+      ["assistant", "Restored assistant reply"],
+    ],
+  );
+});
+
+test("prefers recovered assistant history over a longer user-only rollout", async (context) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-long-sparse-history-"));
+  const { runtime, internals } = createRuntimeHarness(codexHome);
+  const thread = internals.threads.get("thread-1")!;
+  const rolloutPath = path.join(codexHome, "sessions", "rollout-thread-1.jsonl");
+  context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+  fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+  fs.writeFileSync(rolloutPath, [
+    JSON.stringify({
+      timestamp: "2026-07-30T00:00:00.000Z",
+      type: "session_meta",
+      payload: { id: thread.id, cwd: thread.projectPath },
+    }),
+    ...Array.from({ length: 20 }, (_, index) => JSON.stringify({
+      timestamp: `2026-07-30T00:00:${String(index + 1).padStart(2, "0")}.000Z`,
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: `Local question ${index + 1}` }],
+      },
+    })),
+    "",
+  ].join("\n"), "utf8");
+  internals.loadedThreadIds.delete(thread.id);
+  runtime.agent.request = async (method) => {
+    assert.equal(method, "thread/resume");
+    return {
+      thread: {
+        id: thread.id,
+        cwd: thread.projectPath,
+        preview: thread.title,
+        status: { type: "idle" },
+        turns: [{
+          id: "turn-recovered",
+          status: "completed",
+          items: [
+            {
+              id: "user-recovered",
+              type: "userMessage",
+              content: [{ type: "text", text: "Recovered question" }],
+            },
+            {
+              id: "assistant-recovered",
+              type: "agentMessage",
+              text: "Recovered assistant reply",
+            },
+          ],
+        }],
+      },
+      model: thread.model,
+    } as never;
+  };
+
+  const remote = await runtime.remoteCommandHandlers().openThread(thread.id, remoteContext());
+
+  assert.deepEqual(
+    remote.timeline
+      .filter((item) => item.kind === "user" || item.kind === "assistant")
+      .map((item) => [item.kind, item.content]),
+    [
+      ["user", "Recovered question"],
+      ["assistant", "Recovered assistant reply"],
+    ],
+  );
+});
+
 test("hydrates historical messages for mobile thread opening", async () => {
   const { runtime, internals } = createRuntimeHarness();
   const thread = internals.threads.get("thread-1")!;
@@ -193,10 +392,15 @@ test("hydrates historical messages for mobile thread opening", async () => {
         status: { type: "idle" },
         turns: [{
           id: "turn-history",
-          status: "completed",
-          items: [
-            { id: "user-history", type: "userMessage", content: [{ type: "text", text: "Old question" }] },
-            { id: "assistant-history", type: "agentMessage", text: "Old answer" },
+        status: "completed",
+        items: [
+          {
+            id: "internal-context",
+            type: "userMessage",
+            content: [{ type: "text", text: "<environment_context>internal mobile metadata</environment_context>" }],
+          },
+          { id: "user-history", type: "userMessage", content: [{ type: "text", text: "Old question" }] },
+          { id: "assistant-history", type: "agentMessage", text: "Old answer" },
           ],
         }],
       },
@@ -207,8 +411,8 @@ test("hydrates historical messages for mobile thread opening", async () => {
   const result = await runtime.remoteCommandHandlers().openThread(thread.id, remoteContext());
 
   assert.deepEqual(result.timeline.map((item) => [item.id, item.kind, item.content]), [
-    ["user-history", "user", "Old question"],
-    ["assistant-history", "assistant", "Old answer"],
+    ["turn-history::user-history", "user", "Old question"],
+    ["turn-history::assistant-history", "assistant", "Old answer"],
   ]);
 });
 
@@ -444,6 +648,60 @@ test("lists restored disk conversations when App Server index is empty", async (
   assert.equal(runtime.listProjectDirectories().some((project) => project.path === projectPath), true);
 });
 
+test("removes resumed rollout copies from the shared control snapshot", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-lineage-dedup-"));
+  const codexHome = path.join(root, "home");
+  const projectPath = path.join(root, "project");
+  const originalPath = path.join(codexHome, "sessions", "rollout-original-id.jsonl");
+  const resumedPath = path.join(codexHome, "sessions", "rollout-resumed-id.jsonl");
+  const { runtime, internals, store } = createRuntimeHarness(codexHome);
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(projectPath, { recursive: true });
+  fs.mkdirSync(path.dirname(originalPath), { recursive: true });
+  const originalContents = [
+    JSON.stringify({
+      timestamp: "2026-07-29T00:00:00.000Z",
+      type: "session_meta",
+      payload: { id: "original-id", cwd: projectPath },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-29T00:00:01.000Z",
+      type: "response_item",
+      payload: { type: "message", role: "user", text: "Canonical conversation" },
+    }),
+    "",
+  ].join("\n");
+  fs.writeFileSync(originalPath, originalContents, "utf8");
+  fs.writeFileSync(resumedPath, [
+    JSON.stringify({
+      timestamp: "2026-07-29T00:05:00.000Z",
+      type: "session_meta",
+      payload: { id: "resumed-id", cwd: projectPath },
+    }),
+    originalContents,
+  ].join("\n"), "utf8");
+  fs.utimesSync(originalPath, new Date("2026-07-29T00:10:00.000Z"), new Date("2026-07-29T00:10:00.000Z"));
+  fs.utimesSync(resumedPath, new Date("2026-07-29T00:05:00.000Z"), new Date("2026-07-29T00:05:00.000Z"));
+  const resumedThread: ThreadSummary = {
+    id: "resumed-id",
+    hostId: "local-desktop",
+    title: "Canonical conversation",
+    projectPath,
+    model: "test/model",
+    status: "completed",
+    updatedAt: "2026-07-29T00:05:00.000Z",
+  };
+  internals.threads.set(resumedThread.id, resumedThread);
+  store.upsertThread(resumedThread);
+  runtime.agent.request = async (method) => method === "thread/list" ? { data: [] } as never : {} as never;
+
+  const threads = await runtime.listThreads({ cwd: projectPath });
+
+  assert.deepEqual(threads.map((thread) => thread.id), ["original-id"]);
+  assert.equal(internals.threads.has("resumed-id"), false);
+  assert.equal(store.snapshot().threads.some((thread) => thread.id === "resumed-id"), false);
+});
+
 test("restores local images as message previews instead of placeholder text", async () => {
   const { runtime } = createRuntimeHarness();
   const imagePath = path.resolve("fixtures", "screen.png");
@@ -467,7 +725,7 @@ test("restores local images as message previews instead of placeholder text", as
 
   const detail = await runtime.openThread("thread-1");
   assert.deepEqual(detail.messages, [{
-    id: "user-image",
+    id: "turn-image::user-image",
     role: "user",
     content: "see",
     images: [{ path: imagePath, name: "screen.png" }],
@@ -556,22 +814,37 @@ test("restores rollout images omitted by App Server thread history", async () =>
   try {
     const { runtime } = createRuntimeHarness(codexHome);
     writeGeneratedImageRollout(codexHome, "thread-1", "turn-rollout-image", "ig-rollout-history");
-    runtime.agent.request = async () => ({
-      thread: {
-        id: "thread-1",
-        cwd: path.resolve("."),
-        turns: [{
-          id: "turn-rollout-image",
-          items: [{ id: "assistant-history", type: "agentMessage", text: "Generated." }],
-        }],
-      },
-    }) as never;
+    const rolloutPath = path.join(
+      codexHome,
+      "sessions",
+      "2026",
+      "07",
+      "22",
+      "rollout-test-thread-1.jsonl",
+    );
+    const imageRecord = fs.readFileSync(rolloutPath, "utf8");
+    fs.writeFileSync(rolloutPath, [
+      JSON.stringify({
+        timestamp: "2026-07-22T07:03:37.992Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Generated." }],
+          internal_chat_message_metadata_passthrough: { turn_id: "turn-rollout-image" },
+        },
+      }),
+      imageRecord,
+    ].join("\n"), "utf8");
+    runtime.agent.request = async () => {
+      throw new Error("Opening local history must not resume the thread.");
+    };
 
     const detail = await runtime.openThread("thread-1");
 
     assert.equal(detail.messages.length, 2);
     assert.equal(detail.messages[0]?.content, "Generated.");
-    assert.equal(detail.messages[1]?.id, "ig-rollout-history");
+    assert.equal(detail.messages[1]?.id, "turn-rollout-image::ig-rollout-history");
     assert.equal(detail.messages[1]?.images?.[0]?.generated, true);
     assert.equal(fs.existsSync(detail.messages[1]?.images?.[0]?.path || ""), true);
   } finally {
@@ -849,13 +1122,75 @@ test("compacts an oversized thread with its last successful model before switchi
   assert.deepEqual(requests.map((request) => request.method), [
     "thread/settings/update",
     "thread/compact/start",
+    "thread/settings/update",
     "turn/start",
   ]);
   assert.deepEqual(requests[0]?.params, {
     threadId: "thread-1",
     model: "provider-5/gpt-5.6-sol",
   });
-  assert.equal(requests[2]?.params.model, "provider-2/grok-latest");
+  assert.deepEqual(requests[2]?.params, {
+    threadId: "thread-1",
+    model: "provider-2/grok-latest",
+  });
+  assert.equal(requests[3]?.params.model, "provider-2/grok-latest");
+});
+
+test("updates Agent Host settings before switching an image thread to a text model", async (context) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-image-model-switch-"));
+  context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+  const { runtime, internals } = createRuntimeHarness(codexHome);
+  const sessions = path.join(codexHome, "sessions", "2026", "08", "01");
+  fs.mkdirSync(sessions, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessions, "rollout-2026-08-01T00-00-00-thread-1.jsonl"),
+    [
+      { type: "turn_context", payload: { turn_id: "turn-image", model: "provider-5/gpt-image-2" } },
+      { type: "event_msg", payload: { type: "token_count", info: { last_token_usage: { total_tokens: 12_000 } } } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "turn-image" } },
+    ].map((record) => JSON.stringify(record)).join("\n"),
+  );
+  internals.threads.set("thread-1", {
+    ...internals.threads.get("thread-1")!,
+    model: "provider-5/gpt-5.6-sol",
+  });
+  const gateway = runtime.gateway as unknown as { getStatus(): Record<string, unknown> };
+  let preparedGatewayModel: { threadId: string; modelId: string } | null = null;
+  gateway.getStatus = () => ({
+    models: [
+      { id: "provider-5/gpt-image-2", contextWindow: 32_768 },
+      { id: "provider-5/gpt-5.6-sol", contextWindow: 272_000 },
+    ],
+  });
+  runtime.gateway.setThreadModel = (threadId, modelId) => {
+    preparedGatewayModel = { threadId, modelId };
+    return true;
+  };
+  const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+  runtime.agent.request = async (method, params) => {
+    requests.push({ method, params: params as Record<string, unknown> });
+    if (method === "turn/start") return { turn: { id: "turn-text" } } as never;
+    return {} as never;
+  };
+
+  await runtime.startTurn({
+    threadId: "thread-1",
+    text: "Continue with a text model",
+    model: "provider-5/gpt-5.6-sol",
+  });
+
+  assert.deepEqual(requests.map((request) => request.method), [
+    "thread/settings/update",
+    "turn/start",
+  ]);
+  assert.deepEqual(requests[0]?.params, {
+    threadId: "thread-1",
+    model: "provider-5/gpt-5.6-sol",
+  });
+  assert.deepEqual(preparedGatewayModel, {
+    threadId: "thread-1",
+    modelId: "provider-5/gpt-5.6-sol",
+  });
 });
 
 test("resumes an unloaded existing thread through the internal gateway before starting a turn", async () => {
@@ -916,7 +1251,7 @@ test("routes concurrent turn events to the matching thread", () => {
     },
   });
 
-  assert.equal(store.snapshot().timeline.find((item) => item.id === "assistant-2")?.threadId, "thread-2");
+  assert.equal(store.snapshot().timeline.find((item) => item.id === "turn-2::assistant-2")?.threadId, "thread-2");
   assert.equal((forwarded[0]?.params as Record<string, unknown>)?.threadId, "thread-2");
 });
 
@@ -924,6 +1259,11 @@ test("finalizes running timeline items when a turn is interrupted", async () => 
   const { runtime, internals, store } = createRuntimeHarness();
   internals.activeTurns.set("thread-1", "turn-1");
   runtime.agent.request = async () => ({}) as never;
+  let interruptedGatewayTurn: string | null = null;
+  runtime.gateway.interruptTurn = (turnId) => {
+    interruptedGatewayTurn = turnId;
+    return 1;
+  };
   internals.handleAgentMessage({
     method: "item/agentMessage/delta",
     params: {
@@ -933,16 +1273,17 @@ test("finalizes running timeline items when a turn is interrupted", async () => 
       delta: "Partial output",
     },
   });
-  assert.equal(store.snapshot().timeline.find((item) => item.id === "assistant-running")?.status, "running");
+  assert.equal(store.snapshot().timeline.find((item) => item.id === "turn-1::assistant-running")?.status, "running");
 
   await runtime.interruptTurn("thread-1");
 
-  assert.equal(store.snapshot().timeline.find((item) => item.id === "assistant-running")?.status, "completed");
+  assert.equal(store.snapshot().timeline.find((item) => item.id === "turn-1::assistant-running")?.status, "completed");
   assert.equal(store.snapshot().threads.find((thread) => thread.id === "thread-1")?.status, "interrupted");
+  assert.equal(interruptedGatewayTurn, "turn-1");
 });
 
 test("limits workspace-write sandbox roots and maps attachments to App Server input", async () => {
-  const { runtime } = createRuntimeHarness();
+  const { runtime, store } = createRuntimeHarness();
   let request: { method: string; params: Record<string, unknown> } | null = null;
   runtime.agent.request = async (method, params) => {
     request = { method, params: params as Record<string, unknown> };
@@ -975,7 +1316,11 @@ test("limits workspace-write sandbox roots and maps attachments to App Server in
   const input = request?.params.input as Array<Record<string, unknown>>;
   const persistedFilePath = String(input[0]?.text || "").split("\n- ").at(-1) || "";
   const persistedImagePath = String(input[1]?.path || "");
-  assert.equal(turnResult.files?.[0]?.path, persistedFilePath);
+  const returnedFile = turnResult.files?.find((file) => file.name === "notes.txt");
+  const returnedImage = turnResult.files?.find((file) => file.name === "screen.png");
+  assert.equal(returnedFile?.path, persistedFilePath);
+  assert.notEqual(returnedImage?.path, imagePath);
+  assert.equal(returnedImage?.mimeType, "image/png");
   assert.equal(persistedFilePath, filePath);
   assert.equal(persistedImagePath, imagePath);
   assert.equal(fs.readFileSync(persistedFilePath, "utf8"), "attachment notes");
@@ -988,6 +1333,11 @@ test("limits workspace-write sandbox roots and maps attachments to App Server in
     { type: "localImage", path: persistedImagePath },
   ]);
   fs.rmSync(fixtureDirectory, { recursive: true, force: true });
+  assert.equal(fs.existsSync(returnedImage?.path || ""), true);
+  assert.deepEqual(
+    store.snapshot().timeline.find((item) => item.kind === "user")?.files?.map((file) => file.name),
+    ["screen.png", "notes.txt"],
+  );
 });
 
 test("publishes generated document artifacts as downloadable assistant files", () => {
@@ -1100,12 +1450,50 @@ test("restores an existing local image link when opening an older thread", async
 
   const detail = await runtime.openThread("thread-1");
 
-  assert.equal(detail.messages[0]?.id, "assistant-history-image");
+  assert.equal(detail.messages[0]?.id, "turn-history-image::assistant-history-image");
   assert.equal(detail.messages[0]?.images?.[0]?.name, "sample.png");
   assert.equal(detail.messages[0]?.images?.[0]?.generated, true);
   assert.deepEqual(fs.readFileSync(detail.messages[0]?.images?.[0]?.path || ""), fs.readFileSync(imagePath));
   fs.rmSync(codexHome, { recursive: true, force: true });
   fs.rmSync(project, { recursive: true, force: true });
+});
+
+test("keeps repeated App Server item ids unique across restored turns", async () => {
+  const { runtime } = createRuntimeHarness();
+  runtime.agent.request = async () => ({
+    thread: {
+      id: "thread-1",
+      cwd: ".",
+      turns: [
+        {
+          id: "turn-1",
+          status: "completed",
+          items: [
+            { id: "item-1", type: "userMessage", content: [{ type: "text", text: "First prompt" }] },
+            { id: "item-2", type: "agentMessage", text: "First response" },
+          ],
+        },
+        {
+          id: "turn-2",
+          status: "completed",
+          items: [
+            { id: "item-1", type: "userMessage", content: [{ type: "text", text: "Second prompt" }] },
+            { id: "item-2", type: "agentMessage", text: "Second response" },
+          ],
+        },
+      ],
+    },
+  }) as never;
+
+  const detail = await runtime.openThread("thread-1");
+
+  assert.deepEqual(detail.messages.map((message) => message.id), [
+    "turn-1::item-1",
+    "turn-1::item-2",
+    "turn-2::item-1",
+    "turn-2::item-2",
+  ]);
+  assert.equal(new Set(detail.messages.map((message) => message.id)).size, detail.messages.length);
 });
 
 test("does not restore an uploaded file after the user deletes the original", async () => {
@@ -1150,7 +1538,7 @@ test("does not restore an uploaded file after the user deletes the original", as
 });
 
 test("executes remote commands through desktop authority with safe defaults", async () => {
-  const { runtime, internals } = createRuntimeHarness();
+  const { runtime, internals, store } = createRuntimeHarness();
   const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
   runtime.agent.request = async (method, params) => {
     requests.push({ method, params: params as Record<string, unknown> });
@@ -1164,6 +1552,8 @@ test("executes remote commands through desktop authority with safe defaults", as
           displayName: "Codex - GPT Test",
           description: "Test model",
           defaultReasoningEffort: "high",
+          supportedReasoningEfforts: [{ reasoningEffort: "high", description: "High" }],
+          isDefault: false,
         },
         {
           id: "provider-2/gemma-test",
@@ -1172,6 +1562,7 @@ test("executes remote commands through desktop authority with safe defaults", as
           description: "Model without configurable reasoning",
           defaultReasoningEffort: "high",
           supportedReasoningEfforts: [],
+          isDefault: false,
         },
       ],
     } as never;
@@ -1226,6 +1617,7 @@ test("executes remote commands through desktop authority with safe defaults", as
     "thread-remote",
     {
       text: "Run from the mobile client",
+      clientMessageId: "mobile-message-1",
       model: "sub2api/gpt-test",
       reasoningEffort: "xhigh",
       attachments: [{
@@ -1238,6 +1630,10 @@ test("executes remote commands through desktop authority with safe defaults", as
     context,
   );
   assert.equal(startedTurn.turnId, "turn-remote");
+  assert.equal(
+    store.snapshot().timeline.find((item) => item.kind === "user")?.clientMessageId,
+    "mobile-message-1",
+  );
   const remoteFilePath = String(((requests[1]?.params.input as Array<Record<string, unknown>>)?.[0]?.text || ""))
     .split("\n- ").at(-1) || "";
   assert.equal(fs.readFileSync(remoteFilePath, "utf8"), "mobile");
@@ -1255,6 +1651,7 @@ test("executes remote commands through desktop authority with safe defaults", as
       description: "Test model",
       defaultReasoningEffort: "high",
       reasoningEfforts: ["high"],
+      isDefault: false,
     }, {
       id: "provider-2/gemma-test",
       model: "provider-2/gemma-test",
@@ -1264,6 +1661,7 @@ test("executes remote commands through desktop authority with safe defaults", as
       description: "Model without configurable reasoning",
       defaultReasoningEffort: "high",
       reasoningEfforts: [],
+      isDefault: false,
     }],
   });
 
@@ -1341,6 +1739,62 @@ test("executes remote thread lifecycle commands and rehydrates restored state", 
   assert.equal(
     store.listEvents(0).filter((event) => event.type === "thread.removed").length,
     2,
+  );
+});
+
+test("executes remote conversation compaction through App Server", async () => {
+  const { runtime, internals } = createRuntimeHarness();
+  const current = internals.threads.get("thread-1")!;
+  internals.threads.set("thread-1", { ...current, status: "completed" });
+  const requests: string[] = [];
+  runtime.agent.request = async (method) => {
+    requests.push(method);
+    if (method === "thread/compact/start") {
+      queueMicrotask(() => internals.handleAgentMessage({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: { id: "compact-turn", status: "completed" },
+        },
+      }));
+    }
+    return {} as never;
+  };
+
+  const result = await runtime.remoteCommandHandlers().compactThread!("thread-1", remoteContext());
+
+  assert.equal(result.threadId, "thread-1");
+  assert.deepEqual(requests, ["thread/compact/start"]);
+});
+
+test("deletes archived remote threads and publishes one removal event", async () => {
+  const { runtime, internals, store } = createRuntimeHarness();
+  internals.threads.delete("thread-1");
+  const requests: string[] = [];
+  runtime.agent.request = async (method, params) => {
+    requests.push(method);
+    if (method === "thread/list") {
+      assert.equal((params as { archived?: boolean }).archived, true);
+      return {
+        data: [{
+          id: "thread-archived",
+          name: "Archived conversation",
+          cwd: path.resolve("."),
+          updatedAt: Math.floor(Date.now() / 1_000),
+          status: { type: "notLoaded" },
+        }],
+      } as never;
+    }
+    return {} as never;
+  };
+
+  await runtime.remoteCommandHandlers().deleteThread("thread-archived", remoteContext());
+
+  assert.deepEqual(requests, ["thread/list", "thread/delete"]);
+  assert.equal(
+    store.listEvents(0).filter((event) =>
+      event.type === "thread.removed" && event.threadId === "thread-archived").length,
+    1,
   );
 });
 
@@ -1521,42 +1975,62 @@ test("keeps App Server retries running and fails only on the terminal error", ()
   assert.match(store.snapshot().timeline.find((item) => item.id === "error-turn-1")?.content || "", /Retry budget exhausted/);
 });
 
-test("changes the mobile sync port and restores the previous listener on failure", async () => {
-  const firstPort = await availablePort();
-  const blocker = net.createServer();
-  await new Promise<void>((resolve, reject) => {
-    blocker.once("error", reject);
-    blocker.listen(0, "127.0.0.1", resolve);
+test("fails a turn when a terminal gateway error receives no App Server completion", async () => {
+  const { runtime, internals, store } = createRuntimeHarness();
+  internals.activeTurns.set("thread-1", "turn-stuck");
+  internals.gatewayFailureGraceMs = 5;
+  const requests: Array<{ method: string; params: unknown }> = [];
+  runtime.agent.request = async (method, params) => {
+    requests.push({ method, params });
+    return {} as never;
+  };
+  let interruptedTurn: string | null = null;
+  runtime.gateway.interruptTurn = (turnId) => {
+    interruptedTurn = turnId;
+    return 1;
+  };
+
+  runtime.gateway.emit("request", {
+    time: new Date().toISOString(),
+    level: "error",
+    event: "request_failed",
+    turn_id: "turn-stuck",
+    status: 504,
+    message: "Upstream request timed out.",
   });
-  const blockedAddress = blocker.address();
-  assert.ok(blockedAddress && typeof blockedAddress !== "string");
+  assert.equal(internals.pendingGatewayFailures.has("turn-stuck"), true);
+  assert.equal(internals.threads.get("thread-1")?.status, "running");
+  runtime.gateway.emit("request", {
+    time: new Date().toISOString(),
+    level: "debug",
+    event: "request_started",
+    turn_id: "turn-stuck",
+  });
+  assert.equal(internals.pendingGatewayFailures.size, 0);
+  runtime.gateway.emit("request", {
+    time: new Date().toISOString(),
+    level: "error",
+    event: "request_failed",
+    turn_id: "turn-stuck",
+    status: 504,
+    message: "Upstream request timed out again.",
+  });
 
-  const runtime = new DesktopRuntime(".", ".", "127.0.0.1", 0, new ControlStore());
-  try {
-    const changed = await runtime.setSyncPort(firstPort);
-    assert.equal(changed.state, "running");
-    assert.equal(changed.port, firstPort);
+  await delay(25);
 
-    await assert.rejects(runtime.setSyncPort(blockedAddress.port), /address already in use/i);
-    assert.equal(runtime.getSyncStatus().state, "running");
-    assert.equal(runtime.getSyncStatus().port, firstPort);
-  } finally {
-    await new Promise<void>((resolve) => blocker.close(() => resolve()));
-    await runtime.stop();
-  }
+  assert.equal(internals.pendingGatewayFailures.size, 0);
+  assert.equal(internals.activeTurns.has("thread-1"), false);
+  assert.equal(internals.threads.get("thread-1")?.status, "failed");
+  assert.equal(interruptedTurn, "turn-stuck");
+  assert.deepEqual(requests, [{
+    method: "turn/interrupt",
+    params: { threadId: "thread-1", turnId: "turn-stuck" },
+  }]);
+  assert.match(
+    store.snapshot().timeline.find((item) => item.id === "error-gateway-turn-stuck")?.content || "",
+    /did not finish the turn/,
+  );
 });
-
-async function availablePort(): Promise<number> {
-  const server = net.createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  return address.port;
-}
 
 function writeGeneratedImageRollout(
   codexHome: string,

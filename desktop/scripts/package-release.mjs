@@ -27,7 +27,7 @@ const signingRequired = process.env.RHZYCODE_REQUIRE_SIGNING === "1";
 const signingConfigured = Boolean(
   process.env.CSC_LINK || process.env.WIN_CSC_LINK || process.env.CSC_NAME,
 );
-const defaultUpdateUrl = `https://minio.gshbzw.com/wxfile/rhzycode/${requestedPlatform}`;
+const defaultUpdateUrl = `http://218.201.210.211:8000/updates/${requestedPlatform}`;
 const configuredUpdateUrl = process.env.RHZYCODE_UPDATE_URL?.trim() || "";
 const updateUrl = configuredUpdateUrl || defaultUpdateUrl;
 const electronDist = resolveElectronDist(desktopPackage.devDependencies.electron);
@@ -144,6 +144,22 @@ const artifacts = await build({
     },
   },
 });
+
+if (directoryOnly && requestedPlatform === "windows" && updateUrl) {
+  const updaterConfigPath = path.join(
+    desktopDir,
+    "release",
+    "win-unpacked",
+    "resources",
+    "app-update.yml",
+  );
+  fs.writeFileSync(updaterConfigPath, [
+    "provider: generic",
+    `url: ${JSON.stringify(updateUrl)}`,
+    "updaterCacheDirName: rhzycode-updater",
+    "",
+  ].join("\n"), "utf8");
+}
 
 const audit = auditRelease({
   desktopDir,

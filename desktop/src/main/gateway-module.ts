@@ -5,9 +5,12 @@ import path from "node:path";
 import {
   startEmbeddedGateway,
   type EmbeddedGatewayHandle,
+  type EmbeddedGatewayLogEvent,
   type EmbeddedGatewayModel,
   type EmbeddedGatewayProvider,
 } from "../../model-gateway/src/embedded.js";
+
+export type GatewayRequestEvent = EmbeddedGatewayLogEvent;
 
 export type GatewayModuleState = "stopped" | "starting" | "running" | "error";
 
@@ -34,6 +37,7 @@ export class GatewayModule extends EventEmitter {
     private readonly rootDir: string,
     private readonly envPath = resolveGatewayEnvPath(rootDir),
     private readonly configPath?: string,
+    private readonly fetchImpl?: typeof fetch,
   ) {
     super();
   }
@@ -63,6 +67,11 @@ export class GatewayModule extends EventEmitter {
 
   async start(): Promise<GatewayModuleStatus> {
     if (this.handle) return this.getStatus();
+    if (!this.hasConfiguredProviders()) {
+      this.error = null;
+      this.setState("stopped");
+      return this.getStatus();
+    }
     this.setState("starting");
     try {
       this.handle = await startEmbeddedGateway({
@@ -70,6 +79,8 @@ export class GatewayModule extends EventEmitter {
         envPath: this.envPath,
         configPath: this.configPath,
         port: 0,
+        fetchImpl: this.fetchImpl,
+        onLog: (event: EmbeddedGatewayLogEvent) => this.emit("request", event),
       });
       this.catalogPath = this.writeRuntimeCatalog(this.handle.models);
       this.error = null;
@@ -93,6 +104,23 @@ export class GatewayModule extends EventEmitter {
     this.error = null;
     this.setState("stopped");
     return this.getStatus();
+  }
+
+  private hasConfiguredProviders(): boolean {
+    const configPath = this.configPath
+      ? path.resolve(this.rootDir, this.configPath)
+      : path.join(this.rootDir, "gateway.config.json");
+    try {
+      const config = JSON.parse(fs.readFileSync(configPath, "utf8")) as { providers?: unknown };
+      return Boolean(
+        config.providers
+        && typeof config.providers === "object"
+        && !Array.isArray(config.providers)
+        && Object.keys(config.providers).length > 0,
+      );
+    } catch {
+      return true;
+    }
   }
 
   private writeRuntimeCatalog(models: EmbeddedGatewayModel[]): string {
@@ -171,6 +199,14 @@ export class GatewayModule extends EventEmitter {
   async restart(): Promise<GatewayModuleStatus> {
     await this.stop();
     return this.start();
+  }
+
+  interruptTurn(turnId: string): number {
+    return this.handle?.interruptTurn(turnId) || 0;
+  }
+
+  setThreadModel(threadId: string, modelId: string): boolean {
+    return this.handle?.setThreadModel(threadId, modelId) || false;
   }
 
   async probeProviders(): Promise<GatewayModuleStatus> {

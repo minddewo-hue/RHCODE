@@ -1,0 +1,3 @@
+provider: generic
+url: http://218.201.210.211:8000/updates/windows
+updaterCacheDirName: rhzycode-updater

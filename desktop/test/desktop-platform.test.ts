@@ -4,6 +4,7 @@ import {
   bundledCodexExecutable,
   desktopHostPlatform,
   desktopUpdatePlatform,
+  preferredCodexPath,
   shouldQuitWhenAllWindowsClose,
 } from "../src/main/platform/desktop-platform.js";
 
@@ -21,4 +22,16 @@ test("uses native executable and application lifecycle conventions", () => {
   assert.equal(bundledCodexExecutable("darwin"), "codex");
   assert.equal(shouldQuitWhenAllWindowsClose("win32"), true);
   assert.equal(shouldQuitWhenAllWindowsClose("darwin"), false);
+});
+
+test("prefers the bundled Codex binary and only falls back when it is absent", () => {
+  assert.equal(
+    preferredCodexPath("C:\\app\\resources\\codex\\codex.exe", true, "C:\\system\\codex.exe"),
+    "C:\\app\\resources\\codex\\codex.exe",
+  );
+  assert.equal(
+    preferredCodexPath("C:\\app\\resources\\codex\\codex.exe", false, " C:\\system\\codex.exe "),
+    "C:\\system\\codex.exe",
+  );
+  assert.equal(preferredCodexPath("/app/codex", false), undefined);
 });

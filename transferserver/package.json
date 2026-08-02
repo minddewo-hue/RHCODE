@@ -1,0 +1,17 @@
+{
+  "name": "@rhzycode/transferserver",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "audit:remote": "node scripts/security-audit.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@fastify/websocket": "^11.3.0",
+    "@rhzycode/update-contract": "*",
+    "fastify": "^5.10.0",
+    "ws": "^8.18.3"
+  }
+}

@@ -34,28 +34,198 @@ interface ChatEntrySource {
 
 type ActivitySource = Pick<ChatEntrySource, "selectedThreadId" | "timeline" | "approvals" | "userInputs">;
 
+export function isThreadHistoryLoading(
+  selectedThreadId: string | null,
+  openingThreadId: string | null,
+): boolean {
+  return Boolean(selectedThreadId && openingThreadId === selectedThreadId);
+}
+
+export function composerInteractionState(options: {
+  hasConversation: boolean;
+  canWrite: boolean;
+  online: boolean;
+  historyLoading: boolean;
+}): { editable: boolean; sendReady: boolean } {
+  const editable = options.hasConversation && options.canWrite && options.online;
+  return {
+    editable,
+    sendReady: editable && !options.historyLoading,
+  };
+}
+
+/** Whether openThread should run for the selected conversation. */
+export function shouldOpenThreadHistory(options: {
+  selectedThreadId: string | null;
+  selectedIsArchived?: boolean;
+  online: boolean;
+  alreadyOpenedThreadId: string | null;
+}): boolean {
+  if (!options.selectedThreadId || !options.online || options.selectedIsArchived) return false;
+  return options.alreadyOpenedThreadId !== options.selectedThreadId;
+}
+
+export function shouldKeepSelectedThread(
+  selectedThreadId: string | null,
+  threads: ReadonlyArray<{ id: string }>,
+  pendingMessages: ReadonlyArray<Pick<PendingMessage, "threadId">>,
+): boolean {
+  return Boolean(selectedThreadId && (
+    threads.some((thread) => thread.id === selectedThreadId)
+    || pendingMessages.some((message) => message.threadId === selectedThreadId)
+  ));
+}
+
+
+/** Active remote turns need periodic snapshot catch-up when the live stream is lossy. */
+export function shouldCatchUpActiveThread(options: {
+  online: boolean;
+  threadStatus?: string | null;
+}): boolean {
+  if (!options.online || !options.threadStatus) return false;
+  return ["running", "waiting_for_approval", "waiting_for_input"].includes(options.threadStatus);
+}
+
+/** Drop cached openThread state after an offline stretch so history reloads on recovery. */
+export function shouldResetOpenedThreadHistory(previousStatus: string | null | undefined, nextStatus: string): boolean {
+  if (nextStatus === "offline") return true;
+  // connecting after a live session also means the socket is gone; force history reload.
+  if (nextStatus === "connecting" && previousStatus === "online") return true;
+  return false;
+}
+
+/** Foreground resume: keep the socket when possible and only hard-reconnect when it is down. */
+export function resumeConnectionAction(socketOpen: boolean): "resync" | "reconnect" {
+  return socketOpen ? "resync" : "reconnect";
+}
+
+export function shouldCaptureConversationPageSwipe(dx: number, dy: number): boolean {
+  const horizontalDistance = Math.abs(dx);
+  return horizontalDistance >= 12 && horizontalDistance > Math.abs(dy) * 1.5;
+}
+
+export function conversationPageSwipeDirection(
+  dx: number,
+  dy: number,
+  velocityX: number,
+  pageWidth: number,
+): "previous" | "next" | null {
+  if (!shouldCaptureConversationPageSwipe(dx, dy)) return null;
+  const horizontalDistance = Math.abs(dx);
+  const distanceThreshold = Math.min(56, Math.max(40, pageWidth * 0.12));
+  const fastSwipe = Math.abs(velocityX) >= 0.35 && horizontalDistance >= 20;
+  if (!fastSwipe && horizontalDistance < distanceThreshold) return null;
+  return dx < 0 ? "next" : "previous";
+}
+
 export function isResultEntry(entry: ChatEntry): boolean {
   if (entry.type === "pending") return true;
   if (entry.type !== "timeline") return false;
   return entry.item.kind === "user" || entry.item.kind === "assistant";
 }
 
+function normalizeMessageContent(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function attachmentSignature(
+  attachments: ReadonlyArray<{ name: string; kind: "file" | "image"; size: number }> = [],
+): string {
+  return attachments
+    .map((attachment) => `${attachment.kind}\u0000${attachment.name}\u0000${attachment.size}`)
+    .sort()
+    .join("\n");
+}
+
+export function findRetryablePendingMessage(
+  pendingMessages: PendingMessage[],
+  input: {
+    threadId: string;
+    content: string;
+    attachments?: ReadonlyArray<{ name: string; kind: "file" | "image"; size: number }>;
+  },
+): PendingMessage | null {
+  const content = normalizeMessageContent(input.content);
+  const attachments = attachmentSignature(input.attachments);
+  return pendingMessages
+    .filter((message) => (
+      message.state === "failed"
+      && message.threadId === input.threadId
+      && normalizeMessageContent(message.content) === content
+      && attachmentSignature(message.attachments) === attachments
+    ))
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))[0]
+    || null;
+}
+
+/** One-to-one claim of server user rows by local optimistic sends. */
+export function claimPendingTimelineMatches(
+  pendingMessages: PendingMessage[],
+  timeline: TimelineItem[],
+): Map<string, string> {
+  const claimedTimelineIds = new Set<string>();
+  const matches = new Map<string, string>();
+  const userItems = timeline
+    .filter((item) => item.kind === "user")
+    .slice()
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  const orderedPending = pendingMessages
+    .slice()
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+
+  for (const pending of orderedPending) {
+    const match = userItems.find((item) => (
+      item.threadId === pending.threadId
+      && item.clientMessageId === pending.id
+      && !claimedTimelineIds.has(item.id)
+    ));
+    if (!match) continue;
+    claimedTimelineIds.add(match.id);
+    matches.set(pending.id, match.id);
+  }
+
+  return matches;
+}
+
+export function reconcilePendingMessages(
+  pendingMessages: PendingMessage[],
+  timeline: TimelineItem[],
+): PendingMessage[] {
+  if (!pendingMessages.length) return pendingMessages;
+  const matches = claimPendingTimelineMatches(pendingMessages, timeline);
+  if (!matches.size) return pendingMessages;
+  return pendingMessages.filter((message) => !matches.has(message.id));
+}
+
+function compareChatEntries(left: ChatEntry, right: ChatEntry): number {
+  const byTime = left.createdAt.localeCompare(right.createdAt);
+  if (byTime) return byTime;
+  // Keep stable ordering when timestamps collide during weak-network merges.
+  const rank = (entry: ChatEntry): number => {
+    if (entry.type === "timeline") {
+      if (entry.item.kind === "user") return 0;
+      if (entry.item.kind === "assistant") return 1;
+      return 2;
+    }
+    if (entry.type === "pending") return 3;
+    if (entry.type === "approval") return 4;
+    return 5;
+  };
+  const byRank = rank(left) - rank(right);
+  if (byRank) return byRank;
+  return left.id.localeCompare(right.id);
+}
+
 export function buildChatEntries(source: ChatEntrySource, includeActivity: boolean): ChatEntry[] {
   if (!source.selectedThreadId) return [];
   const timeline = source.timeline.filter((item) => item.threadId === source.selectedThreadId);
-  const attachmentMessages = source.pendingMessages.filter((message) => message.attachments?.length);
-  const visiblePending = source.pendingMessages.filter((message) => (
-    message.threadId === source.selectedThreadId
-    && (message.attachments?.length
-      || !timeline.some((item) => item.kind === "user" && item.content.trim() === message.content.trim()))
-  ));
+  const threadPending = source.pendingMessages.filter((message) => message.threadId === source.selectedThreadId);
+  const matchedPendingIds = new Set(claimPendingTimelineMatches(threadPending, timeline).keys());
+  const visiblePending = threadPending.filter((message) => !matchedPendingIds.has(message.id));
 
   return [
     ...timeline.filter((item) => (
-      (includeActivity || item.kind === "user" || item.kind === "assistant")
-      && !(item.kind === "user" && attachmentMessages.some((message) => (
-        message.threadId === item.threadId && message.content.trim() === item.content.trim()
-      )))
+      includeActivity || item.kind === "user" || item.kind === "assistant"
     )).map((item): ChatEntry => ({
       type: "timeline",
       id: `timeline:${item.id}`,
@@ -84,7 +254,7 @@ export function buildChatEntries(source: ChatEntrySource, includeActivity: boole
         createdAt: request.createdAt,
         request,
       })) : []),
-  ].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  ].sort(compareChatEntries);
 }
 
 export function countActivityEntries(source: ActivitySource): number {

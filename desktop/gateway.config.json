@@ -28,7 +28,8 @@
     "sub2api/gpt-5.6-sol": { "provider": "sub2api", "upstream_model": "gpt-5.6-sol" },
     "sub2api/gpt-5.6-terra": { "provider": "sub2api", "upstream_model": "gpt-5.6-terra" }
   },
-  "upstream_timeout_ms": 600000,
+  "upstream_timeout_ms": 180000,
+  "upstream_stream_idle_timeout_ms": 120000,
   "sticky_ttl_ms": 3600000,
   "circuit_breaker": { "failure_threshold": 3, "cooldown_ms": 30000 }
 }

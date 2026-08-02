@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   migrateCodexSessions,
   normalizeCodexSessionProviders,
+  normalizeCodexSessionProvidersOnce,
   planCodexSessionMigration,
   runFirstLaunchEnvironmentMigrations,
   type EnvironmentMigrationSource,
@@ -106,6 +107,76 @@ test("normalizes imported provider metadata without changing conversation text",
     normalizedCount: 0,
     failedCount: 0,
   });
+});
+
+test("normalizes session providers once for the current marker version", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-provider-normalization-once-"));
+  const codexHome = path.join(root, "codex-home");
+  const statePath = path.join(root, "state", "session-provider-normalization.json");
+  const initialSession = path.join(codexHome, "sessions", "rollout-initial.jsonl");
+  const laterSession = path.join(codexHome, "sessions", "rollout-later.jsonl");
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  writeSession(initialSession, "initial-id", root);
+
+  assert.deepEqual(normalizeCodexSessionProvidersOnce(codexHome, statePath), {
+    examinedCount: 1,
+    normalizedCount: 1,
+    failedCount: 0,
+  });
+  const marker = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+    version?: unknown;
+    completedAt?: unknown;
+  };
+  assert.equal(marker.version, 1);
+  assert.equal(typeof marker.completedAt, "string");
+  assert.equal(Number.isFinite(Date.parse(String(marker.completedAt))), true);
+
+  writeSession(laterSession, "later-id", root);
+  assert.deepEqual(normalizeCodexSessionProvidersOnce(codexHome, statePath), {
+    examinedCount: 0,
+    normalizedCount: 0,
+    failedCount: 0,
+  });
+  const laterMetadata = JSON.parse(fs.readFileSync(laterSession, "utf8").split("\n", 1)[0]!) as {
+    payload: { model_provider: string };
+  };
+  assert.equal(laterMetadata.payload.model_provider, "OpenAI");
+});
+
+test("retries provider normalization after invalid markers and failed runs", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-provider-normalization-retry-"));
+  const codexHome = path.join(root, "codex-home");
+  const statePath = path.join(root, "state", "session-provider-normalization.json");
+  const sessionPath = path.join(codexHome, "sessions", "rollout-retry.jsonl");
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.dirname(sessionPath), { recursive: true });
+  fs.writeFileSync(sessionPath, "not-json model_provider\n", "utf8");
+
+  assert.deepEqual(normalizeCodexSessionProvidersOnce(codexHome, statePath), {
+    examinedCount: 1,
+    normalizedCount: 0,
+    failedCount: 1,
+  });
+  assert.equal(fs.existsSync(statePath), false);
+
+  writeSession(sessionPath, "retry-id", root);
+  assert.deepEqual(normalizeCodexSessionProvidersOnce(codexHome, statePath), {
+    examinedCount: 1,
+    normalizedCount: 1,
+    failedCount: 0,
+  });
+  assert.equal(
+    (JSON.parse(fs.readFileSync(statePath, "utf8")) as { version: number }).version,
+    1,
+  );
+
+  writeSession(sessionPath, "outdated-marker-id", root);
+  fs.writeFileSync(statePath, JSON.stringify({ version: 0, completedAt: new Date().toISOString() }), "utf8");
+  assert.equal(normalizeCodexSessionProvidersOnce(codexHome, statePath).normalizedCount, 1);
+
+  writeSession(sessionPath, "invalid-marker-id", root);
+  fs.writeFileSync(statePath, "not-json\n", "utf8");
+  assert.equal(normalizeCodexSessionProvidersOnce(codexHome, statePath).normalizedCount, 1);
 });
 
 test("prompts for Codex and Claude separately and records the first-launch decision", async (context) => {

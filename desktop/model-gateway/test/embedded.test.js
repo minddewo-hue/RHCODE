@@ -4,6 +4,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { startEmbeddedGateway } from "../src/embedded.js";
 
 test("embedded gateway uses an ephemeral loopback port", async (context) => {
@@ -40,6 +41,242 @@ test("embedded gateway uses an ephemeral loopback port", async (context) => {
   const response = await fetch(`${gateway.baseUrl}/models`);
   assert.equal(response.status, 200);
   assert.deepEqual((await response.json()).data.map((model) => model.id), ["local/test"]);
+});
+
+test("uses the injected fetch implementation for upstream requests", async (context) => {
+  const upstream = http.createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [] }));
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "response-1",
+      object: "response",
+      status: "completed",
+      output: [],
+    }));
+  });
+  await new Promise((resolve, reject) => {
+    upstream.once("error", reject);
+    upstream.listen(0, "127.0.0.1", resolve);
+  });
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-injected-fetch-"));
+  fs.writeFileSync(path.join(rootDir, "gateway.config.json"), JSON.stringify({
+    providers: {
+      injected: {
+        base_url: `http://127.0.0.1:${address.port}/v1`,
+        protocol: "responses",
+      },
+    },
+    models: {
+      "injected/test": { provider: "injected", upstream_model: "test" },
+    },
+  }));
+  const requestedUrls = [];
+  const logEvents = [];
+  const fetchImpl = (input, init) => {
+    requestedUrls.push(String(input));
+    return fetch(input, init);
+  };
+  const gateway = await startEmbeddedGateway({
+    rootDir,
+    port: 0,
+    fetchImpl,
+    onLog: (event) => logEvents.push(event),
+  });
+  context.after(async () => {
+    await gateway.stop();
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  await gateway.probeProviders();
+  const response = await fetch(`${gateway.baseUrl}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "injected/test",
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "hello" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-observed" },
+      }],
+    }),
+  });
+  assert.equal(response.status, 200);
+  assert.ok(requestedUrls.some((url) => url.endsWith("/v1/models")));
+  assert.ok(requestedUrls.some((url) => url.endsWith("/v1/responses")));
+  assert.equal(
+    logEvents.find((event) => event.event === "request_completed")?.turn_id,
+    "turn-observed",
+  );
+});
+
+test("reroutes image-model compaction through the thread's selected text model", async (context) => {
+  let upstreamBody = null;
+  const upstream = http.createServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [] }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    upstreamBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "response-compaction",
+      object: "response",
+      status: "completed",
+      output: [],
+    }));
+  });
+  await new Promise((resolve, reject) => {
+    upstream.once("error", reject);
+    upstream.listen(0, "127.0.0.1", resolve);
+  });
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-compaction-reroute-"));
+  fs.writeFileSync(path.join(rootDir, "gateway.config.json"), JSON.stringify({
+    providers: {
+      local: {
+        base_url: `http://127.0.0.1:${address.port}/v1`,
+        protocol: "responses",
+      },
+    },
+    models: {
+      "local/gpt-image-2": { provider: "local", upstream_model: "image-upstream" },
+      "local/gpt-text": { provider: "local", upstream_model: "text-upstream" },
+    },
+  }));
+  const logEvents = [];
+  const gateway = await startEmbeddedGateway({
+    rootDir,
+    port: 0,
+    onLog: (event) => logEvents.push(event),
+  });
+  context.after(async () => {
+    await gateway.stop();
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  assert.equal(gateway.setThreadModel("thread-switch", "local/gpt-text"), true);
+  const response = await fetch(`${gateway.baseUrl}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "local/gpt-image-2",
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: "You are performing a CONTEXT CHECKPOINT COMPACTION. Summarize the thread.",
+        }],
+      }],
+      client_metadata: {
+        thread_id: "thread-switch",
+        turn_id: "turn-switch",
+        "x-codex-turn-metadata": JSON.stringify({
+          request_kind: "compaction",
+          thread_id: "thread-switch",
+          turn_id: "turn-switch",
+        }),
+      },
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(upstreamBody?.model, "text-upstream");
+  const rerouteEvent = logEvents.find((event) => event.event === "compaction_model_rerouted");
+  assert.equal(rerouteEvent?.turn_id, "turn-switch");
+  assert.equal(rerouteEvent?.thread_id, "thread-switch");
+  assert.equal(rerouteEvent?.from_model, "local/gpt-image-2");
+  assert.equal(rerouteEvent?.to_model, "local/gpt-text");
+});
+
+test("interrupts the active upstream stream for a matching turn", async (context) => {
+  let upstreamClosedResolve;
+  const upstreamClosed = new Promise((resolve) => {
+    upstreamClosedResolve = resolve;
+  });
+  const upstream = http.createServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [] }));
+      return;
+    }
+    for await (const _chunk of request) {
+      // Consume the request before opening the stream.
+    }
+    response.once("close", () => upstreamClosedResolve());
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(
+      'event: response.created\ndata: {"type":"response.created","response":{"id":"response-interrupt","object":"response"}}\n\n',
+    );
+  });
+  await new Promise((resolve, reject) => {
+    upstream.once("error", reject);
+    upstream.listen(0, "127.0.0.1", resolve);
+  });
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-turn-interrupt-"));
+  fs.writeFileSync(path.join(rootDir, "gateway.config.json"), JSON.stringify({
+    providers: {
+      local: {
+        base_url: `http://127.0.0.1:${address.port}/v1`,
+        protocol: "responses",
+      },
+    },
+    models: {
+      "local/test": {
+        provider: "local",
+        upstream_model: "test",
+        capabilities: { streaming: true },
+      },
+    },
+    upstream_timeout_ms: 5000,
+    upstream_stream_idle_timeout_ms: 5000,
+  }));
+  const gateway = await startEmbeddedGateway({ rootDir, port: 0 });
+  context.after(async () => {
+    await gateway.stop();
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  const response = await fetch(`${gateway.baseUrl}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "local/test",
+      stream: true,
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "wait" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-interrupt" },
+      }],
+    }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(gateway.interruptTurn("turn-interrupt"), 1);
+  await assert.rejects(response.text());
+  await Promise.race([
+    upstreamClosed,
+    delay(1000).then(() => assert.fail("upstream connection was not closed")),
+  ]);
 });
 
 test("actively probes provider health without exposing credentials", async (context) => {

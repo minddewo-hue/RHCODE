@@ -7,11 +7,12 @@ import {
   type MobileUpdate,
   type MobileUpdatePlatform,
 } from "@rhzycode/update-contract";
+import { defaultTransferServerUrl } from "../../auth/control-access";
 
 export { compareVersions } from "@rhzycode/update-contract";
 export type { AndroidUpdate, IosUpdate, MobileUpdate, MobileUpdatePlatform } from "@rhzycode/update-contract";
 
-export const defaultUpdateManifestUrl = "https://minio.gshbzw.com/wxfile/rhzycode/version.json";
+export const defaultUpdateManifestUrl = `${defaultTransferServerUrl}/v1/updates/manifest`;
 
 export type MobileUpdateStatus =
   | { state: "idle"; latest: null; error: null }
@@ -19,6 +20,7 @@ export type MobileUpdateStatus =
   | { state: "current"; latest: MobileUpdate; error: null }
   | { state: "available"; latest: MobileUpdate; error: null }
   | { state: "downloading"; latest: AndroidUpdate; error: null }
+  | { state: "ready_to_install"; latest: AndroidUpdate; error: null }
   | { state: "awaiting_permission"; latest: AndroidUpdate; error: null }
   | { state: "installing"; latest: AndroidUpdate; error: null }
   | { state: "error"; latest: MobileUpdate | null; error: string };
@@ -28,6 +30,12 @@ export const initialMobileUpdateStatus: MobileUpdateStatus = {
   latest: null,
   error: null,
 };
+
+export function recoverMobileUpdateAfterInstaller(status: MobileUpdateStatus): MobileUpdateStatus {
+  return status.state === "installing"
+    ? { state: "ready_to_install", latest: status.latest, error: null }
+    : status;
+}
 
 type MobileUpdateOptions = {
   manifestUrl?: string;

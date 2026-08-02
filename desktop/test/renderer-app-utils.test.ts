@@ -3,19 +3,128 @@ import test from "node:test";
 import {
   activityLabel,
   basename,
+  completeAssistantMessage,
   describeItem,
+  fitImagePreviewSize,
   formatFileChanges,
   formatFileSize,
   groupModelsBySource,
   groupThreadsByProject,
   isComposerRunning,
   isSameProjectPath,
+  mergeActivityDeltas,
+  mergeStreamingMessageDeltas,
   modelReasoningEfforts,
   notificationThreadId,
   providerCredentialPresentation,
   providerDisplayName,
+  reconcileProjectRegistry,
+  storedCollapsedProjectPaths,
+  storeCollapsedProjectPaths,
   summarizePrompt,
 } from "../src/renderer/src/app-utils";
+
+test("merges streaming deltas without replacing unchanged history", () => {
+  const unchanged = { id: "user-1", role: "user" as const, content: "Question" };
+  const messages = [
+    unchanged,
+    { id: "assistant-1", role: "assistant" as const, content: "Part " },
+  ];
+  const merged = mergeStreamingMessageDeltas(messages, new Map([
+    ["assistant-1", "one"],
+    ["assistant-2", "Part two"],
+  ]));
+
+  assert.strictEqual(merged[0], unchanged);
+  assert.deepEqual(merged[1], {
+    id: "assistant-1",
+    role: "assistant",
+    content: "Part one",
+    streaming: true,
+  });
+  assert.deepEqual(merged[2], {
+    id: "assistant-2",
+    role: "assistant",
+    content: "Part two",
+    streaming: true,
+  });
+
+  const activities = mergeActivityDeltas(
+    [{ id: "reasoning", label: "Analysis", detail: "First ", state: "running" }],
+    new Map([
+      ["reasoning", { label: "Analysis", delta: "second", state: "running" as const }],
+      ["command", { label: "Command", delta: "done", state: "done" as const }],
+    ]),
+  );
+  assert.equal(activities.find((entry) => entry.id === "reasoning")?.detail, "First second");
+  assert.equal(activities[0]?.id, "command");
+});
+
+test("shows completed assistant messages even when no streaming delta arrived", () => {
+  const completed = completeAssistantMessage(
+    [{ id: "user-1", role: "user", content: "Generate an image" }],
+    "turn-1::assistant-1",
+    "The image is ready.",
+  );
+
+  assert.deepEqual(completed.at(-1), {
+    id: "turn-1::assistant-1",
+    role: "assistant",
+    content: "The image is ready.",
+  });
+});
+
+test("reconciles a streamed assistant message with its completed text", () => {
+  const completed = completeAssistantMessage(
+    [{
+      id: "turn-1::assistant-1",
+      role: "assistant",
+      content: "Partial response",
+      streaming: true,
+    }],
+    "turn-1::assistant-1",
+    "Complete response",
+  );
+
+  assert.deepEqual(completed, [{
+    id: "turn-1::assistant-1",
+    role: "assistant",
+    content: "Complete response",
+    streaming: false,
+  }]);
+});
+
+test("reconciles project removal and re-addition across clients", () => {
+  const removed = reconcileProjectRegistry(
+    ["D:\\work\\alpha", "D:\\work\\beta"],
+    ["d:\\WORK\\beta"],
+    [],
+  );
+  assert.deepEqual(removed.projects, ["d:\\WORK\\beta"]);
+  assert.deepEqual(removed.removedProjects, ["D:\\work\\alpha"]);
+  assert.deepEqual(removed.forgottenProjects, ["D:\\work\\alpha"]);
+
+  const restored = reconcileProjectRegistry(
+    removed.projects,
+    ["D:\\work\\beta", "D:\\work\\alpha"],
+    removed.forgottenProjects,
+  );
+  assert.deepEqual(restored.projects, ["D:\\work\\beta", "D:\\work\\alpha"]);
+  assert.deepEqual(restored.removedProjects, []);
+  assert.deepEqual(restored.forgottenProjects, []);
+});
+
+class MemoryLocalStorage {
+  private readonly values = new Map<string, string>();
+
+  getItem(key: string): string | null {
+    return this.values.get(key) ?? null;
+  }
+
+  setItem(key: string, value: string): void {
+    this.values.set(key, value);
+  }
+}
 
 test("formats renderer display values", () => {
   assert.equal(basename("C:\\work\\project"), "project");
@@ -29,6 +138,32 @@ test("formats renderer display values", () => {
     domain: "model.rhzy.ai",
     prefix: "sk-",
   });
+});
+
+test("fits image previews without changing their aspect ratio or upscaling", () => {
+  assert.deepEqual(fitImagePreviewSize(320, 240), { width: 320, height: 240 });
+  assert.deepEqual(fitImagePreviewSize(1_200, 600), { width: 420, height: 210 });
+  assert.deepEqual(fitImagePreviewSize(600, 1_200), { width: 210, height: 420 });
+  assert.equal(fitImagePreviewSize(0, 240), null);
+});
+
+test("persists valid collapsed projects with path-aware deduplication", () => {
+  const storage = new MemoryLocalStorage();
+  const originalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+
+  try {
+    storeCollapsedProjectPaths(["D:\\work\\alpha", "d:/work/alpha/", "", "/work/beta"]);
+    assert.deepEqual(storedCollapsedProjectPaths(), ["D:\\work\\alpha", "/work/beta"]);
+
+    storage.setItem("rhzycode.collapsedProjects", JSON.stringify(["D:\\work\\valid", null, 42]));
+    assert.deepEqual(storedCollapsedProjectPaths(), ["D:\\work\\valid"]);
+    storage.setItem("rhzycode.collapsedProjects", "not-json");
+    assert.deepEqual(storedCollapsedProjectPaths(), []);
+  } finally {
+    if (originalStorage) Object.defineProperty(globalThis, "localStorage", originalStorage);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  }
 });
 
 test("groups all tasks by project and searches across the project tree", () => {
@@ -107,16 +242,6 @@ test("preserves an explicitly empty reasoning effort list", () => {
     defaultReasoningEffort: "high",
     supportedReasoningEfforts: [],
   }), []);
-});
-
-test("falls back for older model metadata without a declared effort list", () => {
-  assert.deepEqual(modelReasoningEfforts({
-    id: "model-1",
-    model: "provider/legacy-model",
-    displayName: "Legacy model",
-    description: "Older model metadata",
-    defaultReasoningEffort: "medium",
-  }), ["medium"]);
 });
 
 test("groups models by source and naturally sorts versions within each source", () => {
@@ -213,4 +338,43 @@ test("locks the composer only for the selected running thread", () => {
   assert.equal(isComposerRunning("thread-completed", activeThreadIds, false), false);
   assert.equal(isComposerRunning(null, activeThreadIds, false), false);
   assert.equal(isComposerRunning("thread-completed", activeThreadIds, true), true);
+});
+
+test("searches task titles and projects but ignores model id substrings", () => {
+  const threads = [
+    {
+      id: "thread-chip",
+      hostId: "desktop",
+      title: "报价分析",
+      projectPath: "D:\\chip_work\\ChipData",
+      model: "provider-2/grok-latest",
+      status: "completed" as const,
+      updatedAt: "2026-07-23T02:00:00.000Z",
+    },
+    {
+      id: "thread-hook",
+      hostId: "desktop",
+      title: "Fix react hook order",
+      projectPath: "D:\\work\\alpha",
+      model: "provider/model",
+      status: "completed" as const,
+      updatedAt: "2026-07-23T03:00:00.000Z",
+    },
+  ];
+
+  assert.deepEqual(
+    groupThreadsByProject(["D:\\work\\alpha", "D:\\chip_work\\ChipData"], "", threads, "test")
+      .map((group) => group.threads.map((thread) => thread.id)),
+    [],
+  );
+  assert.deepEqual(
+    groupThreadsByProject(["D:\\work\\alpha", "D:\\chip_work\\ChipData"], "", threads, "hook")
+      .map((group) => ({ name: group.name, threads: group.threads.map((thread) => thread.id) })),
+    [{ name: "alpha", threads: ["thread-hook"] }],
+  );
+  assert.deepEqual(
+    groupThreadsByProject(["D:\\work\\alpha", "D:\\chip_work\\ChipData"], "", threads, "chip")
+      .map((group) => ({ name: group.name, threads: group.threads.map((thread) => thread.id) })),
+    [{ name: "ChipData", threads: ["thread-chip"] }],
+  );
 });

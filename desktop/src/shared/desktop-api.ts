@@ -8,6 +8,7 @@ import type {
 } from "@rhzycode/protocol";
 
 export type Unsubscribe = () => void;
+export type RendererBootstrapState = Pick<ControlSnapshot, "threads" | "approvals" | "userInputs">;
 export type ApprovalPolicy = "on-request" | "untrusted" | "never";
 export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
@@ -127,6 +128,7 @@ export interface CredentialUpdateResult {
 
 export interface UpdateStatus {
   enabled: boolean;
+  currentVersion: string | null;
   state:
     | "disabled"
     | "idle"
@@ -203,11 +205,11 @@ export interface ModelOption {
   displayName: string;
   description: string;
   defaultReasoningEffort: string;
-  supportedReasoningEfforts?: Array<{
+  supportedReasoningEfforts: Array<{
     reasoningEffort: string;
     description: string;
   }>;
-  isDefault?: boolean;
+  isDefault: boolean;
 }
 
 export interface ModelListResponse {
@@ -285,6 +287,14 @@ export interface ConversationRestoreResult {
   projectPaths: string[];
 }
 
+export interface ConversationExportItem {
+  threadId: string;
+  projectPath: string;
+  title: string;
+  archived: boolean;
+  modifiedAt: string;
+}
+
 export interface RpcNotification {
   method?: string;
   params?: Record<string, unknown>;
@@ -308,13 +318,17 @@ export interface RhzycodeDesktopApi {
   openLocalFile(path: string): Promise<void>;
   revealLocalFile(path: string): Promise<void>;
   saveLocalFile(path: string, suggestedName: string): Promise<string | null>;
+  showImageContextMenu(path: string, suggestedName: string): Promise<void>;
   startThread(params: StartThreadParams): Promise<StartThreadResult>;
   archiveThread(threadId: string): Promise<void>;
   unarchiveThread(threadId: string): Promise<unknown>;
   setThreadModel(threadId: string, model: string): Promise<ThreadSummary>;
   renameThread(threadId: string, name: string): Promise<void>;
   deleteThread(threadId: string): Promise<void>;
+  compactThread(threadId: string): Promise<void>;
   backupProjectConversations(projectPath: string): Promise<ConversationBackupResult | null>;
+  listExportConversations(): Promise<ConversationExportItem[]>;
+  exportConversations(threadIds: string[]): Promise<ConversationBackupResult | null>;
   restoreProjectConversations(): Promise<ConversationRestoreResult | null>;
   startTurn(params: StartTurnParams): Promise<TurnStartResult>;
   interruptTurn(threadId: string): Promise<unknown>;
@@ -341,8 +355,7 @@ export interface RhzycodeDesktopApi {
   copyText(value: string): Promise<void>;
   getPersistenceStatus(): Promise<PersistenceStatus>;
   getSyncStatus(): Promise<SyncStatus>;
-  setSyncPort(port: number): Promise<SyncStatus>;
-  getSyncSnapshot(): Promise<ControlSnapshot>;
+  getSyncSnapshot(): Promise<RendererBootstrapState>;
   resolveApproval(id: string, decision: "approved" | "declined"): Promise<AgentEvent>;
   resolveUserInput(id: string, answers: UserInputAnswers): Promise<AgentEvent>;
   getTerminalStatus(): Promise<TerminalStatus | null>;
@@ -350,6 +363,7 @@ export interface RhzycodeDesktopApi {
   writeTerminal(processId: string, data: string): Promise<unknown>;
   resizeTerminal(processId: string, cols: number, rows: number): Promise<unknown>;
   stopTerminal(processId: string): Promise<unknown>;
+  onWindowFocus(listener: () => void): Unsubscribe;
   onAgentStatus(listener: (status: AgentStatus) => void): Unsubscribe;
   onAgentMessage(listener: (message: RpcNotification) => void): Unsubscribe;
   onDiagnostic(listener: (message: string) => void): Unsubscribe;

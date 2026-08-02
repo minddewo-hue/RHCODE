@@ -1,14 +1,7 @@
 {
-  "endpoint": "https://minio.gshbzw.com",
-  "bucket": "wxfile",
-  "region": "us-east-1",
-  "objectPrefix": "rhzycode",
-  "manifestFile": "version.json",
-  "accessKeyEnv": "RHZYCODE_MINIO_ACCESS_KEY",
-  "secretKeyEnv": "RHZYCODE_MINIO_SECRET_KEY",
-  "credentialsFile": ".minio-credentials.json",
-  "legacyServer": {
-    "host": "0.0.0.0",
-    "port": 8791
-  }
+  "publicOrigin": "http://218.201.210.211:8000",
+  "updatesDirectory": "transferserver/updates",
+  "remoteProject": "/home/analyzer/work_space/rhzycode-transfer",
+  "sshHost": "10.0.10.120",
+  "sshUser": "analyzer"
 }

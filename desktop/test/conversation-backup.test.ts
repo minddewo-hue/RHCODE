@@ -6,8 +6,10 @@ import test from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
 import {
   backupProjectConversations,
+  backupSelectedConversations,
   deleteConversationSessionFiles,
   listConversationSessions,
+  listConversationSessionsWithDuplicates,
   listProjectConversationThreadIds,
   restoreProjectConversations,
 } from "../src/main/conversation-backup.js";
@@ -72,6 +74,60 @@ test("skips a restored conversation when its thread id already exists", async (c
   assert.equal(result.importedCount, 0);
   assert.equal(result.skippedCount, 1);
   assert.match(findSession(destinationHome, "duplicate-id"), /"text":"existing"/);
+});
+
+test("deduplicates resumed rollout copies by their embedded session lineage", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-conversation-lineage-"));
+  const codexHome = path.join(root, "home");
+  const projectPath = path.join(root, "project");
+  const originalPath = path.join(codexHome, "sessions", "rollout-original-id.jsonl");
+  const resumedPath = path.join(codexHome, "sessions", "rollout-resumed-id.jsonl");
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  writeSession(originalPath, "original-id", projectPath, "same conversation");
+  fs.writeFileSync(resumedPath, [
+    JSON.stringify({
+      timestamp: "2026-07-24T00:05:00.000Z",
+      type: "session_meta",
+      payload: { id: "resumed-id", session_id: "resumed-id", cwd: projectPath },
+    }),
+    fs.readFileSync(originalPath, "utf8"),
+  ].join("\n"), "utf8");
+  fs.utimesSync(originalPath, new Date("2026-07-24T00:10:00.000Z"), new Date("2026-07-24T00:10:00.000Z"));
+  fs.utimesSync(resumedPath, new Date("2026-07-24T00:05:00.000Z"), new Date("2026-07-24T00:05:00.000Z"));
+
+  const listing = await listConversationSessionsWithDuplicates(codexHome);
+
+  assert.deepEqual(listing.sessions.map((session) => session.threadId), ["original-id"]);
+  assert.deepEqual(listing.duplicateThreadIds, ["resumed-id"]);
+  assert.deepEqual((await listConversationSessions(codexHome)).map((session) => session.threadId), ["original-id"]);
+});
+
+test("exports selected conversations across projects without including unselected threads", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-conversation-export-"));
+  const sourceHome = path.join(root, "source");
+  const destinationHome = path.join(root, "destination");
+  const firstProject = path.join(root, "first-project");
+  const secondProject = path.join(root, "second-project");
+  const backupPath = path.join(root, "selected.rhzycode-backup");
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  writeSession(path.join(sourceHome, "sessions", "rollout-first-id.jsonl"), "first-id", firstProject, "first selected");
+  writeSession(path.join(sourceHome, "archived_sessions", "rollout-second-id.jsonl"), "second-id", secondProject, "second selected");
+  writeSession(path.join(sourceHome, "sessions", "rollout-ignored-id.jsonl"), "ignored-id", secondProject, "not selected");
+
+  const exported = await backupSelectedConversations(
+    sourceHome,
+    ["first-id", "second-id"],
+    backupPath,
+  );
+  assert.equal(exported.conversationCount, 2);
+
+  const restored = await restoreProjectConversations(destinationHome, backupPath);
+  assert.equal(restored.importedCount, 2);
+  assert.deepEqual(new Set(restored.projectPaths), new Set([firstProject, secondProject]));
+  assert.match(findSession(destinationHome, "first-id"), /first selected/);
+  assert.match(findSession(destinationHome, "second-id"), /second selected/);
+  assert.equal(findOptionalSession(destinationHome, "ignored-id"), null);
 });
 
 test("rejects damaged backups before restoring any conversation", async (context) => {

@@ -21,6 +21,15 @@ export function bundledCodexExecutable(platform: NodeJS.Platform = process.platf
   return platform === "win32" ? "codex.exe" : "codex";
 }
 
+export function preferredCodexPath(
+  bundledPath: string,
+  bundledExists: boolean,
+  configuredPath?: string,
+): string | undefined {
+  if (bundledExists) return bundledPath;
+  return configuredPath?.trim() || undefined;
+}
+
 export function shouldQuitWhenAllWindowsClose(platform: NodeJS.Platform = process.platform): boolean {
   return platform !== "darwin";
 }

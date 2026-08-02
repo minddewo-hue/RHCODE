@@ -1,4 +1,18 @@
-import type { ConversationFile, ProjectDirectory, RemoteApprovalPolicy, RemoteDirectoryBrowseResult, RemoteModelOption, RemoteReasoningEffort, RemoteSandboxMode, RemoteTurnAttachment, ThreadSummary, UserInputAnswers } from "@rhzycode/protocol";
+import {
+  codexComposerCommandPrompt,
+  parseCodexComposerCommand,
+  type ConversationFile,
+  type ParsedCodexComposerCommand,
+  type ProjectDirectory,
+  type RemoteApprovalPolicy,
+  type RemoteDirectoryBrowseResult,
+  type RemoteModelOption,
+  type RemoteReasoningEffort,
+  type RemoteSandboxMode,
+  type RemoteTurnAttachment,
+  type ThreadSummary,
+  type UserInputAnswers,
+} from "@rhzycode/protocol";
 import Constants from "expo-constants";
 import * as Crypto from "expo-crypto";
 import * as DocumentPicker from "expo-document-picker";
@@ -22,40 +36,40 @@ import {
   ControlClientError,
   verifyControlAccess,
 } from "./api/control-client";
+import { runControlCommandWithRetry } from "./api/control-connection-model";
 import {
-  buildControlUrl,
-  defaultControlHost as builtInControlHost,
-  defaultControlPort as builtInControlPort,
   normalizeAccessKey,
-  normalizeControlHost,
-  normalizeControlPort,
 } from "./auth/control-access";
 import { AppDrawer, type DrawerPage } from "./components/AppDrawer";
 import { ChatScreen, type PendingMessage } from "./components/ChatScreen";
+import {
+  findRetryablePendingMessage,
+  isThreadHistoryLoading,
+  reconcilePendingMessages,
+  shouldCatchUpActiveThread,
+  shouldKeepSelectedThread,
+  shouldOpenThreadHistory,
+  shouldResetOpenedThreadHistory,
+} from "./components/chat-screen-model";
 import { remoteModelReasoningEfforts } from "./components/model-picker-model";
 import { ModelPickerSheet } from "./components/ModelPickerSheet";
 import { ProjectPickerSheet, ThreadActionsSheet } from "./components/TaskSheets";
 import { describeControlError, useControlPlane } from "./hooks/use-control-plane";
 import { createNativeSecureSessionStore } from "./storage/native-secure-session";
 import type { MobileSession, MobileSessionState, SecureSessionStore } from "./storage/secure-session";
-import { isRegisteredProject, isSameProjectPath, registeredProjectPaths } from "./state/project-list";
-import { colors } from "./ui/theme";
+import { isRegisteredProject, isSameProjectPath, registeredProjectPaths, resolveNewThreadProjectPath } from "./state/project-list";
+import { colors, createThemedStyles, loadThemeMode, saveThemeMode, setActiveThemeMode, type ThemeMode } from "./ui/theme";
 import { defaultUpdateManifestUrl } from "./platform/update/mobile-update";
 import { useMobileUpdate } from "./platform/update/use-mobile-update";
 
-const defaultControlHost = process.env.EXPO_PUBLIC_CONTROL_HOST || builtInControlHost;
-const newConnectionHost = defaultControlHost === builtInControlHost ? "" : defaultControlHost;
-const configuredControlPort = Number(process.env.EXPO_PUBLIC_CONTROL_PORT || builtInControlPort);
-const defaultControlPort = Number.isInteger(configuredControlPort) ? configuredControlPort : builtInControlPort;
-const currentAppVersion = Constants.expoConfig?.version || "0.0.0";
+const currentAppVersion = Constants.nativeAppVersion || Constants.expoConfig?.version || "0.0.0";
 const currentBuildNumber = String(
   Constants.nativeBuildVersion
     || Constants.expoConfig?.android?.versionCode
     || Constants.expoConfig?.ios?.buildNumber
     || "0",
 );
-const updateManifestUrl = process.env.EXPO_PUBLIC_UPDATE_URL
-  || String(Constants.expoConfig?.extra?.updateManifestUrl || defaultUpdateManifestUrl);
+const updateManifestUrl = String(Constants.expoConfig?.extra?.updateManifestUrl || defaultUpdateManifestUrl);
 
 function isImageAttachment(name: string, mimeType?: string): boolean {
   if (mimeType?.toLowerCase().startsWith("image/")) return true;
@@ -93,6 +107,7 @@ export default function App() {
 }
 
 function AppContent() {
+  const [themeMode, setThemeMode] = useState<ThemeMode>("light");
   const [sessionStore] = useState<SecureSessionStore>(() => createNativeSecureSessionStore());
   const [sessionState, setSessionState] = useState<MobileSessionState>({
     connections: [],
@@ -105,6 +120,7 @@ function AppContent() {
   const [drawerPage, setDrawerPage] = useState<DrawerPage>("threads");
   const [drawerSearch, setDrawerSearch] = useState("");
   const [selectedProjectPath, setSelectedProjectPath] = useState<string | null>(null);
+  const [collapsedProjectPaths, setCollapsedProjectPaths] = useState<string[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [openingThreadId, setOpeningThreadId] = useState<string | null>(null);
   const [newThreadDraft, setNewThreadDraft] = useState(false);
@@ -132,8 +148,6 @@ function AppContent() {
   const [threadAction, setThreadAction] = useState<ThreadActionTarget | null>(null);
   const [threadActionBusy, setThreadActionBusy] = useState(false);
   const [threadActionError, setThreadActionError] = useState<string | null>(null);
-  const [draftHost, setDraftHost] = useState(newConnectionHost);
-  const [draftPort, setDraftPort] = useState(String(defaultControlPort));
   const [draftKey, setDraftKey] = useState("");
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -151,24 +165,40 @@ function AppContent() {
   const modelsLoadingRef = useRef(false);
   const modelSelectionContext = useRef("");
   const navigationSessionIdRef = useRef<string | null>(null);
+  const openedThreadHistoryRef = useRef<string | null>(null);
+  const connectionStatusRef = useRef<string | null>(null);
+  const turnCatchUpTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  const sendInFlightRef = useRef(false);
   const session = useMemo(
     () => sessionState.connections.find((connection) => connection.id === sessionState.activeConnectionId) || null,
     [sessionState],
   );
 
+  useEffect(() => {
+    let active = true;
+    void loadThemeMode().then((mode) => {
+      if (!active) return;
+      setActiveThemeMode(mode);
+      setThemeMode(mode);
+    });
+    return () => { active = false; };
+  }, []);
+
+  const changeThemeMode = useCallback((mode: ThemeMode) => {
+    setActiveThemeMode(mode);
+    setThemeMode(mode);
+    void saveThemeMode(mode);
+  }, []);
+
   const loadSession = useCallback(async () => {
     setBooting(true);
     setBootError(null);
     try {
-      const loaded = await sessionStore.load(defaultControlHost, defaultControlPort);
+      const loaded = await sessionStore.load();
       const invalidConnectionIds: string[] = [];
       const connections = loaded.connections.map((connection) => {
         try {
-          const normalized = {
-            ...connection,
-            host: normalizeControlHost(connection.host),
-            port: normalizeControlPort(connection.port),
-          };
+          const normalized = { ...connection };
           if (normalized.accessKey) normalizeAccessKey(normalized.accessKey);
           return normalized;
         } catch {
@@ -180,8 +210,6 @@ function AppContent() {
       const next = { ...loaded, connections };
       const active = connections.find((connection) => connection.id === loaded.activeConnectionId) || null;
       setSessionState(next);
-      setDraftHost(active?.host || newConnectionHost);
-      setDraftPort(String(active?.port || defaultControlPort));
       setEditingConnectionId(active?.id || null);
       if (invalidConnectionIds.length) setConnectionError("部分电脑的连接信息无效，请重新配置 KEY。");
       if (!active?.accessKey) {
@@ -208,12 +236,9 @@ function AppContent() {
         )),
       }));
       if (connectionId === sessionState.activeConnectionId) {
-        const connection = sessionState.connections.find((item) => item.id === connectionId);
         setConnectionError("保存的 KEY 已失效，请输入桌面端生成的新 KEY。");
         setConnectionMessage(null);
         setEditingConnectionId(connectionId);
-        setDraftHost(connection?.host || newConnectionHost);
-        setDraftPort(String(connection?.port || defaultControlPort));
         setDraftKey("");
         setDrawerPage("connection");
         setDrawerVisible(true);
@@ -228,9 +253,9 @@ function AppContent() {
   });
   const taskClient = useMemo(
     () => session?.accessKey
-      ? new ControlClient(session.host, session.port, session.accessKey)
+      ? new ControlClient(session.accessKey)
       : null,
-    [session?.accessKey, session?.host, session?.port],
+    [session?.accessKey],
   );
   const canWrite = Boolean(session?.accessKey);
   const canApprove = Boolean(session?.accessKey);
@@ -238,10 +263,12 @@ function AppContent() {
   useEffect(() => {
     let active = true;
     navigationSessionIdRef.current = null;
+    openedThreadHistoryRef.current = null;
     setSelectedThreadId(null);
     setOpeningThreadId(null);
     setNewThreadDraft(false);
     setSelectedProjectPath(null);
+    setCollapsedProjectPaths([]);
     setNavigationReady(false);
     setProjectDirectories([]);
     setProjectsLoaded(false);
@@ -260,6 +287,7 @@ function AppContent() {
         setSelectedProjectPath(navigation.projectPath);
         setSelectedThreadId(navigation.threadId);
         setNewThreadDraft(navigation.newThreadDraft);
+        setCollapsedProjectPaths(navigation.collapsedProjectPaths);
         navigationSessionIdRef.current = session.id;
         setNavigationReady(true);
       }).catch(() => {
@@ -280,8 +308,9 @@ function AppContent() {
       projectPath: selectedProjectPath,
       threadId: selectedThreadId,
       newThreadDraft,
+      collapsedProjectPaths,
     });
-  }, [navigationReady, newThreadDraft, selectedProjectPath, selectedThreadId, session?.id, sessionStore]);
+  }, [collapsedProjectPaths, navigationReady, newThreadDraft, selectedProjectPath, selectedThreadId, session?.id, sessionStore]);
 
   const loadProjects = useCallback(async () => {
     if (!taskClient) return;
@@ -299,6 +328,13 @@ function AppContent() {
     setProjectDirectories(control.snapshot.projects);
     setProjectsLoaded(true);
   }, [control.snapshot.projects]);
+
+  const refreshWorkspace = useCallback(async () => {
+    await Promise.all([
+      control.refresh(),
+      loadProjects(),
+    ]);
+  }, [control.refresh, loadProjects]);
 
   const loadModels = useCallback(async () => {
     if (!taskClient || modelsLoadingRef.current) return;
@@ -324,16 +360,19 @@ function AppContent() {
   }, [rejectCredentials, session, taskClient]);
 
   useEffect(() => {
-    if (control.status !== "online") return undefined;
-    void loadProjects();
+    if (control.status !== "online") return;
+    void refreshWorkspace();
     void loadModels();
-    const interval = setInterval(() => void loadProjects(), 15_000);
-    return () => clearInterval(interval);
-  }, [control.status, loadModels, loadProjects]);
+  }, [control.status, loadModels, refreshWorkspace]);
+
+  useEffect(() => {
+    if (!drawerVisible || drawerPage !== "threads" || control.status !== "online") return;
+    void refreshWorkspace();
+  }, [control.status, drawerPage, drawerVisible, refreshWorkspace]);
 
   useEffect(() => {
     if (!navigationReady || newThreadDraft || !control.snapshot.threads.length) return;
-    if (selectedThreadId && control.snapshot.threads.some((thread) => thread.id === selectedThreadId)) return;
+    if (shouldKeepSelectedThread(selectedThreadId, control.snapshot.threads, pendingMessages)) return;
     if (selectedThreadId && control.status !== "online") return;
     const ordered = [...control.snapshot.threads].sort((left, right) => {
       const activeDifference = Number(isActive(right)) - Number(isActive(left));
@@ -343,7 +382,7 @@ function AppContent() {
     if (preferred) setSelectedThreadId(preferred.id);
     if (preferred) setSelectedProjectPath(preferred.projectPath);
     if (preferred) setNewThreadDraft(false);
-  }, [control.snapshot.threads, control.status, navigationReady, newThreadDraft, selectedProjectPath, selectedThreadId]);
+  }, [control.snapshot.threads, control.status, navigationReady, newThreadDraft, pendingMessages, selectedProjectPath, selectedThreadId]);
 
   const modelCatalogKey = useMemo(() => models.map((model) => model.model).join("\n"), [models]);
 
@@ -364,11 +403,7 @@ function AppContent() {
 
   useEffect(() => {
     if (!pendingMessages.length) return;
-    setPendingMessages((current) => current.filter((message) => message.attachments?.length || !control.snapshot.timeline.some((item) => (
-      item.threadId === message.threadId
-      && item.kind === "user"
-      && item.content.trim() === message.content.trim()
-    ))));
+    setPendingMessages((current) => reconcilePendingMessages(current, control.snapshot.timeline));
   }, [control.snapshot.timeline, pendingMessages.length]);
 
   const selectedThread = useMemo(
@@ -384,7 +419,13 @@ function AppContent() {
   );
 
   useEffect(() => {
-    if (!selectedThreadId || selectedIsArchived || !taskClient || control.status !== "online") {
+    if (!selectedThreadId) openedThreadHistoryRef.current = null;
+    if (!taskClient || !selectedThreadId || !shouldOpenThreadHistory({
+      selectedThreadId,
+      selectedIsArchived,
+      online: control.status === "online",
+      alreadyOpenedThreadId: openedThreadHistoryRef.current,
+    })) {
       setOpeningThreadId(null);
       return undefined;
     }
@@ -394,9 +435,10 @@ function AppContent() {
     void taskClient.openThread(threadId).then((result) => {
       if (cancelled) return;
       control.hydrateThread(result);
+      openedThreadHistoryRef.current = threadId;
     }).catch((error) => {
       if (cancelled) return;
-      Alert.alert("\u65e0\u6cd5\u52a0\u8f7d\u5bf9\u8bdd", describeControlError(error));
+      Alert.alert("无法加载对话", describeControlError(error));
       if (isUnauthorized(error) && session) rejectCredentials(session.id);
     }).finally(() => {
       if (!cancelled) setOpeningThreadId((current) => current === threadId ? null : current);
@@ -407,10 +449,43 @@ function AppContent() {
   }, [control.hydrateThread, control.status, rejectCredentials, selectedIsArchived, selectedThreadId, session, taskClient]);
 
   useEffect(() => {
+    const previous = connectionStatusRef.current;
+    connectionStatusRef.current = control.status;
+    if (shouldResetOpenedThreadHistory(previous, control.status)) {
+      openedThreadHistoryRef.current = null;
+    }
+  }, [control.status]);
+
+  useEffect(() => () => {
+    for (const timer of turnCatchUpTimersRef.current) clearTimeout(timer);
+    turnCatchUpTimersRef.current = [];
+  }, []);
+
+  useEffect(() => {
+    if (!selectedThreadId || !shouldCatchUpActiveThread({
+      online: control.status === "online",
+      threadStatus: selectedThread?.status,
+    })) return undefined;
+    // Snapshot catch-up covers AI stream frames lost while the socket flaps on weak networks.
+    const timer = setInterval(() => {
+      void control.refresh();
+    }, 3_500);
+    return () => clearInterval(timer);
+  }, [control, control.status, selectedThread?.status, selectedThreadId]);
+
+  useEffect(() => {
     if (!projectsLoaded || !selectedProjectPath || isRegisteredProject(selectedProjectPath, recentProjects)) return;
     setSelectedProjectPath(null);
     setNewThreadDraft(false);
   }, [projectsLoaded, recentProjects, selectedProjectPath]);
+
+  useEffect(() => {
+    if (!projectsLoaded) return;
+    setCollapsedProjectPaths((current) => {
+      const next = current.filter((path) => isRegisteredProject(path, recentProjects));
+      return next.length === current.length ? current : next;
+    });
+  }, [collapsedProjectPaths, projectsLoaded, recentProjects]);
   const selectedModelOption = useMemo(
     () => models.find((model) => model.model === selectedModel) || null,
     [models, selectedModel],
@@ -475,13 +550,11 @@ function AppContent() {
     setProjectPickerVisible(false);
   }, []);
 
-  const openNewThread = useCallback(() => {
+  const openNewThread = useCallback((requestedProjectPath?: string) => {
     setDrawerVisible(false);
     setNewThreadError(null);
     if (!session?.accessKey) {
       setEditingConnectionId(session?.id || null);
-      setDraftHost(session?.host || newConnectionHost);
-      setDraftPort(String(session?.port || defaultControlPort));
       setDraftKey("");
       setDrawerPage("connection");
       setDrawerVisible(true);
@@ -492,49 +565,153 @@ function AppContent() {
       setDrawerVisible(true);
       return;
     }
-    const projectPath = selectedProjectPath || selectedThread?.projectPath || recentProjects[0];
+    const projectPath = resolveNewThreadProjectPath(
+      requestedProjectPath,
+      selectedProjectPath,
+      selectedThread?.projectPath,
+      recentProjects,
+    );
     if (!projectPath) {
       setSelectedThreadId(null);
       setNewThreadDraft(true);
       setDraft("");
       setAttachments([]);
-      void loadProjects();
       setProjectPickerVisible(true);
       return;
     }
     createThreadDraft(projectPath);
-  }, [canWrite, createThreadDraft, loadProjects, recentProjects, selectedProjectPath, selectedThread?.projectPath, session]);
+  }, [canWrite, createThreadDraft, recentProjects, selectedProjectPath, selectedThread?.projectPath, session]);
 
   const openProjectPicker = useCallback(() => {
     setNewThreadError(null);
     setDrawerVisible(false);
-    void loadProjects();
     setProjectPickerVisible(true);
-  }, [loadProjects]);
+  }, []);
+
+  const executeComposerCommand = useCallback(async (
+    command: ParsedCodexComposerCommand,
+  ): Promise<string | null> => {
+    const prompt = codexComposerCommandPrompt(command);
+    if (prompt) return prompt;
+    if (!command.known) {
+      Alert.alert("未知命令", `Codex 不支持 /${command.name}。`);
+      return null;
+    }
+    if (attachments.length) {
+      Alert.alert("无法执行命令", "请先移除附件。 ");
+      return null;
+    }
+
+    if (command.name === "new" || command.name === "clear") {
+      setDraft("");
+      openNewThread();
+      return null;
+    }
+    if (command.name === "resume") {
+      setDraft("");
+      const target = command.args
+        ? control.snapshot.threads.find((thread) => thread.id === command.args)
+          || control.snapshot.threads.find((thread) =>
+            thread.title.toLocaleLowerCase() === command.args.toLocaleLowerCase())
+        : null;
+      if (target) {
+        setSelectedThreadId(target.id);
+        setSelectedProjectPath(target.projectPath);
+        setNewThreadDraft(false);
+        setDrawerVisible(false);
+      } else {
+        setDrawerSearch(command.args);
+        setDrawerPage("threads");
+        setDrawerVisible(true);
+      }
+      return null;
+    }
+    if (command.name === "model") {
+      setDraft("");
+      if (command.args) {
+        const target = models.find((model) => model.model === command.args)
+          || models.find((model) => model.displayName.toLocaleLowerCase().includes(command.args.toLocaleLowerCase()));
+        if (target) setSelectedModel(target.model);
+        else Alert.alert("未找到模型", command.args);
+      } else {
+        setModelPickerVisible(true);
+      }
+      return null;
+    }
+    if (command.name === "compact") {
+      if (!selectedThreadId || !taskClient) {
+        Alert.alert("无法压缩", "请先打开一个对话。");
+        return null;
+      }
+      setDraft("");
+      setSending(true);
+      try {
+        await taskClient.compactThread(selectedThreadId);
+        await control.refresh();
+      } catch (error) {
+        Alert.alert("对话压缩失败", describeControlError(error));
+      } finally {
+        setSending(false);
+      }
+      return null;
+    }
+    if (command.name === "status" || command.name === "permissions") {
+      setDraft("");
+      Alert.alert("Codex 状态", [
+        `模型: ${selectedModel || "default"}`,
+        `沙箱: ${sandboxMode}`,
+        `审批: ${approvalPolicy}`,
+        `项目: ${selectedProjectPath || "none"}`,
+        `对话: ${selectedThreadId || "new"}`,
+      ].join("\n"));
+      return null;
+    }
+    if (command.name === "help") {
+      setDraft("");
+      Alert.alert("Codex 命令", "/new  /clear  /resume  /model  /compact  /status  /permissions  /review  /diff  /init");
+      return null;
+    }
+
+    Alert.alert("暂不支持", `已识别 /${command.name}，但手机版暂未提供此操作。`);
+    return null;
+  }, [approvalPolicy, attachments.length, control, models, openNewThread, sandboxMode, selectedModel, selectedProjectPath, selectedThreadId, taskClient]);
 
   const sendMessage = useCallback(async () => {
-    const content = draft.trim();
+    let content = draft.trim();
+    const command = parseCodexComposerCommand(content);
+    if (command) {
+      const commandPrompt = await executeComposerCommand(command);
+      if (!commandPrompt) return;
+      content = commandPrompt;
+    }
     if (
       !taskClient
       || (!selectedThreadId && (!newThreadDraft || !selectedProjectPath))
       || (!content && !attachments.length)
       || sending
+      || sendInFlightRef.current
       || selectedIsArchived
     ) return;
     const submittedAttachments = attachments;
     const submittedText = content || "Review the attached files.";
-    const id = Crypto.randomUUID();
+    const retryPending = selectedThreadId ? findRetryablePendingMessage(pendingMessages, {
+      threadId: selectedThreadId,
+      content: submittedText,
+      attachments: submittedAttachments,
+    }) : null;
+    const id = retryPending?.id || Crypto.randomUUID();
     let targetThreadId = selectedThreadId;
     let pendingAdded = false;
+    sendInFlightRef.current = true;
     setSending(true);
     try {
       if (!targetThreadId) {
-        const result = await taskClient.startThread({
+        const result = await runControlCommandWithRetry(() => taskClient.startThread({
           projectPath: selectedProjectPath!,
           ...(selectedModel ? { model: selectedModel } : {}),
           approvalPolicy,
           sandboxMode,
-        });
+        }, 45_000, `${id}:thread`));
         targetThreadId = result.threadId;
         setSelectedThreadId(targetThreadId);
         setNewThreadDraft(false);
@@ -544,7 +721,7 @@ function AppContent() {
         id,
         threadId: targetThreadId,
         content: submittedText,
-        createdAt: new Date().toISOString(),
+        createdAt: retryPending?.createdAt || new Date().toISOString(),
         state: "sending",
         attachments: submittedAttachments.map((attachment) => ({
           name: attachment.name,
@@ -556,21 +733,38 @@ function AppContent() {
         })),
       };
       pendingAdded = true;
-      setPendingMessages((current) => [...current, pending]);
+      setPendingMessages((current) => current.some((message) => message.id === id)
+        ? current.map((message) => message.id === id ? pending : message)
+        : [...current, pending]);
       setDraft("");
       setAttachments([]);
-      await taskClient.startTurn(targetThreadId, {
+      const turnInput = {
         text: submittedText,
+        clientMessageId: id,
         attachments: submittedAttachments,
         ...(selectedModel ? { model: selectedModel } : {}),
         approvalPolicy,
         sandboxMode,
         ...(reasoningEfforts.length ? { reasoningEffort } : {}),
-      });
+      };
+      if (!targetThreadId) throw new Error("无法确定消息所属的对话。");
+      const turnThreadId = targetThreadId;
+      await runControlCommandWithRetry(() => taskClient.startTurn(
+        turnThreadId,
+        turnInput,
+        45_000,
+        `${id}:turn`,
+      ));
       setPendingMessages((current) => current.map((message) => (
         message.id === id ? { ...message, state: "sent" } : message
       )));
-      await control.refresh();
+      // Prefer live events over a blocking snapshot refresh on weak networks,
+      // then schedule short catch-up polls in case stream frames were dropped.
+      void control.refresh();
+      for (const timer of turnCatchUpTimersRef.current) clearTimeout(timer);
+      turnCatchUpTimersRef.current = [2_000, 6_000, 14_000].map((delay) => setTimeout(() => {
+        void control.refresh();
+      }, delay));
     } catch (error) {
       if (pendingAdded) {
         setPendingMessages((current) => current.map((message) => (
@@ -583,9 +777,10 @@ function AppContent() {
       setAttachments((current) => current.length ? current : submittedAttachments);
       if (isUnauthorized(error) && session) rejectCredentials(session.id);
     } finally {
+      sendInFlightRef.current = false;
       setSending(false);
     }
-  }, [approvalPolicy, attachments, control, draft, newThreadDraft, reasoningEffort, reasoningEfforts, rejectCredentials, sandboxMode, selectedIsArchived, selectedModel, selectedProjectPath, selectedThreadId, sending, session, taskClient]);
+  }, [approvalPolicy, attachments, control, draft, executeComposerCommand, newThreadDraft, pendingMessages, reasoningEffort, reasoningEfforts, rejectCredentials, sandboxMode, selectedIsArchived, selectedModel, selectedProjectPath, selectedThreadId, sending, session, taskClient]);
 
   const addPickedAttachments = useCallback(async (picked: PickedAttachment[]) => {
     const available = Math.max(0, 20 - attachments.length);
@@ -796,6 +991,7 @@ function AppContent() {
     try {
       const result = await taskClient.removeProject(projectPath);
       setProjectDirectories(result.projects);
+      setCollapsedProjectPaths((current) => current.filter((path) => !isSameProjectPath(path, projectPath)));
       if (selectedProjectPath && isSameProjectPath(selectedProjectPath, projectPath)) {
         setSelectedProjectPath(null);
         setNewThreadDraft(false);
@@ -805,6 +1001,15 @@ function AppContent() {
       if (isUnauthorized(error) && session) rejectCredentials(session.id);
     }
   }, [control.status, rejectCredentials, selectedProjectPath, session, taskClient]);
+
+  const toggleProject = useCallback((projectPath: string) => {
+    setCollapsedProjectPaths((current) => {
+      const collapsed = current.some((path) => isSameProjectPath(path, projectPath));
+      return collapsed
+        ? current.filter((path) => !isSameProjectPath(path, projectPath))
+        : [...current, projectPath].slice(-50);
+    });
+  }, []);
 
   const confirmRemoveProject = useCallback((projectPath: string) => {
     Alert.alert(
@@ -829,7 +1034,16 @@ function AppContent() {
       if (action === "archive") await taskClient.archiveThread(threadAction.thread.id);
       if (action === "unarchive") await taskClient.unarchiveThread(threadAction.thread.id);
       if (action === "delete") await taskClient.deleteThread(threadAction.thread.id);
-      if (action !== "rename" && selectedThreadId === threadAction.thread.id) setSelectedThreadId(null);
+      if (action !== "rename" && selectedThreadId === threadAction.thread.id) {
+        openedThreadHistoryRef.current = null;
+        setOpeningThreadId(null);
+        setSelectedThreadId(null);
+        setSelectedProjectPath(threadAction.thread.projectPath);
+        setNewThreadDraft(true);
+        setDraft("");
+        setAttachments([]);
+        setPendingMessages((current) => current.filter((message) => message.threadId !== threadAction.thread.id));
+      }
       setArchivedThreads((current) => current.filter((thread) => thread.id !== threadAction.thread.id));
       setThreadAction(null);
       await control.refresh();
@@ -855,13 +1069,9 @@ function AppContent() {
   }, [runThreadMutation, threadAction]);
 
   const saveConnection = useCallback(async () => {
-    let host: string;
-    let port: number;
     let accessKey: string;
     const editingConnection = sessionState.connections.find((connection) => connection.id === editingConnectionId);
     try {
-      host = normalizeControlHost(draftHost);
-      port = normalizeControlPort(draftPort);
       accessKey = normalizeAccessKey(draftKey || editingConnection?.accessKey || "");
     } catch (error) {
       setConnectionError(error instanceof Error ? error.message : "连接配置无效。");
@@ -871,14 +1081,12 @@ function AppContent() {
     setConnectionError(null);
     setConnectionMessage(null);
     try {
-      await verifyControlAccess({ host, port, accessKey });
-      const next = await sessionStore.saveConnection({ id: editingConnectionId || undefined, host, port, accessKey });
+      await verifyControlAccess({ accessKey });
+      const next = await sessionStore.saveConnection({ id: editingConnectionId || undefined, accessKey });
       setSessionState(next);
-      setDraftHost(host);
-      setDraftPort(String(port));
       setDraftKey("");
       setEditingConnectionId(next.activeConnectionId);
-      setConnectionMessage("电脑地址和 KEY 已安全保存，后台连接已启动。");
+      setConnectionMessage("KEY 已安全保存，公网中转连接已启动。");
       setDrawerPage("threads");
       setDrawerVisible(false);
     } catch (error) {
@@ -886,27 +1094,24 @@ function AppContent() {
     } finally {
       setConnectionBusy(false);
     }
-  }, [draftHost, draftKey, draftPort, editingConnectionId, sessionState.connections, sessionStore]);
+  }, [draftKey, editingConnectionId, sessionState.connections, sessionStore]);
 
   const addConnection = useCallback(() => {
     setEditingConnectionId(null);
-    setDraftHost(newConnectionHost);
-    setDraftPort(String(defaultControlPort));
     setDraftKey("");
     setConnectionError(null);
     setConnectionMessage(null);
     setDrawerPage("connection");
   }, []);
 
-  const editActiveConnection = useCallback(() => {
-    setEditingConnectionId(session?.id || null);
-    setDraftHost(session?.host || newConnectionHost);
-    setDraftPort(String(session?.port || defaultControlPort));
+  const editConnection = useCallback((connectionId: string) => {
+    if (!sessionState.connections.some((connection) => connection.id === connectionId)) return;
+    setEditingConnectionId(connectionId);
     setDraftKey("");
     setConnectionError(null);
     setConnectionMessage(null);
     setDrawerPage("connection");
-  }, [session]);
+  }, [sessionState.connections]);
 
   const selectConnection = useCallback((connectionId: string) => {
     const target = sessionState.connections.find((connection) => connection.id === connectionId);
@@ -915,8 +1120,6 @@ function AppContent() {
       if (target.accessKey) setDrawerPage("threads");
       else {
         setEditingConnectionId(target.id);
-        setDraftHost(target.host);
-        setDraftPort(String(target.port));
         setDraftKey("");
         setDrawerPage("connection");
       }
@@ -927,53 +1130,48 @@ function AppContent() {
       if (target.accessKey) setDrawerPage("threads");
       else {
         setEditingConnectionId(target.id);
-        setDraftHost(target.host);
-        setDraftPort(String(target.port));
         setDraftKey("");
         setDrawerPage("connection");
       }
     }).catch(() => setConnectionError("无法切换电脑，请重试。"));
   }, [sessionState.activeConnectionId, sessionState.connections, sessionStore]);
 
-  const forgetCredentials = useCallback(() => {
-    if (!session) return;
+  const removeEditingConnection = useCallback(() => {
+    if (!editingConnectionId) return;
+    const connectionId = editingConnectionId;
+    const removingActiveConnection = connectionId === sessionState.activeConnectionId;
     Alert.alert(
       "移除此电脑？",
-      `将从手机中移除 ${session.host}:${session.port} 及其保存的 KEY，不会影响其他电脑。`,
+      "将从手机中移除此电脑及其保存的 KEY，不会影响其他电脑。",
       [
         { text: "取消", style: "cancel" },
         {
           text: "移除",
           style: "destructive",
           onPress: () => {
-            void sessionStore.removeConnection(session.id).then((next) => {
+            void sessionStore.removeConnection(connectionId).then((next) => {
               setSessionState(next);
-              setSelectedThreadId(null);
+              if (removingActiveConnection) setSelectedThreadId(null);
               setConnectionMessage(null);
+              setConnectionError(null);
               setDraftKey("");
-              if (next.activeConnectionId) {
-                setDrawerPage("computers");
-              } else {
-                setEditingConnectionId(null);
-                setDraftHost(newConnectionHost);
-                setDraftPort(String(defaultControlPort));
-                setDrawerPage("connection");
-              }
+              setEditingConnectionId(null);
+              setDrawerPage("computers");
             }).catch(() => setConnectionError("无法移除此电脑，请重试。"));
           },
         },
       ],
     );
-  }, [session, sessionStore]);
+  }, [editingConnectionId, sessionState.activeConnectionId, sessionStore]);
 
-  if (booting) return <BootScreen message="正在恢复安全会话…" />;
+  if (booting) return <BootScreen message="正在恢复安全会话…" themeMode={themeMode} />;
   if (bootError) {
-    return <BootScreen error message={bootError || "无法启动移动端。"} onRetry={() => void loadSession()} />;
+    return <BootScreen error message={bootError || "无法启动移动端。"} onRetry={() => void loadSession()} themeMode={themeMode} />;
   }
 
   return (
     <SafeAreaFrame>
-      <StatusBar style="dark" />
+      <StatusBar style={themeMode === "dark" ? "light" : "dark"} />
       <ChatScreen
         approvalPolicy={approvalPolicy}
         attachments={attachments}
@@ -984,7 +1182,7 @@ function AppContent() {
         connectionNotice={control.notice}
         connectionStatus={control.status}
         draft={draft}
-        historyLoading={openingThreadId === selectedThreadId}
+        historyLoading={isThreadHistoryLoading(selectedThreadId, openingThreadId)}
         inputBusyId={inputBusyId}
         interrupting={interrupting}
         onApproval={(id, decision) => void control.resolveApproval(id, decision)}
@@ -995,8 +1193,6 @@ function AppContent() {
         onNoticePress={() => {
           if (control.status === "needs_configuration") {
             setEditingConnectionId(session?.id || null);
-            setDraftHost(session?.host || newConnectionHost);
-            setDraftPort(String(session?.port || defaultControlPort));
             setDraftKey("");
             setDrawerPage("connection");
             setDrawerVisible(true);
@@ -1042,6 +1238,7 @@ function AppContent() {
 
       <AppDrawer
         appVersion={currentAppVersion}
+        collapsedProjectPaths={collapsedProjectPaths}
         archivedLoading={archivedLoading}
         archivedThreads={archivedThreads}
         activeConnectionId={sessionState.activeConnectionId}
@@ -1049,26 +1246,26 @@ function AppContent() {
         connections={sessionState.connections}
         connectionStates={control.connectionStates}
         connectionStatus={control.status}
-        draftHost={draftHost}
-        draftPort={draftPort}
         onClose={() => setDrawerVisible(false)}
         accessKey={draftKey}
         connectionBusy={connectionBusy}
         connectionError={connectionError}
         connectionMessage={connectionMessage}
+        editingConnectionId={editingConnectionId}
         editingConnectionHasKey={Boolean(
           sessionState.connections.find((connection) => connection.id === editingConnectionId)?.accessKey,
         )}
-        onForget={forgetCredentials}
+        onRemoveConnection={removeEditingConnection}
         onAddConnection={addConnection}
-        onEditActiveConnection={editActiveConnection}
+        onEditConnection={editConnection}
         onSelectConnection={selectConnection}
         onCheckForUpdate={() => void checkForAppUpdate(false)}
         onDownloadUpdate={() => {
-          if (mobileUpdateStatus.state === "available") {
+          if (mobileUpdateStatus.latest) {
             void installMobileUpdate(mobileUpdateStatus.latest);
           }
         }}
+        onThemeModeChange={changeThemeMode}
         onOpenProjects={openProjectPicker}
         onNewThread={openNewThread}
         onPageChange={changeDrawerPage}
@@ -1076,19 +1273,17 @@ function AppContent() {
         onSaveConnection={() => void saveConnection()}
         onRefreshArchived={() => void loadArchived()}
         onSearchChange={setDrawerSearch}
-        onSelectProject={setSelectedProjectPath}
         onRemoveProject={confirmRemoveProject}
         onSelectThread={selectThread}
         onThreadActions={openThreadActions}
-        onHostChange={setDraftHost}
-        onPortChange={setDraftPort}
+        onToggleProject={toggleProject}
         page={drawerPage}
         projectPaths={projectDirectories.map((project) => project.path)}
         search={drawerSearch}
         selectedThreadId={selectedThreadId}
         selectedProjectPath={selectedProjectPath}
-        session={session}
         threads={control.snapshot.threads}
+        themeMode={themeMode}
         updateStatus={mobileUpdateStatus}
         visible={drawerVisible}
       />
@@ -1119,8 +1314,6 @@ function AppContent() {
         onClose={() => !newThreadBusy && setProjectPickerVisible(false)}
         onSelect={(projectPath) => void openProjectDirectory(projectPath)}
         onSubmitPath={openProjectDirectory}
-        projects={recentProjects}
-        selectedProject={selectedProjectPath}
         visible={projectPickerVisible}
       />
 
@@ -1149,10 +1342,10 @@ function SafeAreaFrame({ children }: { children: React.ReactNode }) {
   );
 }
 
-function BootScreen({ message, error = false, onRetry }: { message: string; error?: boolean; onRetry?: () => void }) {
+function BootScreen({ message, error = false, onRetry, themeMode }: { message: string; error?: boolean; onRetry?: () => void; themeMode: ThemeMode }) {
   return (
     <View style={styles.boot}>
-      <StatusBar style="dark" />
+      <StatusBar style={themeMode === "dark" ? "light" : "dark"} />
       {error ? <Text style={styles.bootError}>{message}</Text> : (
         <>
           <ActivityIndicator color={colors.ink} size="small" />
@@ -1186,18 +1379,18 @@ function connectionErrorMessage(error: unknown): string {
   if (error instanceof ControlClientError) {
     if (error.code === "unauthorized") return "KEY 无效，请确认使用桌面端当前生成的 KEY。";
     if (error.code === "certificate") return "无法验证控制服务证书，请检查电脑端证书配置。";
-    if (error.code === "offline" || error.code === "timeout") return "无法连接服务，请检查地址、端口和网络。";
+    if (error.code === "offline" || error.code === "timeout") return "电脑当前离线，或无法连接公网中转服务。";
     return error.message;
   }
   return error instanceof Error ? error.message : "连接验证失败，请重试。";
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles((colors) => ({
   safeArea: { flex: 1, backgroundColor: colors.canvas },
   boot: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 30, backgroundColor: colors.canvas },
   bootText: { color: colors.inkMuted, fontSize: 13, lineHeight: 18, marginTop: 12, textAlign: "center", letterSpacing: 0 },
   bootError: { color: colors.danger, fontSize: 13, lineHeight: 19, textAlign: "center", letterSpacing: 0 },
-  retryButton: { height: 38, marginTop: 16, paddingHorizontal: 18, borderRadius: 6, alignItems: "center", justifyContent: "center", backgroundColor: colors.ink },
+  retryButton: { height: 38, marginTop: 16, paddingHorizontal: 18, borderRadius: 6, alignItems: "center", justifyContent: "center", backgroundColor: colors.solid },
   retryPressed: { opacity: 0.8 },
-  retryText: { color: colors.inverse, fontSize: 13, lineHeight: 18, fontWeight: "600", letterSpacing: 0 },
-});
+  retryText: { color: colors.onSolid, fontSize: 13, lineHeight: 18, fontWeight: "600", letterSpacing: 0 },
+}));

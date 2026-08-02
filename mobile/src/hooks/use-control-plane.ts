@@ -1,9 +1,24 @@
 import type { ControlSnapshot, RemoteThreadOpenResult } from "@rhzycode/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
+import { resumeConnectionAction } from "../components/chat-screen-model";
+import {
+  getSnapshotWithRetry,
+  heartbeatPingFrame,
+  heartbeatPongId,
+  reconnectDelay,
+  webSocketConnectTimeoutMs,
+  webSocketHeartbeatIntervalMs,
+  webSocketHeartbeatTimeoutMs,
+} from "../api/control-connection-model";
 import { ControlClient, ControlClientError } from "../api/control-client";
 import type { MobileSession } from "../storage/secure-session";
-import { applyAgentEvent, emptyControlSnapshot, hydrateThreadSnapshot } from "../state/control-reducer";
+import {
+  applyAgentEvent,
+  emptyControlSnapshot,
+  hydrateThreadSnapshot,
+  mergeControlSnapshot,
+} from "../state/control-reducer";
 
 export type ConnectionStatus = "connecting" | "online" | "offline" | "needs_configuration";
 
@@ -32,6 +47,10 @@ interface RuntimeConnection {
   lastSequence: number;
   socket: WebSocket | null;
   socketOpen: boolean;
+  connecting: boolean;
+  probe: (() => void) | null;
+  reconnect: (() => void) | null;
+  resync: (() => void) | null;
 }
 
 export function useControlPlane({
@@ -40,29 +59,42 @@ export function useControlPlane({
   onCredentialsRejected,
 }: UseControlPlaneOptions) {
   const [connectionStates, setConnectionStates] = useState<Record<string, ControlPlaneConnectionState>>({});
-  const [appActive, setAppActive] = useState(AppState.currentState !== "background");
   const [connectionKick, setConnectionKick] = useState(0);
   const runtimeConnections = useRef(new Map<string, RuntimeConnection>());
+  const appState = useRef(AppState.currentState);
   const approvalBusy = useRef(new Map<string, Set<string>>());
   const configuredSessions = useRef<Record<string, string>>({});
   const credentialsRejected = useRef(onCredentialsRejected);
   credentialsRejected.current = onCredentialsRejected;
 
-  const sessionSignature = JSON.stringify(sessions.map(({ id, host, port, accessKey }) => [id, host, port, accessKey]));
+  const sessionSignature = JSON.stringify(sessions.map(({ id, accessKey }) => [id, accessKey]));
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeConnectionId) || null,
     [activeConnectionId, sessionSignature],
   );
 
   useEffect(() => {
-    const subscription = AppState.addEventListener("change", (next) => setAppActive(next === "active"));
+    const subscription = AppState.addEventListener("change", (next) => {
+      const resumed = appState.current !== "active" && next === "active";
+      appState.current = next;
+      if (!resumed) return;
+      for (const runtime of runtimeConnections.current.values()) {
+        if (resumeConnectionAction(runtime.socketOpen) === "resync") {
+          // Recover any deltas lost while JS was suspended, then confirm the socket.
+          runtime.resync?.();
+          runtime.probe?.();
+        } else {
+          runtime.reconnect?.();
+        }
+      }
+    });
     return () => subscription.remove();
   }, []);
 
   useEffect(() => {
     const nextConfiguredSessions = Object.fromEntries(sessions.map((session) => [
       session.id,
-      `${session.host}\n${session.port}\n${session.accessKey}`,
+      session.accessKey,
     ]));
     setConnectionStates((current) => Object.fromEntries(sessions.map((session) => {
       const previous = configuredSessions.current[session.id] === nextConfiguredSessions[session.id]
@@ -71,9 +103,7 @@ export function useControlPlane({
       if (previous) {
         return [session.id, {
           ...previous,
-          status: session.accessKey
-            ? appActive ? previous.status : "offline"
-            : "needs_configuration",
+          status: session.accessKey ? previous.status : "needs_configuration",
         }];
       }
       return [session.id, createConnectionState(session.accessKey ? "connecting" : "needs_configuration")];
@@ -82,26 +112,40 @@ export function useControlPlane({
 
     runtimeConnections.current.clear();
     approvalBusy.current.clear();
-    if (!appActive) return undefined;
 
     let disposed = false;
     const cleanups: Array<() => void> = [];
 
     for (const session of sessions) {
       if (!session.accessKey) continue;
-      const client = new ControlClient(session.host, session.port, session.accessKey);
+      const client = new ControlClient(session.accessKey);
       const runtime: RuntimeConnection = {
         client,
         lastSequence: 0,
         socket: null,
         socketOpen: false,
+        connecting: false,
+        probe: null,
+        reconnect: null,
+        resync: null,
       };
       runtimeConnections.current.set(session.id, runtime);
       approvalBusy.current.set(session.id, new Set());
 
       let stopped = false;
       let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+      let socketConnectTimer: ReturnType<typeof setTimeout> | null = null;
+      let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+      let heartbeatTimeout: ReturnType<typeof setTimeout> | null = null;
+      let pendingHeartbeatId: string | null = null;
+      let heartbeatSequence = 0;
       let reconnectAttempt = 0;
+
+      const clearSocketConnectTimer = () => {
+        if (!socketConnectTimer) return;
+        clearTimeout(socketConnectTimer);
+        socketConnectTimer = null;
+      };
 
       const update = (value: Partial<ControlPlaneConnectionState> | ((current: ControlPlaneConnectionState) => ControlPlaneConnectionState)) => {
         setConnectionStates((current) => {
@@ -112,7 +156,7 @@ export function useControlPlane({
       };
 
       const scheduleReconnect = () => {
-        if (disposed || stopped || reconnectTimer) return;
+        if (disposed || stopped || reconnectTimer || runtime.connecting) return;
         runtime.socketOpen = false;
         update({ status: "offline" });
         const delay = reconnectDelay(reconnectAttempt++);
@@ -121,15 +165,20 @@ export function useControlPlane({
           void synchronize();
         }, delay);
       };
+      runtime.reconnect = scheduleReconnect;
 
-      const synchronize = async () => {
+      const resyncSnapshot = async () => {
         if (disposed || stopped) return;
-        update({ status: "connecting" });
         try {
-          const next = await client.getSnapshot();
+          const next = await getSnapshotWithRetry(client);
           if (disposed || stopped) return;
-          runtime.lastSequence = next.lastSequence;
-          update({ snapshot: next, notice: null });
+          runtime.lastSequence = Math.max(runtime.lastSequence, next.lastSequence);
+          update((current) => ({
+            ...current,
+            snapshot: mergeControlSnapshot(current.snapshot, next),
+            notice: null,
+            ...(runtime.socketOpen ? { status: "online" as const } : {}),
+          }));
         } catch (error) {
           if (disposed || stopped) return;
           if (isUnauthorized(error)) {
@@ -138,6 +187,80 @@ export function useControlPlane({
             credentialsRejected.current(session.id);
             return;
           }
+          // Keep the existing timeline visible; reconnect handles hard failures.
+          update({ notice: describeControlError(error) });
+          if (!runtime.socketOpen) scheduleReconnect();
+        }
+      };
+      runtime.resync = () => { void resyncSnapshot(); };
+
+      const clearHeartbeatTimers = () => {
+        if (heartbeatTimer) clearTimeout(heartbeatTimer);
+        if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
+        heartbeatTimer = null;
+        heartbeatTimeout = null;
+        pendingHeartbeatId = null;
+      };
+
+      function scheduleHeartbeat(socket: WebSocket) {
+        if (heartbeatTimer) clearTimeout(heartbeatTimer);
+        heartbeatTimer = setTimeout(() => sendHeartbeat(socket), webSocketHeartbeatIntervalMs);
+      }
+
+      function sendHeartbeat(socket: WebSocket) {
+        if (disposed || stopped || runtime.socket !== socket || !runtime.socketOpen) return;
+        if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
+        const id = `heartbeat-${Date.now().toString(36)}-${(++heartbeatSequence).toString(36)}`;
+        pendingHeartbeatId = id;
+        try {
+          socket.send(heartbeatPingFrame(id));
+        } catch {
+          socket.close();
+          return;
+        }
+        heartbeatTimeout = setTimeout(() => {
+          heartbeatTimeout = null;
+          if (appState.current !== "active" || pendingHeartbeatId !== id || runtime.socket !== socket) return;
+          update({ notice: "连接心跳超时，正在重连。" });
+          socket.close();
+        }, webSocketHeartbeatTimeoutMs);
+        scheduleHeartbeat(socket);
+      }
+
+      function acceptHeartbeat(value: unknown): boolean {
+        const id = heartbeatPongId(value);
+        if (!id) return false;
+        if (id === pendingHeartbeatId) {
+          pendingHeartbeatId = null;
+          if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
+          heartbeatTimeout = null;
+        }
+        return true;
+      }
+
+      const synchronize = async () => {
+        if (disposed || stopped || runtime.connecting) return;
+        runtime.connecting = true;
+        update({ status: "connecting", notice: null });
+        try {
+          const next = await getSnapshotWithRetry(client);
+          if (disposed || stopped) return;
+          runtime.lastSequence = Math.max(runtime.lastSequence, next.lastSequence);
+          update((current) => ({
+            ...current,
+            snapshot: mergeControlSnapshot(current.snapshot, next),
+            notice: null,
+          }));
+        } catch (error) {
+          if (disposed || stopped) return;
+          if (isUnauthorized(error)) {
+            runtime.connecting = false;
+            stopped = true;
+            update({ status: "needs_configuration", notice: describeControlError(error) });
+            credentialsRejected.current(session.id);
+            return;
+          }
+          runtime.connecting = false;
           update({ notice: describeControlError(error) });
           scheduleReconnect();
           return;
@@ -146,17 +269,45 @@ export function useControlPlane({
         const descriptor = client.eventSocket(runtime.lastSequence);
         const socket = new WebSocket(descriptor.url, descriptor.protocols);
         runtime.socket = socket;
+        socketConnectTimer = setTimeout(() => {
+          if (disposed || stopped || runtime.socket !== socket || runtime.socketOpen) return;
+          socketConnectTimer = null;
+          runtime.connecting = false;
+          runtime.socket = null;
+          update({ notice: "实时连接超时，正在重试。" });
+          try {
+            socket.close();
+          } catch {
+            // The reconnect below replaces sockets that cannot be closed while connecting.
+          }
+          scheduleReconnect();
+        }, webSocketConnectTimeoutMs);
         socket.onopen = () => {
+          if (runtime.socket !== socket) {
+            socket.close();
+            return;
+          }
+          clearSocketConnectTimer();
           if (disposed || stopped) return;
           reconnectAttempt = 0;
+          runtime.connecting = false;
           runtime.socketOpen = true;
+          runtime.probe = () => sendHeartbeat(socket);
           update({ status: "online", notice: null });
+          sendHeartbeat(socket);
+          // Cover the race between the pre-socket snapshot and the first event frame
+          // so completed assistant replies are not stuck missing on flaky links.
+          void resyncSnapshot();
         };
         socket.onmessage = (message) => {
-          if (disposed || stopped) return;
+          if (disposed || stopped || runtime.socket !== socket) return;
+          if (acceptHeartbeat(String(message.data))) return;
           try {
             const event = client.parseEvent(String(message.data));
-            runtime.lastSequence = Math.max(runtime.lastSequence, event.sequence);
+            // Snapshots can advance the cursor; skip already-applied events so
+            // reconnect storms do not reshuffle or flicker the timeline.
+            if (event.sequence <= runtime.lastSequence) return;
+            runtime.lastSequence = event.sequence;
             update((current) => ({
               ...current,
               snapshot: applyAgentEvent(current.snapshot, event),
@@ -171,9 +322,14 @@ export function useControlPlane({
         };
         socket.onerror = () => socket.close();
         socket.onclose = () => {
+          if (runtime.socket !== socket) return;
+          clearSocketConnectTimer();
+          clearHeartbeatTimers();
           if (disposed || stopped) return;
+          runtime.connecting = false;
           runtime.socketOpen = false;
           runtime.socket = null;
+          runtime.probe = null;
           scheduleReconnect();
         };
       };
@@ -182,6 +338,12 @@ export function useControlPlane({
       cleanups.push(() => {
         stopped = true;
         if (reconnectTimer) clearTimeout(reconnectTimer);
+        clearSocketConnectTimer();
+        clearHeartbeatTimers();
+        runtime.connecting = false;
+        runtime.probe = null;
+        runtime.reconnect = null;
+        runtime.resync = null;
         runtime.socket?.close();
       });
     }
@@ -192,7 +354,7 @@ export function useControlPlane({
       runtimeConnections.current.clear();
       approvalBusy.current.clear();
     };
-  }, [appActive, connectionKick, sessionSignature]);
+  }, [connectionKick, sessionSignature]);
 
   const activeState = activeConnectionId
     ? connectionStates[activeConnectionId] || createConnectionState(activeSession?.accessKey ? "connecting" : "needs_configuration")
@@ -201,12 +363,19 @@ export function useControlPlane({
   const refresh = useCallback(async () => {
     if (!activeSession?.accessKey) return;
     const runtime = runtimeConnections.current.get(activeSession.id);
-    const client = runtime?.client || new ControlClient(activeSession.host, activeSession.port, activeSession.accessKey);
-    updateConnectionState(setConnectionStates, activeSession.id, { refreshing: true });
+    const client = runtime?.client || new ControlClient(activeSession.accessKey);
+    updateConnectionState(setConnectionStates, activeSession.id, {
+      refreshing: true,
+      ...(!runtime?.socketOpen ? { status: "connecting" as const, notice: null } : {}),
+    });
     try {
-      const next = await client.getSnapshot();
-      if (runtime) runtime.lastSequence = next.lastSequence;
-      updateConnectionState(setConnectionStates, activeSession.id, { snapshot: next, notice: null });
+      const next = await getSnapshotWithRetry(client);
+      if (runtime) runtime.lastSequence = Math.max(runtime.lastSequence, next.lastSequence);
+      updateConnectionState(setConnectionStates, activeSession.id, (current) => ({
+        ...current,
+        snapshot: mergeControlSnapshot(current.snapshot, next),
+        notice: null,
+      }));
       if (!runtime?.socketOpen) setConnectionKick((value) => value + 1);
     } catch (error) {
       if (isUnauthorized(error)) {
@@ -235,7 +404,7 @@ export function useControlPlane({
       approvalOperations: { ...current.approvalOperations, [approvalId]: { busy: true } },
     }));
     const runtime = runtimeConnections.current.get(activeSession.id);
-    const client = runtime?.client || new ControlClient(activeSession.host, activeSession.port, activeSession.accessKey);
+    const client = runtime?.client || new ControlClient(activeSession.accessKey);
     try {
       const event = await client.resolveApproval(approvalId, decision);
       if (runtime) runtime.lastSequence = Math.max(runtime.lastSequence, event.sequence);
@@ -287,11 +456,6 @@ export function useControlPlane({
     hydrateThread,
     resolveApproval,
   };
-}
-
-export function reconnectDelay(attempt: number, random = Math.random): number {
-  const base = Math.min(30_000, 1_000 * 2 ** Math.max(0, attempt));
-  return Math.round(base * (0.8 + random() * 0.4));
 }
 
 export function describeControlError(error: unknown): string {

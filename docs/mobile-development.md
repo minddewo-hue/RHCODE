@@ -1,55 +1,56 @@
-# RHZYCODE 移动端开发文档
+# RHZYCODE 移动端开发
 
-本文档描述当前 Expo 移动端。桌面应用是唯一权威服务端，手机只通过稳定的 RHZYCODE HTTP/WebSocket 接口读取状态和提交命令。
+移动应用使用 Expo / React Native。桌面是权威服务端，手机只通过中转后的 RHZYCODE HTTP/WebSocket 协议读取状态和提交命令。
 
-## 1. 技术栈与边界
+## 技术栈
 
-| 项目 | 当前值 |
-| --- | --- |
-| Expo | 57 |
-| React Native | 0.86 |
-| React | 19.2 |
-| TypeScript | 严格模式 |
-| Android 包名 | `ai.rhzy.code` |
-| iOS Bundle ID | `ai.rhzy.code` |
-| 安全存储 | `expo-secure-store` |
+当前精确版本以 `mobile/package.json` 为准：
+
+- Expo 57
+- React Native 0.86
+- React 19
+- TypeScript 严格模式
+- `expo-secure-store` 保存连接 KEY
+- Android/iOS 包标识见 `mobile/app.json`
+
+## 职责与边界
 
 移动端负责：
 
-- 输入并安全保存多台桌面的 IP、端口和长期 KEY，每台电脑使用独立凭据。
-- 加载完整 `ControlSnapshot`，通过 WebSocket 回放和接收增量事件。
-- 展示电脑、对话、消息、审批和结构化用户输入。
-- 创建对话、发送消息、中断任务、提交回答。
-- 搜索、重命名、归档、恢复和删除对话。
-- 从当前电脑读取可用模型，并为新任务或下一轮消息切换模型。
-- 同步并打开电脑上已经存在的工程目录，不通过手机端创建文件夹。
-- 在前后台切换、断线和桌面重启后自动恢复。
-- 同时维持所有已保存电脑的事件连接，并在当前电脑之间即时切换，任务数据互不混合。
+- 保存多台电脑的连接元数据和独立 KEY。
+- 加载 snapshot、消费事件回放并处理断线重连。
+- 展示项目、对话、消息、Activity、审批和结构化输入。
+- 新建/打开对话、发送/中断任务、切换模型和推理强度。
+- 浏览并登记电脑已有目录，管理对话生命周期。
+- 选择图片/文件、上传受限附件、查看和保存生成文件。
+- Android APK 更新和 iOS App Store 更新跳转。
 
-移动端不直接调用 Codex App Server，不持有 Provider 凭据，也不解释 Codex 私有 RPC。
+移动端不直接调用 Codex、Provider 或桌面局域网端口，不持有 Provider API Key，也不自行扩展协议枚举。
 
-## 2. 目录
+## 目录
 
 ```text
 mobile/src/
-  App.tsx                       应用状态和用户工作流
-  api/control-client.ts        HTTP、WebSocket 描述和运行时响应校验
-  auth/control-access.ts       IP、端口和 KEY 规范化
-  hooks/use-control-plane.ts   snapshot、事件流、重连和审批操作
-  state/control-reducer.ts     AgentEvent 合并
-  storage/secure-session.ts    安全会话存储抽象
-  storage/native-secure-session.ts
-  platform/update/              Android/iOS 更新契约、状态机和平台动作
-  components/AppDrawer.tsx     对话、电脑、连接和设置侧栏
-  components/ChatScreen.tsx    消息、审批、输入请求和发送区
-  components/TaskSheets.tsx    新建任务和对话操作
-  ui/theme.ts                  视觉变量
-mobile/test/                   Node 单元和接口测试
+  App.tsx                         应用导航、主题和顶层工作流
+  api/control-client.ts          HTTP/WS、认证与响应校验
+  api/control-connection-model.ts 连接模型和 endpoint 规则
+  auth/control-access.ts         KEY 解析与访问验证
+  hooks/use-control-plane.ts     snapshot、事件流和命令状态
+  state/control-reducer.ts       AgentEvent 幂等合并
+  state/project-list.ts          项目和对话筛选
+  storage/secure-session.ts      多电脑 SecureStore 持久化
+  components/AppDrawer.tsx       项目、对话、电脑和设置
+  components/ChatScreen.tsx      消息、Activity 和输入区
+  components/TaskSheets.tsx      项目与对话操作 sheet
+  platform/update/               Android/iOS 更新状态机
+  ui/theme.ts                    浅色/夜间主题 token
+mobile/plugins/                  Expo 平台配置
+mobile/test/                     Node 测试
 ```
 
-共享控制类型的事实来源是 `packages/protocol/src/index.ts`，更新清单的事实来源是 `packages/update-contract`。控制接口的事实来源是 `desktop/src/main/control-plane/app.ts`。
+共享控制协议以 `packages/protocol` 为准；更新清单以 `packages/update-contract` 为准。
 
-## 3. 启动与验证
+## 启动与验证
 
 ```powershell
 npm install
@@ -58,41 +59,31 @@ npm test --workspace @rhzycode/mobile
 npm run dev:mobile
 ```
 
-Android：
+Android 真机或模拟器：
 
 ```powershell
 adb reverse tcp:8081 tcp:8081
-adb reverse tcp:8790 tcp:8790
 npm run android --workspace @rhzycode/mobile
 ```
 
-iOS（必须在安装 Xcode 的 macOS 上）：
+iOS 必须在 macOS/Xcode 环境运行：
 
 ```bash
 npm run dev:ios
 ```
 
-物理手机也可以直接访问桌面显示的 WLAN 地址，不需要 ADB reverse。桌面和手机必须处于同一可信局域网。
-
-可选开发默认值：
+自建中转：
 
 ```powershell
-$env:EXPO_PUBLIC_CONTROL_HOST = "192.168.11.103"
-$env:EXPO_PUBLIC_CONTROL_PORT = "8790"
+$env:EXPO_PUBLIC_TRANSFER_SERVER_URL = "https://relay.example.com"
 npm run dev:mobile
 ```
 
-公开构建变量只能包含 IP/主机名和端口，绝不能包含 KEY。
+`EXPO_PUBLIC_*` 会进入客户端包，只能放公开 origin，不能放 KEY 或凭据。
 
-## 4. 多电脑长期 KEY 连接
+## 连接存储
 
-添加每台电脑时只需要三个字段：
-
-1. 桌面显示的本机 IP 地址，例如 `192.168.11.103`。
-2. 桌面控制端口，默认 `8790`。
-3. 桌面生成的 `rhzy_...` 长期 KEY。
-
-连接前，移动端使用 `GET /v1/snapshot` 验证 KEY。验证成功后，SecureStore 保存电脑元数据、当前电脑 ID，并按连接 ID 分开保存 KEY：
+添加电脑只输入桌面生成的 `rhzy_...` KEY。移动端先用 snapshot 验证，再将电脑元数据与 KEY 分开保存：
 
 ```text
 rhzycode.connections.v2
@@ -100,93 +91,77 @@ rhzycode.activeConnectionId.v2
 rhzycode.connectionKey.v2.<connection-id>
 ```
 
-旧版本的 `rhzycode.controlHost`、`rhzycode.controlPort` 和 `rhzycode.accessKey` 会在首次启动时自动迁移。主聊天页只显示当前电脑的对话；其他电脑仍在后台保持 WebSocket 同步，可从“设置 > 电脑”查看状态并切换。
+- 电脑元数据不得包含 KEY。
+- 每台电脑使用独立 SecureStore 键。
+- 旧 host/port 连接数据在首次加载时迁移为 relay-only 模型。
+- KEY 轮换后旧 HTTP 返回 `401`，旧 WebSocket 以 `4001` 关闭；客户端要求重新配置。
 
-KEY 在桌面手动重新生成前长期有效。桌面重新生成 KEY 后，旧 HTTP 请求返回 `401`，旧 WebSocket 以代码 `4001` 关闭；移动端进入需要重新配置的状态并清除本机 KEY。
-
-HTTP 认证：
-
-```http
-Authorization: Bearer <desktop-access-key>
-```
-
-WebSocket 认证：
-
-```text
-rhzycode.v1
-rhzycode.auth.<desktop-access-key>
-```
-
-KEY 不进入 URL、日志、错误信息、事件或普通 React Native 存储。
-
-## 5. 状态同步
-
-连接顺序：
+## 状态同步
 
 ```text
 GET /v1/snapshot
-  -> 保存 lastSequence
+  -> validate ControlSnapshot
+  -> store lastSequence
   -> WS /v1/events?after=<lastSequence>
-  -> applyAgentEvent
+  -> validate and apply AgentEvent
 ```
 
-`useControlPlane` 为每台已保存电脑维护独立 snapshot、sequence、WebSocket 和重连计时器。应用进入后台时关闭全部连接，回到前台后分别重新获取 snapshot。普通断线使用带抖动的指数退避，范围从约 1 秒到 30 秒。手工刷新只刷新当前电脑，并在 WebSocket 未打开时触发重连。
+要求：
 
-收到无效 JSON 或不符合 `agentEventSchema` 的事件时，不应用该事件并重建连接。sequence 只能前进，重复删除和已处理审批必须保持幂等。
+- 每台电脑维护独立 snapshot、sequence、WebSocket 和重连计时器。
+- sequence 只能前进；重复事件按 upsert/idempotent 语义处理。
+- 应用进入后台时停止实时连接，回到前台后重新同步。
+- socket 存活但可能漏事件时先 resync，不能仅依赖连接状态。
+- 历史加载和实时事件必须合并，短 snapshot 不能删除已加载回复。
+- 无效 JSON 或 schema 不匹配时拒绝数据并重建连接。
 
-## 6. 控制接口
+## 命令
 
-| 方法 | 路径 | 用途 |
-| --- | --- | --- |
-| `GET` | `/v1/snapshot` | 完整状态 |
-| `GET` WS | `/v1/events?after=N` | 事件回放和实时更新 |
-| `POST` | `/v1/approvals/:id` | 批准或拒绝 |
-| `GET` | `/v1/commands/projects` | 列出电脑端已登记工程目录 |
-| `GET` | `/v1/commands/models` | 读取当前电脑可用模型 |
-| `POST` | `/v1/commands/projects` | 打开并登记电脑端已有工程目录 |
-| `GET` | `/v1/commands/threads/archived` | 归档列表 |
-| `POST` | `/v1/commands/threads/start` | 新建对话 |
-| `POST` | `/v1/commands/threads/:id/turns/start` | 发送消息 |
-| `POST` | `/v1/commands/threads/:id/turns/interrupt` | 中断任务 |
-| `POST` | `/v1/commands/user-inputs/:id/submit` | 提交结构化回答 |
-| `POST` | `/v1/commands/threads/:id/rename` | 重命名 |
-| `POST` | `/v1/commands/threads/:id/archive` | 归档 |
-| `POST` | `/v1/commands/threads/:id/unarchive` | 恢复 |
-| `DELETE` | `/v1/commands/threads/:id` | 永久删除 |
+完整路由和 schema 以控制面代码为准。移动端当前工作流包括：
 
-所有写命令都必须携带唯一 `Idempotency-Key`。移动端支持与桌面端一致的 sandbox 和 approval policy，包括 `danger-full-access` 与 `never`；默认使用 `danger-full-access + never`。
+- 项目列表、目录浏览、登记和移除。
+- 模型目录、线程详情和归档列表。
+- 新建线程、发送/中断 Turn、切换线程模型、压缩上下文。
+- 提交审批和结构化回答。
+- 重命名、归档、恢复和永久删除。
+- 受控附件上传、生成图片和文件下载。
 
-模型切换遵循桌面端相同行为：模型目录由当前电脑动态返回，选择结果用于新任务或下一轮 `turn/start`。任务处于运行中时不能切换；不同电脑分别使用各自的模型目录和当前选择。
+所有写命令使用 8-200 字符 `Idempotency-Key`。重试必须复用同一个 key 和请求体；冲突或业务拒绝不能自动变成新命令。
 
-工程目录由桌面端统一管理并加密持久化。手机端“打开工程”时提交电脑上已有目录的绝对路径，桌面端只登记并同步到桌面与手机的项目菜单，不创建新文件夹。不存在的路径、相对路径、磁盘根目录和指向普通文件的路径会被拒绝。
+## 错误处理
 
-## 7. 错误状态
-
-| 状态 | 移动端行为 |
+| 状态 | 行为 |
 | --- | --- |
-| `400` | 显示输入或命令无效，不重试写操作 |
-| `401` | 清除 KEY，打开连接设置 |
-| `403` | 显示操作被拒绝 |
-| `404` | 刷新状态，提示目标已不存在 |
-| `409` | 显示状态冲突，刷新后由用户决定 |
-| 超时/离线 | 保留会话，指数退避重连 |
-| 响应 schema 无效 | 拒绝数据并显示服务异常 |
+| `400` | 显示输入错误，不重试写操作 |
+| `401` | KEY 已失效，进入重新配置 |
+| `403` | 显示权限拒绝 |
+| `404` | 刷新状态并提示目标不存在 |
+| `409` | 显示冲突，刷新后由用户决定 |
+| `503` | 桌面离线，保留本地导航并退避重连 |
+| 网络超时 | 对幂等请求按既定策略重试 |
+| schema 错误 | 拒绝响应，显示服务不兼容 |
 
-## 8. 平台网络与更新
+## 主题与 UI
 
-本地 IP 通常没有手机信任的证书，因此开发和可信局域网使用 HTTP/WS。`with-private-network-cleartext.cjs` 只为 Android 应用声明 cleartext 能力；KEY 仍是所有业务请求的认证边界。
+- 使用 `createThemedStyles` 和 `ThemeColors`，不要在组件中保存主题创建时的静态颜色。
+- 实心按钮使用 `solid/onSolid`；数字徽标使用专用高对比 token。
+- 预览浮层使用预览专用颜色，不复用页面背景色。
+- 图标按钮应使用现有 Feather/Ionicons 图标并提供 accessibility label。
+- 固定工具栏、徽标和按钮尺寸，避免数字、加载状态或长文本引起布局跳动。
+- 修改聊天、Activity、抽屉或 sheet 后检查 Android/iOS、浅色/夜间、窄屏和系统字体缩放。
 
-iOS 通过 `NSLocalNetworkUsageDescription` 请求本地网络访问，并只为本地网络开启 ATS 例外。Android 更新会校验 APK 大小和 SHA-256 后进入系统安装器；iOS 更新只打开版本清单中的 App Store URL，不在应用内下载 IPA。
+## 平台更新
 
-不要把桌面 `8790` 端口映射到公网。远程部署必须增加可信 HTTPS/WSS、可达地址和网络策略。
+- Android 读取统一清单，下载 APK，校验大小与 SHA-256，再打开系统安装器。
+- iOS 只打开清单中的 App Store URL，不在应用内下载 IPA。
+- 当前 Android 发布配置使用公网 HTTP，因此 config plugin 明确允许 cleartext；迁移 HTTPS 后应移除该例外。
 
-## 9. 交付检查
+## 交付检查
 
-- [ ] 三字段连接只接受私有 IP/本地主机、有效端口和 `rhzy_` KEY。
-- [ ] SecureStore 中电脑元数据不含 KEY，每台电脑的 KEY 使用独立安全存储键。
-- [ ] 多台电脑同时在线时各自保持 WebSocket，切换电脑不会混合对话、项目或审批。
-- [ ] snapshot 和全部事件类型有运行时校验。
-- [ ] HTTP KEY 只在 Bearer header，WebSocket KEY 只在 subprotocol。
-- [ ] 401、4001、离线和前后台切换均能恢复到正确状态。
-- [ ] 写命令带 `Idempotency-Key`，失败时不会静默重复执行。
-- [ ] TypeScript、移动端测试、Android bundle、iOS archive 和两平台真机布局验证通过。
+- [ ] `typecheck` 和移动测试通过。
+- [ ] snapshot、历史和实时回复在重连后不丢失。
+- [ ] 多电脑切换不混合项目、线程、模型或审批。
+- [ ] KEY 不在 URL、普通存储、日志或错误文本中。
+- [ ] 写命令 key、重试和冲突行为正确。
+- [ ] 浅色/夜间的文字、图标、徽标和按钮对比度清晰。
+- [ ] Android/iOS 真机验证附件、前后台、弱网和更新流程。

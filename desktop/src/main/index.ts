@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, safeStorage, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, net, safeStorage, shell } from "electron";
 import updaterPackage from "electron-updater";
 import {
   ControlStore,
@@ -18,14 +18,13 @@ import {
 import type { ComposerAttachment, SkillsStatus } from "../shared/desktop-api";
 import { ProviderCredentialStore } from "./credential-store";
 import { detectLlmProtocol } from "./llm-protocol";
-import { DesktopSettingsStore, isValidSyncPort } from "./desktop-settings";
 import { removeStalePastedImages, savePastedImage } from "./pasted-image-store";
-import { buildTextContextMenu } from "./text-context-menu";
+import { buildImageContextMenu, buildTextContextMenu } from "./text-context-menu";
 import { DEFAULT_UPDATE_MANIFEST_URL, UpdateManager, type UpdateAdapter } from "./update-manager";
 import { EncryptedControlPersistence, EncryptedStateFile, type PersistenceStatus } from "./control-persistence";
 import { AppServerClient } from "./app-server";
 import {
-  normalizeCodexSessionProviders,
+  normalizeCodexSessionProvidersOnce,
   runFirstLaunchEnvironmentMigrations,
   type EnvironmentMigrationSource,
 } from "./environment-migration";
@@ -34,6 +33,7 @@ import { SkillsManager } from "./skills-manager";
 import {
   bundledCodexExecutable,
   desktopUpdatePlatform,
+  preferredCodexPath,
   shouldQuitWhenAllWindowsClose,
 } from "./platform/desktop-platform";
 import {
@@ -48,7 +48,6 @@ import {
   validateSkillPath,
   validateStartThread,
   validateStartTurn,
-  validateSyncPort,
   validateTerminalResize,
   validateTerminalStart,
   validateTerminalWrite,
@@ -59,6 +58,7 @@ import {
 } from "./ipc-validation";
 
 const { autoUpdater } = updaterPackage;
+const systemFetch = net.fetch.bind(net) as typeof fetch;
 
 let mainWindow: BrowserWindow | null = null;
 let runtime: DesktopRuntime | null = null;
@@ -114,11 +114,25 @@ function createWindow(): BrowserWindow {
       console.error(`[Renderer:${details.level}] ${details.message}`);
     }
   });
-  mainWindow.webContents.on("context-menu", (_event, params) => {
+  mainWindow.webContents.on("context-menu", (event, params) => {
+    if (params.mediaType === "image") {
+      event.preventDefault();
+      return;
+    }
     const menu = Menu.buildFromTemplate(buildTextContextMenu(params));
     menu.popup({ window: mainWindow || undefined });
   });
-  mainWindow.once("ready-to-show", () => mainWindow?.show());
+  mainWindow.once("ready-to-show", () => {
+    if (!mainWindow) return;
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.focus();
+  });
+  mainWindow.on("focus", () => {
+    if (!mainWindow) return;
+    mainWindow.webContents.focus();
+    mainWindow.webContents.send("window:focused");
+  });
 
   if (process.env.ELECTRON_RENDERER_URL) {
     void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -133,7 +147,6 @@ function registerIpc(
   credentials: ProviderCredentialStore,
   updates: UpdateManager,
   mobileAccess: MobileAccessManager,
-  desktopSettings: DesktopSettingsStore,
   skillsManager: SkillsManager,
   getPersistenceStatus: () => PersistenceStatus,
 ): void {
@@ -152,7 +165,9 @@ function registerIpc(
   ipcMain.handle("agent:status", () => activeRuntime.agent.getStatus());
   ipcMain.handle("agent:connect", async () => {
     await startupEnvironmentMigration;
-    await activeRuntime.startGatewayAndAgent().catch(() => undefined);
+    if (activeRuntime.agent.getStatus().state !== "connected") {
+      await activeRuntime.startGatewayAndAgent().catch(() => undefined);
+    }
     return activeRuntime.agent.getStatus();
   });
   ipcMain.handle("agent:models", () => activeRuntime.listModels());
@@ -181,6 +196,9 @@ function registerIpc(
   ipcMain.handle("agent:thread:delete", (_event, threadId: unknown) =>
     activeRuntime.deleteThread(validateIdentifier(threadId, "threadId")),
   );
+  ipcMain.handle("agent:thread:compact", (_event, threadId: unknown) =>
+    activeRuntime.compactThread(validateIdentifier(threadId, "threadId")),
+  );
   ipcMain.handle("conversation:backup", async (_event, projectPath: unknown) => {
     const validatedProjectPath = validateProjectPath(projectPath);
     const projectName = basename(validatedProjectPath).replace(/[^a-zA-Z0-9._-]+/g, "-") || "project";
@@ -193,6 +211,21 @@ function registerIpc(
     if (result.canceled || !result.filePath) return null;
     return activeRuntime.backupProjectConversations(validatedProjectPath, result.filePath);
   });
+  ipcMain.handle("conversation:export", async (_event, value: unknown) => {
+    if (!Array.isArray(value) || value.length === 0 || value.length > 10_000) {
+      throw new Error("Conversation selection is invalid.");
+    }
+    const threadIds = [...new Set(value.map((threadId) => validateIdentifier(threadId, "threadId")))];
+    const date = new Date().toISOString().slice(0, 10);
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      title: "Export conversations",
+      defaultPath: join(app.getPath("documents"), `rhzycode-conversations-${date}.rhzycode-backup`),
+      filters: [{ name: "RHZYCODE conversation backup", extensions: ["rhzycode-backup"] }],
+    });
+    if (result.canceled || !result.filePath) return null;
+    return activeRuntime.exportConversations(threadIds, result.filePath);
+  });
+  ipcMain.handle("conversation:export-list", () => activeRuntime.listExportConversations());
   ipcMain.handle("conversation:restore", async () => {
     const result = await dialog.showOpenDialog(mainWindow!, {
       title: "Restore project conversations",
@@ -248,7 +281,7 @@ function registerIpc(
       baseUrl: input.baseUrl,
       apiKey,
       protocol: input.protocol,
-    });
+    }, systemFetch);
     credentials.upsert({
       providerId: input.providerId,
       name: input.name,
@@ -324,13 +357,7 @@ function registerIpc(
   });
 
   ipcMain.handle("sync:status", () => activeRuntime.getSyncStatus());
-  ipcMain.handle("sync:port:set", async (_event, value: unknown) => {
-    const port = validateSyncPort(value);
-    const status = await activeRuntime.setSyncPort(port);
-    desktopSettings.save({ syncPort: port });
-    return status;
-  });
-  ipcMain.handle("sync:snapshot", () => activeRuntime.getSnapshot());
+  ipcMain.handle("sync:snapshot", () => activeRuntime.getRendererBootstrapState());
   ipcMain.handle(
     "sync:approval:resolve",
     (_event, id: unknown, decision: unknown) => {
@@ -409,18 +436,16 @@ function registerIpc(
   ipcMain.handle("project:reveal-local-file", (_event, value: unknown) => {
     shell.showItemInFolder(validateLocalFilePath(value));
   });
-  ipcMain.handle("project:save-local-file", async (_event, value: unknown, suggestedName: unknown) => {
+  ipcMain.handle("project:save-local-file", (_event, value: unknown, suggestedName: unknown) =>
+    saveLocalFile(value, suggestedName));
+  ipcMain.handle("project:show-image-context-menu", (_event, value: unknown, suggestedName: unknown) => {
     const sourcePath = validateLocalFilePath(value);
-    const defaultName = typeof suggestedName === "string" && suggestedName.trim()
-      ? basename(suggestedName.trim())
-      : basename(sourcePath);
-    const result = await dialog.showSaveDialog(mainWindow!, {
-      title: "Save generated file",
-      defaultPath: defaultName,
-    });
-    if (result.canceled || !result.filePath) return null;
-    if (resolve(result.filePath) !== resolve(sourcePath)) fs.copyFileSync(sourcePath, result.filePath);
-    return result.filePath;
+    const menu = Menu.buildFromTemplate(buildImageContextMenu(() => {
+      void saveLocalFile(sourcePath, suggestedName, "Save image").catch((error) => {
+        dialog.showErrorBox("Could not save image", error instanceof Error ? error.message : String(error));
+      });
+    }));
+    menu.popup({ window: mainWindow || undefined });
   });
 
   activeRuntime.on("agent:status", (status) => mainWindow?.webContents.send("agent:status", status));
@@ -488,6 +513,21 @@ function validateLocalFilePath(value: unknown): string {
   return value;
 }
 
+async function saveLocalFile(
+  value: unknown,
+  suggestedName: unknown,
+  title = "Save generated file",
+): Promise<string | null> {
+  const sourcePath = validateLocalFilePath(value);
+  const defaultName = typeof suggestedName === "string" && suggestedName.trim()
+    ? basename(suggestedName.trim())
+    : basename(sourcePath);
+  const result = await dialog.showSaveDialog(mainWindow!, { title, defaultPath: defaultName });
+  if (result.canceled || !result.filePath) return null;
+  if (resolve(result.filePath) !== resolve(sourcePath)) fs.copyFileSync(sourcePath, result.filePath);
+  return result.filePath;
+}
+
 function pastedImageDirectory(): string {
   return join(app.getPath("userData"), "temp", "pasted-images");
 }
@@ -496,8 +536,6 @@ function resolveGatewayRoot(): string {
   return selectGatewayRoot([
     process.env.RHZYCODE_GATEWAY_HOME,
     app.getAppPath(),
-    // Keep source installations that still store configuration in model-gateway working.
-    resolve(app.getAppPath(), "model-gateway"),
     join(process.resourcesPath, "gateway"),
     join(app.getPath("userData"), "gateway"),
   ]);
@@ -568,10 +606,14 @@ async function runStartupEnvironmentMigrations(
 }
 
 function useBundledCodexBinary(): void {
-  if (process.env.RHZYCODE_CODEX_PATH) return;
   const executable = bundledCodexExecutable();
   const bundledPath = join(process.resourcesPath, "codex", executable);
-  if (fs.existsSync(bundledPath)) process.env.RHZYCODE_CODEX_PATH = bundledPath;
+  const selectedPath = preferredCodexPath(
+    bundledPath,
+    fs.existsSync(bundledPath),
+    process.env.RHZYCODE_CODEX_PATH,
+  );
+  if (selectedPath) process.env.RHZYCODE_CODEX_PATH = selectedPath;
 }
 
 function traceStartup(stage: string): void {
@@ -605,21 +647,19 @@ app.whenReady().then(async () => {
   credentials.applyToEnvironment();
   const runtimeGatewayConfigPath = credentials.writeRuntimeConfig();
   traceStartup("credentials-applied");
-  const updateManifestUrl = process.env.RHZYCODE_UPDATE_MANIFEST_URL?.trim()
-    || DEFAULT_UPDATE_MANIFEST_URL;
+  const updateManifestUrl = DEFAULT_UPDATE_MANIFEST_URL;
   const updatePlatform = desktopUpdatePlatform();
   const updates = new UpdateManager(
     autoUpdater as unknown as UpdateAdapter,
     updatePlatform !== null,
-    { manifestUrl: updateManifestUrl, currentVersion: app.getVersion(), platform: updatePlatform || undefined },
+    {
+      manifestUrl: updateManifestUrl,
+      currentVersion: app.getVersion(),
+      platform: updatePlatform || undefined,
+      fetchImpl: systemFetch,
+    },
   );
   traceStartup("updates-created");
-  const environmentSyncPort = Number(process.env.RHZYCODE_SYNC_PORT || 8790);
-  const startupSyncPort = environmentSyncPort === 0 || isValidSyncPort(environmentSyncPort)
-    ? environmentSyncPort
-    : 8790;
-  const desktopSettings = new DesktopSettingsStore(join(app.getPath("userData"), "desktop-settings.json"));
-  const savedDesktopSettings = desktopSettings.load(startupSyncPort);
   controlPersistence = new EncryptedControlPersistence(
     join(app.getPath("userData"), "control-state.bin"),
     encryption,
@@ -641,9 +681,6 @@ app.whenReady().then(async () => {
     mobileAccessState.load(),
     (state) => mobileAccessState.save(state),
   );
-  if (!mobileAccess.status().accessKey && encryption.isAvailable()) {
-    mobileAccess.rotateAccessKey();
-  }
   traceStartup("mobile-access-state-loaded");
   const projectDirectoryState = new EncryptedStateFile<ProjectDirectoryState>(
     join(app.getPath("userData"), "project-directories.bin"),
@@ -666,15 +703,14 @@ app.whenReady().then(async () => {
   runtime = new DesktopRuntime(
     gatewayRoot,
     codexHome,
-    undefined,
-    savedDesktopSettings.syncPort,
     controlStore,
     mobileAccess,
     projectDirectories,
     runtimeGatewayConfigPath,
+    systemFetch,
   );
   traceStartup("runtime-created");
-  registerIpc(runtime, credentials, updates, mobileAccess, desktopSettings, skillsManager, () => ({
+  registerIpc(runtime, credentials, updates, mobileAccess, skillsManager, () => ({
     encryptionAvailable: encryption.isAvailable(),
     controlState: controlPersistence!.getLoadStatus(),
     mobileAccessState: mobileAccessState.getLoadStatus(),
@@ -691,17 +727,24 @@ app.whenReady().then(async () => {
     else window.webContents.once("did-finish-load", () => resolveWindow());
   });
   try {
-    await runStartupEnvironmentMigrations(codexHome, projectDirectories, window);
-    traceStartup("environment-migration-checked");
-    const providerNormalization = normalizeCodexSessionProviders(codexHome);
-    traceStartup(
-      `session-providers-normalized: ${providerNormalization.normalizedCount}/${providerNormalization.examinedCount}`,
-    );
-    if (providerNormalization.failedCount > 0) {
-      window.webContents.send(
-        "agent:diagnostic",
-        `${providerNormalization.failedCount} migrated conversation(s) could not be made compatible with the local model gateway.`,
+    try {
+      await runStartupEnvironmentMigrations(codexHome, projectDirectories, window);
+      traceStartup("environment-migration-checked");
+      const providerNormalization = normalizeCodexSessionProvidersOnce(
+        codexHome,
+        join(app.getPath("userData"), "session-provider-normalization.json"),
       );
+      traceStartup(
+        `session-providers-normalized: ${providerNormalization.normalizedCount}/${providerNormalization.examinedCount}`,
+      );
+      if (providerNormalization.failedCount > 0) {
+        window.webContents.send(
+          "agent:diagnostic",
+          `${providerNormalization.failedCount} migrated conversation(s) could not be made compatible with the local model gateway.`,
+        );
+      }
+    } catch (error) {
+      window.webContents.send("agent:diagnostic", `Conversation migration failed: ${String(error)}`);
     }
     await runtime.start();
   } catch (error) {

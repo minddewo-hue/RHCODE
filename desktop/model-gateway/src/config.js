@@ -32,14 +32,8 @@ export function loadGatewayConfig(options = {}) {
   const configPath = path.resolve(
     options.configPath || process.env.GATEWAY_CONFIG || "gateway.config.json",
   );
-  const raw = fs.existsSync(configPath)
-    ? parseConfigFile(configPath)
-    : makeLegacyConfig();
-
-  return normalizeConfig(raw, {
-    source: fs.existsSync(configPath) ? configPath : "legacy environment variables",
-    legacy: !fs.existsSync(configPath),
-  });
+  if (!fs.existsSync(configPath)) throw new Error(`Gateway config was not found: ${configPath}`);
+  return normalizeConfig(parseConfigFile(configPath), { source: configPath });
 }
 
 function parseConfigFile(configPath) {
@@ -48,27 +42,6 @@ function parseConfigFile(configPath) {
   } catch (error) {
     throw new Error(`Failed to load gateway config ${configPath}: ${error.message}`);
   }
-}
-
-function makeLegacyConfig() {
-  const publicModel = process.env.UPSTREAM_MODEL || "chat-model";
-  return {
-    providers: {
-      legacy: {
-        base_url: process.env.UPSTREAM_BASE_URL || "https://model.rhzy.ai/v1",
-        protocol: "responses",
-        path: process.env.UPSTREAM_RESPONSES_PATH || "/responses",
-        api_key_env: process.env.UPSTREAM_API_KEY ? "UPSTREAM_API_KEY" : undefined,
-        forward_client_authorization: !process.env.UPSTREAM_API_KEY,
-      },
-    },
-    models: {
-      [publicModel]: {
-        provider: "legacy",
-        upstream_model: publicModel,
-      },
-    },
-  };
 }
 
 function normalizeConfig(raw, meta) {
@@ -109,7 +82,6 @@ function normalizeConfig(raw, meta) {
 
   return {
     source: meta.source,
-    legacy: meta.legacy,
     providers,
     models,
     disabledModels,
@@ -119,6 +91,12 @@ function normalizeConfig(raw, meta) {
     timeoutMs: parsePositiveInteger(
       process.env.UPSTREAM_TIMEOUT_MS || raw.upstream_timeout_ms || 600000,
       "upstream_timeout_ms",
+    ),
+    streamIdleTimeoutMs: parsePositiveInteger(
+      process.env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS
+        || raw.upstream_stream_idle_timeout_ms
+        || 120000,
+      "upstream_stream_idle_timeout_ms",
     ),
     circuit: {
       failureThreshold: parsePositiveInteger(
@@ -211,6 +189,13 @@ function normalizeProvider(id, value) {
       value.timeout_ms == null
         ? null
         : parsePositiveInteger(value.timeout_ms, `providers.${id}.timeout_ms`),
+    streamIdleTimeoutMs:
+      value.stream_idle_timeout_ms == null
+        ? null
+        : parsePositiveInteger(
+            value.stream_idle_timeout_ms,
+            `providers.${id}.stream_idle_timeout_ms`,
+          ),
   };
 }
 

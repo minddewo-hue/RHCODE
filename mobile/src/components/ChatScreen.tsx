@@ -16,10 +16,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Animated,
+  Easing,
   FlatList,
   Image,
   KeyboardAvoidingView,
   Modal,
+  PanResponder,
   Platform,
   Pressable,
   RefreshControl,
@@ -37,11 +39,15 @@ import { colors } from "../ui/theme";
 import { TaskMenu } from "./TaskMenu";
 import {
   buildChatEntries,
+  composerInteractionState,
+  conversationPageSwipeDirection,
   countActivityEntries,
   isResultEntry,
+  shouldCaptureConversationPageSwipe,
   type ChatEntry,
   type PendingMessage,
 } from "./chat-screen-model";
+import { chatScreenStyles as styles } from "./chat-screen-styles";
 
 export type { PendingMessage } from "./chat-screen-model";
 
@@ -91,7 +97,6 @@ interface ChatScreenProps {
   onApproval: (id: string, decision: "approved" | "declined") => void;
   onSubmitInput: (id: string, answers: UserInputAnswers) => void;
 }
-
 type ConversationPage = "result" | "activity";
 
 const conversationPages: ConversationPage[] = ["result", "activity"];
@@ -104,6 +109,37 @@ export function ChatScreen(props: ChatScreenProps) {
   const [activePage, setActivePage] = useState<ConversationPage>("result");
   const [taskMenuVisible, setTaskMenuVisible] = useState(false);
   const [attachmentMenuVisible, setAttachmentMenuVisible] = useState(false);
+  const activePageRef = useRef(activePage);
+  const pageWidthRef = useRef(pageWidth);
+  activePageRef.current = activePage;
+  pageWidthRef.current = pageWidth;
+  const pagerSwipeResponder = useRef(PanResponder.create({
+    onMoveShouldSetPanResponderCapture: (_, gesture) => {
+      if (!shouldCaptureConversationPageSwipe(gesture.dx, gesture.dy)) return false;
+      return activePageRef.current === "result" ? gesture.dx < 0 : gesture.dx > 0;
+    },
+    onPanResponderRelease: (_, gesture) => {
+      const direction = conversationPageSwipeDirection(
+        gesture.dx,
+        gesture.dy,
+        gesture.vx,
+        pageWidthRef.current,
+      );
+      const targetPage = direction === "next"
+        ? "activity"
+        : direction === "previous"
+          ? "result"
+          : null;
+      if (!targetPage || targetPage === activePageRef.current) return;
+      activePageRef.current = targetPage;
+      setActivePage(targetPage);
+      pagerRef.current?.scrollToIndex({
+        index: conversationPages.indexOf(targetPage),
+        animated: true,
+      });
+    },
+    onPanResponderTerminationRequest: () => false,
+  })).current;
   const entries = useMemo(() => buildChatEntries(props, activePage === "activity"), [
     activePage,
     props.approvals,
@@ -121,13 +157,15 @@ export function ChatScreen(props: ChatScreenProps) {
     props.userInputs,
   ]);
   const threadRunning = props.thread?.status === "running";
-  const composerEnabled = Boolean(
-    (props.selectedThreadId || props.newThreadDraft)
-    && props.canWrite
-    && props.connectionStatus === "online"
-    && !props.historyLoading,
-  );
-  const sendDisabled = !composerEnabled || (!props.draft.trim() && !props.attachments.length) || props.sending;
+  const composerState = composerInteractionState({
+    hasConversation: Boolean(props.selectedThreadId || props.newThreadDraft),
+    canWrite: props.canWrite,
+    online: props.connectionStatus === "online",
+    historyLoading: props.historyLoading,
+  });
+  const sendDisabled = !composerState.sendReady
+    || (!props.draft.trim() && !props.attachments.length)
+    || props.sending;
 
   useEffect(() => {
     setActivePage("result");
@@ -214,34 +252,31 @@ export function ChatScreen(props: ChatScreenProps) {
         </Pressable>
       )}
 
-      <FlatList
-        data={conversationPages}
-        decelerationRate="fast"
-        getItemLayout={(_, index) => ({ length: pageWidth, offset: pageWidth * index, index })}
-        horizontal
-        keyExtractor={(page) => page}
-        onMomentumScrollEnd={(event) => {
-          const index = Math.round(event.nativeEvent.contentOffset.x / pageWidth);
-          setActivePage(conversationPages[index] || "result");
-        }}
-        pagingEnabled
-        ref={pagerRef}
-        renderItem={({ item: page }) => (
-          <View style={{ flex: 1, width: pageWidth }}>
-            <ConversationList
-              activityListRef={activityListRef}
-              activePage={page}
-              entries={page === "result" ? resultEntries : activityEntries}
-              hasThread={Boolean(props.selectedThreadId || props.newThreadDraft)}
-              props={props}
-              resultListRef={resultListRef}
-              visible={activePage === page}
-            />
-          </View>
-        )}
-        showsHorizontalScrollIndicator={false}
-        style={styles.pager}
-      />
+      <View {...pagerSwipeResponder.panHandlers} style={styles.pager}>
+        <FlatList
+          data={conversationPages}
+          getItemLayout={(_, index) => ({ length: pageWidth, offset: pageWidth * index, index })}
+          horizontal
+          keyExtractor={(page) => page}
+          ref={pagerRef}
+          renderItem={({ item: page }) => (
+            <View style={{ flex: 1, width: pageWidth }}>
+              <ConversationList
+                activityListRef={activityListRef}
+                activePage={page}
+                entries={page === "result" ? resultEntries : activityEntries}
+                hasThread={Boolean(props.selectedThreadId || props.newThreadDraft)}
+                props={props}
+                resultListRef={resultListRef}
+                visible={activePage === page}
+              />
+            </View>
+          )}
+          scrollEnabled={false}
+          showsHorizontalScrollIndicator={false}
+          style={styles.pager}
+        />
+      </View>
 
       <View style={styles.composerWrap}>
         {!props.canWrite && props.selectedThreadId && (
@@ -266,10 +301,10 @@ export function ChatScreen(props: ChatScreenProps) {
             ))}
           </View>
         )}
-        <View style={[styles.composer, !composerEnabled && styles.composerDisabled]}>
+        <View style={[styles.composer, !composerState.editable && styles.composerDisabled]}>
           <TextInput
             accessibilityLabel="消息"
-            editable={composerEnabled}
+            editable={composerState.editable}
             multiline
             onChangeText={props.onDraftChange}
             placeholder={composerPlaceholder(props)}
@@ -282,7 +317,7 @@ export function ChatScreen(props: ChatScreenProps) {
             <Pressable
               accessibilityLabel="Choose attachments"
               accessibilityRole="button"
-              disabled={!composerEnabled || props.sending || props.attachments.length >= 20}
+              disabled={!composerState.editable || props.sending || props.attachments.length >= 20}
               onPress={() => setAttachmentMenuVisible(true)}
               style={({ pressed }) => [styles.attachButton, pressed && styles.iconPressed]}
             >
@@ -313,8 +348,8 @@ export function ChatScreen(props: ChatScreenProps) {
               ]}
             >
               {props.sending
-                ? <ActivityIndicator color={colors.inverse} size="small" />
-                : <Feather color={colors.inverse} name="send" size={17} />}
+                ? <ActivityIndicator color={colors.onSolid} size="small" />
+                : <Feather color={colors.onSolid} name="send" size={17} />}
             </Pressable>
           </View>
         </View>
@@ -337,10 +372,67 @@ function AttachmentMenu({ onClose, onSelect, visible }: {
   visible: boolean;
 }) {
   const insets = useSafeAreaInsets();
+  const [mounted, setMounted] = useState(visible);
+  const scrimOpacity = useRef(new Animated.Value(0)).current;
+  const sheetOffset = useRef(new Animated.Value(48)).current;
+
+  useEffect(() => {
+    if (visible) {
+      setMounted(true);
+      return;
+    }
+    if (!mounted) return;
+    scrimOpacity.stopAnimation();
+    sheetOffset.stopAnimation();
+    Animated.parallel([
+      Animated.timing(scrimOpacity, {
+        toValue: 0,
+        duration: 140,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(sheetOffset, {
+        toValue: 48,
+        duration: 170,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
+      if (finished) setMounted(false);
+    });
+  }, [mounted, scrimOpacity, sheetOffset, visible]);
+
+  useEffect(() => {
+    if (!mounted || !visible) return;
+    scrimOpacity.stopAnimation();
+    sheetOffset.stopAnimation();
+    scrimOpacity.setValue(0);
+    sheetOffset.setValue(48);
+    Animated.parallel([
+      Animated.timing(scrimOpacity, {
+        toValue: 1,
+        duration: 160,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(sheetOffset, {
+        toValue: 0,
+        duration: 220,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [mounted, scrimOpacity, sheetOffset, visible]);
+
   return (
-    <Modal animationType="slide" onRequestClose={onClose} statusBarTranslucent transparent visible={visible}>
-      <Pressable accessibilityLabel="关闭附件菜单" onPress={onClose} style={styles.attachmentMenuScrim} />
-      <View style={[styles.attachmentMenu, { paddingBottom: Math.max(insets.bottom, 18) }]}>
+    <Modal animationType="none" onRequestClose={onClose} statusBarTranslucent transparent visible={mounted}>
+      <Animated.View style={[styles.attachmentMenuScrim, { opacity: scrimOpacity }]}>
+        <Pressable accessibilityLabel="关闭附件菜单" onPress={onClose} style={StyleSheet.absoluteFill} />
+      </Animated.View>
+      <Animated.View style={[
+        styles.attachmentMenu,
+        { paddingBottom: Math.max(insets.bottom, 18), transform: [{ translateY: sheetOffset }] },
+      ]}>
         <View style={styles.attachmentMenuHandle} />
         <Text style={styles.attachmentMenuTitle}>添加附件</Text>
         <View style={styles.attachmentMenuOptions}>
@@ -351,7 +443,7 @@ function AttachmentMenu({ onClose, onSelect, visible }: {
         <Pressable accessibilityRole="button" onPress={onClose} style={({ pressed }) => [styles.attachmentMenuCancel, pressed && styles.iconPressed]}>
           <Text style={styles.attachmentMenuCancelText}>取消</Text>
         </Pressable>
-      </View>
+      </Animated.View>
     </Modal>
   );
 }
@@ -588,7 +680,7 @@ function EmptyConversation({ hasThread, loading, page }: { hasThread: boolean; l
   return (
     <View style={styles.emptyState}>
       <View style={styles.codexMark}>
-        <Feather color={colors.inverse} name={page === "result" ? "message-square" : "terminal"} size={19} />
+        <Feather color={colors.accent} name={page === "result" ? "message-square" : "terminal"} size={20} />
       </View>
       <Text style={styles.emptyTitle}>
         {page === "activity" ? "暂无执行过程" : hasThread ? "对话已就绪" : "开始一个任务"}
@@ -611,7 +703,6 @@ function TimelineRow({ item, onDownloadGeneratedImage, onOpenFile, onShareGenera
   resolveGeneratedImage: (imageId: string) => AuthenticatedImageSource | null;
   resolveManagedImage: (fileId: string) => AuthenticatedImageSource | null;
 }) {
-  const [imageAction, setImageAction] = useState<"download" | "share" | null>(null);
   const [previewImage, setPreviewImage] = useState<{
     id: string;
     name: string;
@@ -624,21 +715,37 @@ function TimelineRow({ item, onDownloadGeneratedImage, onOpenFile, onShareGenera
   });
   const files = item.files || [];
   const managedImages = files.flatMap((file) => {
-    if (file.source !== "generated" || !file.mimeType?.startsWith("image/")) return [];
+    if (!file.mimeType?.startsWith("image/")) return [];
     const source = resolveManagedImage(file.id);
     return source ? [{ id: file.id, name: file.name, managed: true, source }] : [];
   });
   const images = [...generatedImages, ...managedImages];
-  const regularFiles = files.filter((file) =>
-    file.source !== "generated" || !file.mimeType?.startsWith("image/"));
+  const regularFiles = files.filter((file) => !file.mimeType?.startsWith("image/"));
   if (item.kind === "user") {
     return (
       <View style={styles.userRow}>
         <View style={styles.userBubble}>
           <Text selectable style={styles.userText}>{item.content || item.title}</Text>
-          {!!files.length && <TimelineFiles files={files} onOpenFile={onOpenFile} />}
+          {!!images.length && (
+            <View style={styles.generatedImages}>
+              {images.map((image) => (
+                <GeneratedImage
+                  image={image}
+                  key={image.id}
+                  onOpen={(source) => setPreviewImage({ id: image.id, name: image.name, managed: image.managed, source })}
+                />
+              ))}
+            </View>
+          )}
+          {!!regularFiles.length && <TimelineFiles files={regularFiles} onOpenFile={onOpenFile} />}
           <View style={styles.userBubbleTail} />
         </View>
+        <TimelineImagePreview
+          image={previewImage}
+          onClose={() => setPreviewImage(null)}
+          onDownload={onDownloadGeneratedImage}
+          onShare={onShareGeneratedImage}
+        />
       </View>
     );
   }
@@ -661,68 +768,12 @@ function TimelineRow({ item, onDownloadGeneratedImage, onOpenFile, onShareGenera
         )}
         {!!regularFiles.length && <TimelineFiles files={regularFiles} onOpenFile={onOpenFile} />}
         {item.status === "running" && <ActivityIndicator color={colors.inkMuted} size="small" style={styles.inlineSpinner} />}
-        <Modal
-          animationType="fade"
-          onRequestClose={() => setPreviewImage(null)}
-          statusBarTranslucent
-          transparent
-          visible={Boolean(previewImage)}
-        >
-          <Pressable accessibilityLabel="Close image preview" onPress={() => setPreviewImage(null)} style={styles.imagePreview}>
-            {previewImage && (
-              <Image
-                accessibilityLabel={previewImage.name}
-                resizeMode="contain"
-                source={previewImage.source}
-                style={styles.previewImage}
-              />
-            )}
-            {previewImage && (
-              <View style={styles.previewActions}>
-                <Pressable
-                  accessibilityLabel={`Download ${previewImage.name}`}
-                  accessibilityRole="button"
-                  disabled={imageAction !== null}
-                  onPress={(event) => {
-                    event.stopPropagation();
-                    setImageAction("download");
-                    void onDownloadGeneratedImage(previewImage).finally(() => setImageAction(null));
-                  }}
-                  style={({ pressed }) => [styles.previewAction, pressed && styles.previewActionPressed]}
-                >
-                  {imageAction === "download"
-                    ? <ActivityIndicator color="#ffffff" size="small" />
-                    : <Ionicons color="#ffffff" name="download-outline" size={22} />}
-                </Pressable>
-                <Pressable
-                  accessibilityLabel={`Share ${previewImage.name}`}
-                  accessibilityRole="button"
-                  disabled={imageAction !== null}
-                  onPress={(event) => {
-                    event.stopPropagation();
-                    setImageAction("share");
-                    void onShareGeneratedImage(previewImage).finally(() => setImageAction(null));
-                  }}
-                  style={({ pressed }) => [styles.previewAction, pressed && styles.previewActionPressed]}
-                >
-                  {imageAction === "share"
-                    ? <ActivityIndicator color="#ffffff" size="small" />
-                    : <Ionicons color="#ffffff" name="share-social-outline" size={22} />}
-                </Pressable>
-              </View>
-            )}
-            <Feather color="#ffffff" name="x" size={24} style={styles.previewClose} />
-          </Pressable>
-        </Modal>
-      </View>
-    );
-  }
-  if (isLegacyAgentActivity(item)) {
-    const content = item.content.trim();
-    if (!content || content === "userMessage" || content === "agentMessage") return null;
-    return (
-      <View style={styles.assistantRow}>
-        <Text selectable style={styles.assistantText}>{content}</Text>
+        <TimelineImagePreview
+          image={previewImage}
+          onClose={() => setPreviewImage(null)}
+          onDownload={onDownloadGeneratedImage}
+          onShare={onShareGeneratedImage}
+        />
       </View>
     );
   }
@@ -741,6 +792,62 @@ function TimelineRow({ item, onDownloadGeneratedImage, onOpenFile, onShareGenera
       </View>
       {!!item.content && <Text selectable style={styles.activityContent}>{item.content}</Text>}
     </View>
+  );
+}
+
+function TimelineImagePreview({ image, onClose, onDownload, onShare }: {
+  image: {
+    id: string;
+    name: string;
+    managed?: boolean;
+    source: RenderableImageSource;
+  } | null;
+  onClose: () => void;
+  onDownload: (image: GeneratedImageAction) => Promise<void>;
+  onShare: (image: GeneratedImageAction) => Promise<void>;
+}) {
+  const [action, setAction] = useState<"download" | "share" | null>(null);
+  return (
+    <Modal animationType="fade" onRequestClose={onClose} statusBarTranslucent transparent visible={Boolean(image)}>
+      <Pressable accessibilityLabel="Close image preview" onPress={onClose} style={styles.imagePreview}>
+        {image && <Image accessibilityLabel={image.name} resizeMode="contain" source={image.source} style={styles.previewImage} />}
+        {image && (
+          <View style={styles.previewActions}>
+            <Pressable
+              accessibilityLabel={`Download ${image.name}`}
+              accessibilityRole="button"
+              disabled={action !== null}
+              onPress={(event) => {
+                event.stopPropagation();
+                setAction("download");
+                void onDownload(image).finally(() => setAction(null));
+              }}
+              style={({ pressed }) => [styles.previewAction, pressed && styles.previewActionPressed]}
+            >
+              {action === "download"
+                ? <ActivityIndicator color={colors.inverse} size="small" />
+                : <Ionicons color={colors.inverse} name="download-outline" size={22} />}
+            </Pressable>
+            <Pressable
+              accessibilityLabel={`Share ${image.name}`}
+              accessibilityRole="button"
+              disabled={action !== null}
+              onPress={(event) => {
+                event.stopPropagation();
+                setAction("share");
+                void onShare(image).finally(() => setAction(null));
+              }}
+              style={({ pressed }) => [styles.previewAction, pressed && styles.previewActionPressed]}
+            >
+              {action === "share"
+                ? <ActivityIndicator color={colors.inverse} size="small" />
+                : <Ionicons color={colors.inverse} name="share-social-outline" size={22} />}
+            </Pressable>
+          </View>
+        )}
+        <Feather color={colors.inverse} name="x" size={24} style={styles.previewClose} />
+      </Pressable>
+    </Modal>
   );
 }
 
@@ -906,7 +1013,7 @@ function PendingMessageRow({ message }: { message: PendingMessage }) {
       <Modal animationType="fade" onRequestClose={() => setPreviewImage(null)} statusBarTranslucent transparent visible={Boolean(previewImage)}>
         <Pressable accessibilityLabel="Close image preview" onPress={() => setPreviewImage(null)} style={styles.imagePreview}>
           {previewImage && <Image resizeMode="contain" source={{ uri: previewImage.uri }} style={styles.previewImage} />}
-          <Feather color="#ffffff" name="x" size={24} style={styles.previewClose} />
+          <Feather color={colors.inverse} name="x" size={24} style={styles.previewClose} />
         </Pressable>
       </Modal>
     </View>
@@ -960,7 +1067,7 @@ function ApprovalRow({
           onPress={() => onDecision(approval.id, "approved")}
           style={({ pressed }) => [styles.primaryAction, pressed && styles.primaryActionPressed]}
         >
-          {operation?.busy && <ActivityIndicator color={colors.inverse} size="small" />}
+          {operation?.busy && <ActivityIndicator color={colors.onSolid} size="small" />}
           <Text style={styles.primaryActionText}>{canApprove ? "批准" : "无审批权限"}</Text>
         </Pressable>
       </View>
@@ -1059,7 +1166,7 @@ function UserInputRow({
             pressed && styles.primaryActionPressed,
           ]}
         >
-          {busy && <ActivityIndicator color={colors.inverse} size="small" />}
+          {busy && <ActivityIndicator color={colors.onSolid} size="small" />}
           <Text style={styles.primaryActionText}>提交</Text>
         </Pressable>
       </View>
@@ -1124,152 +1231,17 @@ function activityPresentation(item: TimelineItem): {
   if (item.status === "failed") {
     return { background: colors.dangerSoft, color: colors.danger, icon: "alert-circle", label: "执行失败" };
   }
+  if (item.status === "running") {
+    return { background: colors.warningSoft, color: colors.warning, icon: "loader", label: "执行中" };
+  }
   if (item.kind === "file_change") {
     return { background: colors.accentSoft, color: colors.accent, icon: "file-text", label: "文件变更" };
   }
   if (item.kind === "notice") {
     return { background: colors.infoSoft, color: colors.info, icon: "info", label: "提示" };
   }
+  if (item.status === "completed") {
+    return { background: colors.accentSoft, color: colors.accent, icon: "check", label: "已完成" };
+  }
   return { background: colors.subtle, color: colors.inkMuted, icon: "terminal", label: "执行命令" };
 }
-
-function isLegacyAgentActivity(item: TimelineItem): boolean {
-  return item.kind === "notice" && /^Agent\s*(活动|Activity)$/i.test(item.title.trim());
-}
-
-const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.canvas },
-  header: {
-    height: 58,
-    paddingHorizontal: 10,
-    flexDirection: "row",
-    alignItems: "center",
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.border,
-    backgroundColor: colors.canvas,
-  },
-  headerTitle: { flex: 1, alignItems: "center", paddingHorizontal: 8 },
-  headerActions: { flexDirection: "row", alignItems: "center" },
-  headerPageButton: { width: 36, height: 36, alignItems: "center", justifyContent: "center", borderRadius: 6 },
-  headerPageButtonActive: { backgroundColor: colors.subtle },
-  headerPageBadge: { position: "absolute", top: 1, right: 0, minWidth: 15, height: 15, paddingHorizontal: 3, alignItems: "center", justifyContent: "center", borderRadius: 6, backgroundColor: colors.ink },
-  headerPageBadgeText: { color: colors.inverse, fontSize: 9, lineHeight: 11, fontWeight: "600", letterSpacing: 0 },
-  title: { color: colors.ink, fontSize: 15, lineHeight: 20, fontWeight: "600", letterSpacing: 0 },
-  statusLine: { flexDirection: "row", alignItems: "center", maxWidth: "100%", marginTop: 1 },
-  statusDot: { width: 6, height: 6, borderRadius: 3, marginRight: 5 },
-  subtitle: { color: colors.inkMuted, fontSize: 11, lineHeight: 15, letterSpacing: 0 },
-  iconButton: { width: 40, height: 40, alignItems: "center", justifyContent: "center", borderRadius: 6 },
-  iconDisabled: { opacity: 0.35 },
-  iconPressed: { backgroundColor: colors.pressed },
-  notice: {
-    minHeight: 40,
-    paddingHorizontal: 16,
-    paddingVertical: 9,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 9,
-    backgroundColor: colors.warningSoft,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#ecd4a9",
-  },
-  noticePressed: { opacity: 0.75 },
-  noticeText: { flex: 1, color: colors.warning, fontSize: 12, lineHeight: 17, letterSpacing: 0 },
-  pager: { flex: 1 },
-  listContent: { paddingHorizontal: 16, paddingTop: 22, paddingBottom: 28 },
-  emptyListContent: { flexGrow: 1 },
-  emptyState: { flex: 1, alignItems: "center", justifyContent: "center", paddingBottom: 48 },
-  codexMark: { width: 38, height: 38, alignItems: "center", justifyContent: "center", borderRadius: 8, backgroundColor: colors.ink },
-  emptyTitle: { color: colors.ink, fontSize: 18, lineHeight: 24, fontWeight: "600", letterSpacing: 0, marginTop: 15 },
-  userRow: { alignItems: "flex-end", marginBottom: 22 },
-  userBubble: { position: "relative", maxWidth: "88%", borderRadius: 8, backgroundColor: "#90dd65", paddingHorizontal: 14, paddingVertical: 10 },
-  userBubbleTail: { position: "absolute", top: 12, right: -8, width: 0, height: 0, borderTopWidth: 7, borderBottomWidth: 7, borderLeftWidth: 9, borderTopColor: "transparent", borderBottomColor: "transparent", borderLeftColor: "#90dd65" },
-  failedBubble: { backgroundColor: colors.dangerSoft, borderWidth: 1, borderColor: "#edc3bf" },
-  userText: { color: colors.ink, fontSize: 15, lineHeight: 22, letterSpacing: 0 },
-  messageImages: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 },
-  messageImage: { width: 148, height: 108, borderRadius: 6, backgroundColor: colors.subtle },
-  messageFiles: { gap: 6, marginTop: 8 },
-  messageFile: { width: 240, maxWidth: "100%", minHeight: 48, flexDirection: "row", alignItems: "center", paddingHorizontal: 9, paddingVertical: 7, borderWidth: 1, borderColor: "#69bd43", borderRadius: 6, backgroundColor: "#ffffffaa" },
-  messageFilePressed: { opacity: 0.72 },
-  messageFileIcon: { width: 30, height: 30, alignItems: "center", justifyContent: "center", borderRadius: 5, backgroundColor: colors.subtle },
-  messageFileText: { flex: 1, minWidth: 0, marginLeft: 8 },
-  messageFileName: { color: colors.ink, fontSize: 12, lineHeight: 16, fontWeight: "600", letterSpacing: 0 },
-  messageFileSize: { color: colors.inkMuted, fontSize: 10, lineHeight: 14, marginTop: 1, letterSpacing: 0 },
-  imagePreview: { flex: 1, alignItems: "center", justifyContent: "center", padding: 20, backgroundColor: "#101310ee" },
-  previewImage: { width: "100%", height: "100%" },
-  previewActions: { position: "absolute", top: 38, right: 58, flexDirection: "row", gap: 8 },
-  previewAction: { width: 40, height: 40, alignItems: "center", justifyContent: "center", borderRadius: 6, backgroundColor: "#ffffff1f" },
-  previewActionPressed: { backgroundColor: "#ffffff38" },
-  previewClose: { position: "absolute", top: 48, right: 20 },
-  pendingLabel: { color: colors.inkFaint, fontSize: 10, lineHeight: 14, marginTop: 5, letterSpacing: 0 },
-  failedLabel: { color: colors.danger },
-  assistantRow: { minWidth: 0, marginBottom: 20 },
-  assistantText: { color: colors.ink, fontSize: 15, lineHeight: 23, letterSpacing: 0 },
-  generatedImages: { width: "100%", marginTop: 8, gap: 8 },
-  generatedImageButton: { width: "100%", maxWidth: 420, aspectRatio: 4 / 3, overflow: "hidden", borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, borderRadius: 7, backgroundColor: colors.subtle },
-  generatedImagePressed: { opacity: 0.88 },
-  generatedImage: { width: "100%", height: "100%" },
-  generatedImageStatus: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0, alignItems: "center", justifyContent: "center", gap: 7 },
-  generatedImageError: { color: colors.inkMuted, fontSize: 11, lineHeight: 15, letterSpacing: 0 },
-  inlineSpinner: { alignSelf: "flex-start", marginTop: 8 },
-  activityRow: { marginBottom: 18 },
-  activityHeader: { flexDirection: "row", alignItems: "flex-start" },
-  activityIcon: { width: 26, height: 26, borderRadius: 5, alignItems: "center", justifyContent: "center", marginRight: 9 },
-  activityBody: { flex: 1, minWidth: 0, paddingTop: 2 },
-  activityTitle: { color: colors.ink, fontSize: 13, lineHeight: 18, fontWeight: "600", letterSpacing: 0 },
-  activityContent: { color: colors.inkMuted, fontSize: 12, lineHeight: 18, marginTop: 7, letterSpacing: 0 },
-  requestCard: { marginBottom: 22, borderWidth: 1, borderColor: colors.border, borderRadius: 8, backgroundColor: colors.surface, padding: 14 },
-  requestHeading: { flexDirection: "row", alignItems: "center" },
-  requestIcon: { width: 30, height: 30, borderRadius: 6, alignItems: "center", justifyContent: "center", marginRight: 10 },
-  requestHeadingText: { flex: 1, minWidth: 0 },
-  requestTitle: { color: colors.ink, fontSize: 14, lineHeight: 19, fontWeight: "600", letterSpacing: 0 },
-  requestMeta: { color: colors.inkMuted, fontSize: 11, lineHeight: 15, marginTop: 1, letterSpacing: 0 },
-  requestDetail: { color: colors.inkMuted, fontSize: 12, lineHeight: 18, marginTop: 12, padding: 10, borderRadius: 5, backgroundColor: colors.subtle, letterSpacing: 0 },
-  requestActions: { flexDirection: "row", justifyContent: "flex-end", gap: 8, marginTop: 14 },
-  secondaryAction: { minWidth: 72, height: 36, paddingHorizontal: 14, borderRadius: 6, borderWidth: 1, borderColor: colors.borderStrong, alignItems: "center", justifyContent: "center" },
-  secondaryActionPressed: { backgroundColor: colors.pressed },
-  secondaryActionText: { color: colors.ink, fontSize: 13, lineHeight: 18, fontWeight: "600", letterSpacing: 0 },
-  primaryAction: { minWidth: 78, height: 36, paddingHorizontal: 14, borderRadius: 6, flexDirection: "row", gap: 7, alignItems: "center", justifyContent: "center", backgroundColor: colors.ink },
-  primaryActionPressed: { opacity: 0.82 },
-  primaryActionText: { color: colors.inverse, fontSize: 13, lineHeight: 18, fontWeight: "600", letterSpacing: 0 },
-  actionDisabled: { opacity: 0.35 },
-  operationMessage: { color: colors.info, fontSize: 11, lineHeight: 16, marginTop: 9, letterSpacing: 0 },
-  operationError: { color: colors.danger },
-  question: { marginTop: 14 },
-  questionHeader: { color: colors.inkMuted, fontSize: 11, lineHeight: 15, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0 },
-  questionText: { color: colors.ink, fontSize: 13, lineHeight: 19, marginTop: 3, letterSpacing: 0 },
-  optionList: { gap: 7, marginTop: 9 },
-  option: { minHeight: 42, borderWidth: 1, borderColor: colors.border, borderRadius: 6, paddingHorizontal: 10, paddingVertical: 8, flexDirection: "row", alignItems: "center" },
-  optionSelected: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
-  optionPressed: { opacity: 0.75 },
-  radio: { width: 16, height: 16, borderRadius: 8, borderWidth: 1, borderColor: colors.borderStrong, alignItems: "center", justifyContent: "center", marginRight: 9 },
-  radioSelected: { borderColor: colors.accent },
-  radioDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.accent },
-  optionTextWrap: { flex: 1, minWidth: 0 },
-  optionLabel: { color: colors.ink, fontSize: 12, lineHeight: 17, fontWeight: "600", letterSpacing: 0 },
-  optionDescription: { color: colors.inkMuted, fontSize: 11, lineHeight: 15, marginTop: 1, letterSpacing: 0 },
-  answerInput: { height: 42, marginTop: 9, borderWidth: 1, borderColor: colors.border, borderRadius: 6, paddingHorizontal: 11, color: colors.ink, backgroundColor: colors.surface, fontSize: 13, letterSpacing: 0 },
-  composerWrap: { paddingHorizontal: 12, paddingTop: 4, paddingBottom: 6, backgroundColor: colors.canvas },
-  attachmentList: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 6 },
-  attachmentChip: { maxWidth: "100%", height: 32, flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 8, borderWidth: 1, borderColor: colors.border, borderRadius: 6, backgroundColor: colors.surface },
-  attachmentName: { maxWidth: 220, color: colors.ink, fontSize: 12, lineHeight: 16, letterSpacing: 0 },
-  composerHint: { color: colors.warning, fontSize: 11, lineHeight: 15, marginBottom: 5, paddingHorizontal: 4, letterSpacing: 0 },
-  composer: { minHeight: 44, maxHeight: 132, flexDirection: "row", alignItems: "flex-end", borderWidth: 1, borderColor: colors.borderStrong, borderRadius: 8, backgroundColor: colors.surface, paddingLeft: 12, paddingRight: 5, paddingVertical: 4 },
-  composerDisabled: { backgroundColor: colors.subtle, borderColor: colors.border },
-  composerInput: { flex: 1, minHeight: 32, maxHeight: 112, paddingTop: 5, paddingBottom: 4, paddingRight: 7, color: colors.ink, fontSize: 14, lineHeight: 20, letterSpacing: 0 },
-  composerActions: { flexDirection: "row", alignItems: "center", gap: 5 },
-  attachButton: { width: 32, height: 32, borderRadius: 6, alignItems: "center", justifyContent: "center" },
-  attachmentMenuScrim: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0, backgroundColor: colors.overlay },
-  attachmentMenu: { position: "absolute", right: 0, bottom: 0, left: 0, borderTopLeftRadius: 8, borderTopRightRadius: 8, backgroundColor: colors.surface, paddingHorizontal: 18, paddingTop: 8, paddingBottom: 18 },
-  attachmentMenuHandle: { width: 36, height: 4, alignSelf: "center", borderRadius: 2, backgroundColor: colors.borderStrong },
-  attachmentMenuTitle: { marginTop: 12, color: colors.ink, fontSize: 15, lineHeight: 21, fontWeight: "600", textAlign: "center", letterSpacing: 0 },
-  attachmentMenuOptions: { flexDirection: "row", justifyContent: "space-around", marginTop: 18, marginBottom: 14 },
-  attachmentMenuOption: { width: 76, alignItems: "center", paddingVertical: 6, borderRadius: 6 },
-  attachmentMenuIcon: { width: 48, height: 48, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 8, backgroundColor: colors.subtle },
-  attachmentMenuOptionText: { marginTop: 7, color: colors.ink, fontSize: 13, lineHeight: 18, letterSpacing: 0 },
-  attachmentMenuCancel: { height: 42, alignItems: "center", justifyContent: "center", borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
-  attachmentMenuCancelText: { color: colors.ink, fontSize: 14, lineHeight: 19, fontWeight: "600", letterSpacing: 0 },
-  stopButton: { width: 32, height: 32, borderRadius: 6, alignItems: "center", justifyContent: "center", backgroundColor: colors.subtle },
-  sendButton: { width: 32, height: 32, borderRadius: 6, alignItems: "center", justifyContent: "center", backgroundColor: colors.ink },
-  sendButtonDisabled: { backgroundColor: colors.borderStrong },
-  sendButtonPressed: { opacity: 0.78 },
-});

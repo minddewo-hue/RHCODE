@@ -8,6 +8,7 @@ import type {
   TimelineItem,
   UserInputRequest,
 } from "@rhzycode/protocol";
+import { preferTimelineItem } from "@rhzycode/protocol";
 import { EventEmitter } from "node:events";
 import { desktopHostPlatform } from "../platform/desktop-platform";
 
@@ -77,7 +78,9 @@ export class ControlStore extends EventEmitter {
         approvals: [],
         userInputs: [],
       },
-      events: this.events.filter(isDurableEvent).map(durableEvent),
+      // Timeline is already represented by the compact latest-item snapshot.
+      // Persisting every accumulated streaming revision duplicates large content.
+      events: this.events.filter(isPersistedEvent),
     };
   }
 
@@ -126,7 +129,10 @@ export class ControlStore extends EventEmitter {
     if (event.type === "thread.updated") this.threads.set(event.thread.id, event.thread);
     if (event.type === "thread.removed") this.threads.delete(event.threadId);
     if (event.type === "projects.updated") this.projects = [...event.projects];
-    if (event.type === "timeline.upserted") this.timeline.set(event.item.id, event.item);
+    if (event.type === "timeline.upserted") {
+      const current = this.timeline.get(event.item.id);
+      this.timeline.set(event.item.id, current ? preferTimelineItem(current, event.item) : event.item);
+    }
     if (event.type === "approval.requested") this.approvals.set(event.approval.id, event.approval);
     if (event.type === "approval.resolved") this.approvals.delete(event.approvalId);
     if (event.type === "user_input.requested") this.userInputs.set(event.request.id, event.request);
@@ -155,14 +161,13 @@ function isDurableEvent(event: AgentEvent): boolean {
     || event.type === "timeline.upserted";
 }
 
-function durableEvent(event: AgentEvent): AgentEvent {
-  return event.type === "timeline.upserted"
-    ? { ...event, item: durableTimelineItem(event.item) }
-    : event;
+function isPersistedEvent(event: AgentEvent): boolean {
+  return isDurableEvent(event) && event.type !== "timeline.upserted";
 }
 
 function durableTimelineItem(item: TimelineItem): TimelineItem {
-  const files = item.files?.filter((file) => file.source === "generated") || [];
+  const files = item.files?.filter((file) =>
+    file.source === "generated" || file.mimeType?.startsWith("image/") === true) || [];
   const { files: _transientFiles, ...durable } = item;
   return files.length ? { ...durable, files } : durable;
 }

@@ -33,10 +33,8 @@ import {
 } from "@rhzycode/protocol";
 import { z } from "zod";
 import {
-  buildControlUrl,
+  controlServiceUrl,
   normalizeAccessKey,
-  normalizeControlHost,
-  normalizeControlPort,
 } from "../auth/control-access";
 
 export type ControlErrorCode =
@@ -63,8 +61,6 @@ export class ControlClientError extends Error {
 }
 
 export interface ControlAccessInput {
-  host: string;
-  port: number;
   accessKey: string;
 }
 
@@ -86,6 +82,12 @@ export interface AuthenticatedFileRequest {
 type FetchLike = typeof fetch;
 type IdempotencyKeyFactory = () => string;
 
+export interface ControlClientOptions {
+  fetchImpl?: FetchLike;
+  idempotencyKeyFactory?: IdempotencyKeyFactory;
+  controlUrl?: string;
+}
+
 export interface ThreadStartInput {
   projectPath: string;
   model?: string;
@@ -95,6 +97,7 @@ export interface ThreadStartInput {
 
 export interface TurnStartInput {
   text: string;
+  clientMessageId?: string;
   model?: string;
   approvalPolicy?: RemoteApprovalPolicy;
   sandboxMode?: RemoteSandboxMode;
@@ -103,24 +106,21 @@ export interface TurnStartInput {
 }
 
 export class ControlClient {
-  readonly host: string;
-  readonly port: number;
   readonly controlUrl: string;
+  private readonly fetchImpl: FetchLike;
+  private readonly idempotencyKeyFactory: IdempotencyKeyFactory;
 
   constructor(
-    host: string,
-    port: number,
     private readonly accessKey: string,
-    private readonly fetchImpl: FetchLike = fetch,
-    private readonly idempotencyKeyFactory: IdempotencyKeyFactory = createIdempotencyKey,
+    options: ControlClientOptions = {},
   ) {
-    this.host = normalizeControlHost(host);
-    this.port = normalizeControlPort(port);
     this.accessKey = normalizeAccessKey(accessKey);
-    this.controlUrl = buildControlUrl(this.host, this.port);
+    this.fetchImpl = options.fetchImpl || fetch;
+    this.idempotencyKeyFactory = options.idempotencyKeyFactory || createIdempotencyKey;
+    this.controlUrl = normalizedControlUrl(options.controlUrl || controlServiceUrl);
   }
 
-  async getSnapshot(timeoutMs = 4000): Promise<ControlSnapshot> {
+  async getSnapshot(timeoutMs = 60_000): Promise<ControlSnapshot> {
     const value = await requestJson(
       this.fetchImpl,
       `${this.controlUrl}/v1/snapshot`,
@@ -128,7 +128,9 @@ export class ControlClient {
       timeoutMs,
     );
     const result = controlSnapshotSchema.safeParse(value);
-    if (!result.success) throw invalidResponse("控制服务返回了无效的状态快照。");
+    if (!result.success) {
+      throw invalidResponse("中转服务返回的数据不符合 RHZYCODE 协议，请检查电脑版是否已更新并在线。");
+    }
     return result.data;
   }
 
@@ -228,7 +230,11 @@ export class ControlClient {
     return result.data;
   }
 
-  async startThread(input: ThreadStartInput, timeoutMs = 8000): Promise<RemoteThreadStartResult> {
+  async startThread(
+    input: ThreadStartInput,
+    timeoutMs = 8000,
+    idempotencyKey?: string,
+  ): Promise<RemoteThreadStartResult> {
     return this.command(
       "/v1/commands/threads/start",
       "POST",
@@ -236,6 +242,7 @@ export class ControlClient {
       remoteThreadStartResultSchema,
       "控制服务返回了无效的新会话结果。",
       timeoutMs,
+      idempotencyKey,
     );
   }
 
@@ -251,7 +258,12 @@ export class ControlClient {
     return result.data;
   }
 
-  async startTurn(threadId: string, input: TurnStartInput, timeoutMs = 8000): Promise<RemoteTurnStartResult> {
+  async startTurn(
+    threadId: string,
+    input: TurnStartInput,
+    timeoutMs = 45_000,
+    idempotencyKey?: string,
+  ): Promise<RemoteTurnStartResult> {
     return this.command(
       `/v1/commands/threads/${encodeURIComponent(threadId)}/turns/start`,
       "POST",
@@ -259,6 +271,7 @@ export class ControlClient {
       remoteTurnStartResultSchema,
       "控制服务返回了无效的消息发送结果。",
       timeoutMs,
+      idempotencyKey,
     );
   }
 
@@ -298,6 +311,10 @@ export class ControlClient {
       "控制服务返回了无效的删除结果。",
       timeoutMs,
     );
+  }
+
+  async compactThread(threadId: string, timeoutMs = 10 * 60_000): Promise<RemoteThreadMutationResult> {
+    return this.threadMutation(threadId, "compact", {}, timeoutMs);
   }
 
   async submitUserInput(
@@ -363,7 +380,7 @@ export class ControlClient {
 
   private async threadMutation(
     threadId: string,
-    action: "model" | "rename" | "archive" | "unarchive",
+    action: "model" | "rename" | "compact" | "archive" | "unarchive",
     body: Record<string, unknown>,
     timeoutMs: number,
   ): Promise<RemoteThreadMutationResult> {
@@ -384,6 +401,7 @@ export class ControlClient {
     schema: z.ZodType<T>,
     invalidMessage: string,
     timeoutMs: number,
+    idempotencyKey?: string,
   ): Promise<T> {
     const value = await requestJson(
       this.fetchImpl,
@@ -392,7 +410,7 @@ export class ControlClient {
         method,
         headers: {
           ...this.authorizedHeaders(true),
-          "Idempotency-Key": this.idempotencyKeyFactory(),
+          "Idempotency-Key": idempotencyKey || this.idempotencyKeyFactory(),
         },
         body: JSON.stringify(body),
       },
@@ -409,13 +427,18 @@ export async function verifyControlAccess(
   fetchImpl: FetchLike = fetch,
   timeoutMs = 4000,
 ): Promise<ControlSnapshot> {
-  const client = new ControlClient(
-    normalizeControlHost(input.host),
-    normalizeControlPort(input.port),
-    normalizeAccessKey(input.accessKey),
-    fetchImpl,
-  );
+  const client = new ControlClient(normalizeAccessKey(input.accessKey), { fetchImpl });
   return client.getSnapshot(timeoutMs);
+}
+
+function normalizedControlUrl(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Transfer server URL is invalid.");
+  url.username = "";
+  url.password = "";
+  url.search = "";
+  url.hash = "";
+  return url.toString().replace(/\/+$/, "");
 }
 
 async function requestJson(
@@ -448,7 +471,13 @@ async function readJson(response: Response): Promise<unknown> {
   try {
     return await response.json();
   } catch {
-    if (response.ok) throw invalidResponse("控制服务返回了无法解析的数据。");
+    if (response.ok) {
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType && !/[/+]json\b/i.test(contentType)) {
+        throw invalidResponse("中转服务返回的不是 RHZYCODE 控制协议，请检查电脑版是否已更新并在线。");
+      }
+      throw invalidResponse("控制服务响应不完整，请检查 WireGuard 连接后重试。");
+    }
     return null;
   }
 }
@@ -460,6 +489,9 @@ function readServerMessage(value: unknown): string | undefined {
 }
 
 function fromHttpStatus(status: number, serverMessage?: string): ControlClientError {
+  if (status === 502 || status === 503 || status === 504) {
+    return new ControlClientError("offline", "电脑当前离线或中转服务暂时不可用。", status);
+  }
   if (status === 409) return new ControlClientError("conflict", serverMessage || "请求与当前状态冲突。", status);
   if (status === 400) return new ControlClientError("invalid_request", serverMessage || "请求内容无效。", status);
   if (status === 401) return new ControlClientError("unauthorized", "保存的 KEY 无效或已失效。", status);

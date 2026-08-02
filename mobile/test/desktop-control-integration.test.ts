@@ -1,14 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createControlPlane, MobileAccessManager } from "../../desktop/src/main/control-plane/app";
+import type { RemoteTurnStartRequest } from "@rhzycode/protocol";
+import {
+  createControlPlane,
+  MobileAccessManager,
+  type ControlCommandHandlers,
+} from "../../desktop/src/main/control-plane/app";
 import { ControlClient, ControlClientError } from "../src/api/control-client";
+import { runControlCommandWithRetry } from "../src/api/control-connection-model";
+import { buildChatEntries, type PendingMessage } from "../src/components/chat-screen-model";
 
 test("connects the mobile client to the real desktop control contract", async () => {
   const mobileAccess = new MobileAccessManager();
   const firstKey = mobileAccess.rotateAccessKey();
   const controlPlane = await createControlPlane({ logLevel: "silent", mobileAccess });
   const address = await controlPlane.start({ host: "127.0.0.1", port: 0 });
-  const client = new ControlClient("127.0.0.1", address.port, firstKey.key);
+  const controlUrl = `http://127.0.0.1:${address.port}`;
+  const client = new ControlClient(firstKey.key, { controlUrl });
 
   try {
     const snapshot = await client.getSnapshot();
@@ -17,6 +25,12 @@ test("connects the mobile client to the real desktop control contract", async ()
     const descriptor = client.eventSocket(snapshot.lastSequence);
     const socket = new WebSocket(descriptor.url, descriptor.protocols);
     await waitForSocket(socket, "open");
+    const pong = waitForSocket(socket, "message");
+    socket.send(JSON.stringify({ type: "control.ping", id: "integration-heartbeat" }));
+    assert.deepEqual(JSON.parse(String((await pong as MessageEvent).data)), {
+      type: "control.pong",
+      id: "integration-heartbeat",
+    });
     const message = waitForSocket(socket, "message");
     controlPlane.store.upsertHost({
       id: "desktop-integration",
@@ -37,9 +51,8 @@ test("connects the mobile client to the real desktop control contract", async ()
       (error: unknown) => error instanceof ControlClientError && error.code === "unauthorized",
     );
     const replacementSnapshot = await new ControlClient(
-      "127.0.0.1",
-      address.port,
       replacement.key,
+      { controlUrl },
     ).getSnapshot();
     assert.equal(replacementSnapshot.hosts.some((host) => host.id === "desktop-integration"), true);
   } finally {
@@ -54,8 +67,12 @@ test("keeps two desktop event streams connected and isolated", async () => {
   const secondControl = await createControlPlane({ logLevel: "silent", mobileAccess: secondAccess });
   const firstAddress = await firstControl.start({ host: "127.0.0.1", port: 0 });
   const secondAddress = await secondControl.start({ host: "127.0.0.1", port: 0 });
-  const firstClient = new ControlClient("127.0.0.1", firstAddress.port, firstAccess.rotateAccessKey().key);
-  const secondClient = new ControlClient("127.0.0.1", secondAddress.port, secondAccess.rotateAccessKey().key);
+  const firstClient = new ControlClient(firstAccess.rotateAccessKey().key, {
+    controlUrl: `http://127.0.0.1:${firstAddress.port}`,
+  });
+  const secondClient = new ControlClient(secondAccess.rotateAccessKey().key, {
+    controlUrl: `http://127.0.0.1:${secondAddress.port}`,
+  });
   const firstSocket = new WebSocket(firstClient.eventSocket(0).url, firstClient.eventSocket(0).protocols);
   const secondSocket = new WebSocket(secondClient.eventSocket(0).url, secondClient.eventSocket(0).protocols);
 
@@ -75,6 +92,83 @@ test("keeps two desktop event streams connected and isolated", async () => {
     firstSocket.close();
     secondSocket.close();
     await Promise.all([firstControl.stop(), secondControl.stop()]);
+  }
+});
+
+test("replays one accepted turn after multiple lost mobile responses without duplicating it", async () => {
+  const mobileAccess = new MobileAccessManager();
+  const accessKey = mobileAccess.rotateAccessKey();
+  let commandCalls = 0;
+  let controlPlane: Awaited<ReturnType<typeof createControlPlane>>;
+  const commands = {
+    async startTurn(threadId: string, request: RemoteTurnStartRequest) {
+      commandCalls += 1;
+      const acceptedAt = new Date().toISOString();
+      controlPlane.store.publish({
+        type: "timeline.upserted",
+        item: {
+          id: "user-mobile-message-loss-1",
+          threadId,
+          clientMessageId: request.clientMessageId,
+          kind: "user",
+          status: "completed",
+          title: "你",
+          content: request.text,
+          createdAt: acceptedAt,
+        },
+      });
+      return { threadId, turnId: "turn-loss-1", acceptedAt };
+    },
+  } as Pick<ControlCommandHandlers, "startTurn"> as ControlCommandHandlers;
+  controlPlane = await createControlPlane({ logLevel: "silent", mobileAccess, commands });
+  const address = await controlPlane.start({ host: "127.0.0.1", port: 0 });
+  let turnHttpAttempts = 0;
+  const unstableFetch: typeof fetch = async (input, init) => {
+    const response = await fetch(input, init);
+    if (String(input).endsWith("/turns/start")) {
+      turnHttpAttempts += 1;
+      if (turnHttpAttempts <= 2) {
+        await response.arrayBuffer();
+        throw new TypeError("Network response was lost");
+      }
+    }
+    return response;
+  };
+  const client = new ControlClient(accessKey.key, {
+    controlUrl: `http://127.0.0.1:${address.port}`,
+    fetchImpl: unstableFetch,
+  });
+  const pending: PendingMessage = {
+    id: "mobile-message-loss-1",
+    threadId: "thread-loss-1",
+    content: "Continue through the tunnel",
+    createdAt: new Date().toISOString(),
+    state: "sending",
+  };
+
+  try {
+    const result = await runControlCommandWithRetry(() => client.startTurn(
+      pending.threadId,
+      { text: pending.content },
+      5_000,
+      `${pending.id}:turn`,
+    ), { sleep: async () => undefined });
+    const snapshot = await client.getSnapshot();
+    const entries = buildChatEntries({
+      selectedThreadId: pending.threadId,
+      timeline: snapshot.timeline,
+      pendingMessages: [pending],
+      approvals: [],
+      userInputs: [],
+    }, false);
+
+    assert.equal(result.turnId, "turn-loss-1");
+    assert.equal(turnHttpAttempts, 3);
+    assert.equal(commandCalls, 1);
+    assert.equal(snapshot.timeline.length, 1);
+    assert.deepEqual(entries.map((entry) => entry.id), ["timeline:user-mobile-message-loss-1"]);
+  } finally {
+    await controlPlane.stop();
   }
 });
 

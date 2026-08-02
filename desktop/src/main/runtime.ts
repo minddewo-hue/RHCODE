@@ -1,12 +1,10 @@
-import { EventEmitter } from "node:events";
+﻿import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import type { ServerOptions as HttpsServerOptions } from "node:https";
 import os from "node:os";
 import path from "node:path";
 import type {
   AgentEvent,
-  ApprovalRequest,
   ConversationFile,
   ConversationMessage,
   ThreadDetail,
@@ -38,6 +36,8 @@ import type {
   RemoteUserInputSubmitRequest,
   RemoteUserInputSubmitResult,
 } from "@rhzycode/protocol";
+import { preferTimelineItem } from "@rhzycode/protocol";
+import { TimelinePublishCoalescer } from "./timeline-publish-coalesce";
 import {
   ControlCommandError,
   createControlPlane,
@@ -47,8 +47,7 @@ import {
   type MobileAccessManager,
 } from "./control-plane/app";
 import { AppServerClient } from "./app-server";
-import { isValidSyncPort } from "./desktop-settings";
-import { GatewayModule } from "./gateway-module";
+import { GatewayModule, type GatewayRequestEvent } from "./gateway-module";
 import {
   ProjectDirectoryError,
   ProjectDirectoryRegistry,
@@ -56,12 +55,17 @@ import {
 import type {
   ApprovalPolicy,
   ComposerAttachment,
+  ConversationExportItem,
+  ModelListResponse,
   ReasoningEffort,
+  RendererBootstrapState,
+  ModelOption,
   SandboxMode,
   SkillInfo,
   SkillLoadError,
   SkillScope,
 } from "../shared/desktop-api";
+import { turnScopedItemId } from "../shared/item-identity";
 import { removeRemoteAttachments, saveRemoteAttachments } from "./remote-attachment-store";
 import {
   materializeGeneratedImage,
@@ -72,10 +76,13 @@ import {
   type RolloutGeneratedImage,
 } from "./generated-image-rollout";
 import { loadRolloutThreadState } from "./rollout-thread-state";
+import { loadLocalRolloutThread, loadRolloutUploadedImages } from "./local-rollout-thread";
 import {
   backupProjectConversations as createConversationBackup,
+  backupSelectedConversations as createSelectedConversationBackup,
   deleteConversationSessionFiles,
   listConversationSessions,
+  listConversationSessionsWithDuplicates,
   listProjectConversationThreadIds,
   restoreProjectConversations as restoreConversationBackup,
   type ConversationBackupResult,
@@ -87,18 +94,21 @@ import {
   resolveArtifactPaths,
   type ManagedFileRecord,
 } from "./managed-file-store";
+import { DesktopRelayClient } from "./desktop-relay-client";
+import {
+  approvalResponse,
+  createApprovalRequest,
+  isApprovalRequest,
+  type ApprovalMethod,
+  type PendingApproval,
+} from "./approval-protocol";
+
+const DEFAULT_TRANSFER_SERVER_URL = "http://218.201.210.211:8000";
 
 interface RpcMessage {
   id?: number | string;
   method?: string;
   params?: Record<string, unknown>;
-}
-
-interface PendingApproval {
-  rpcId: number | string;
-  method: string;
-  threadId: string;
-  permissions?: Record<string, unknown>;
 }
 
 interface PendingUserInput {
@@ -113,8 +123,15 @@ interface PendingCompaction {
   timer: NodeJS.Timeout;
 }
 
+interface PendingGatewayFailure {
+  threadId: string;
+  timer: NodeJS.Timeout;
+}
+
 const ROLLOUT_WRITE_RETRY_DELAYS_MS = [25, 50, 100, 200, 400] as const;
 const INTERNAL_MODEL_PROVIDER_ID = "rhzy_gateway";
+const MAX_CACHED_THREAD_DETAILS = 10;
+const GATEWAY_FAILURE_GRACE_MS = 15_000;
 
 function isRolloutNotReadyMessage(message: string): boolean {
   return /no rollout found|rollout\b.*\bis empty/i.test(message);
@@ -193,39 +210,55 @@ export class DesktopRuntime extends EventEmitter {
   private timelineText = new Map<string, string>();
   private itemDetails = new Map<string, string>();
   private streamingItems = new Set<string>();
+  private readonly timelinePublishCoalescer = new TimelinePublishCoalescer((item) => {
+    this.controlPlane?.store.publish({ type: "timeline.upserted", item });
+  });
   private activeTurns = new Map<string, string>();
   private pendingTurnStarts = new Set<string>();
   private remoteAttachments = new Map<string, string[]>();
   private loadedThreadIds = new Set<string>();
   private threadLoadPromises = new Map<string, Promise<ThreadDetail>>();
+  private threadDetailCache = new Map<string, ThreadDetail>();
   private publishedGeneratedImageIds = new Set<string>();
   private publishedManagedFileIds = new Set<string>();
   private pendingApprovals = new Map<string, PendingApproval>();
   private pendingUserInputs = new Map<string, PendingUserInput>();
   private pendingCompactions = new Map<string, PendingCompaction>();
+  private pendingGatewayFailures = new Map<string, PendingGatewayFailure>();
+  private gatewayFailureGraceMs = GATEWAY_FAILURE_GRACE_MS;
   private activeThreadId: string | null = null;
   private terminalSession: TerminalSessionStatus | null = null;
   private stopping = false;
   private readonly managedFiles: ManagedFileStore;
+  private readonly desktopRelay: DesktopRelayClient | null;
+  private readonly syncHost = "127.0.0.1";
+  private readonly syncPort = 0;
 
   constructor(
     private readonly gatewayRoot: string,
     private readonly codexHome: string,
-    private readonly syncHost = process.env.RHZYCODE_SYNC_HOST || "0.0.0.0",
-    private syncPort = Number(process.env.RHZYCODE_SYNC_PORT || 8790),
     private readonly restoredControlStore?: ControlStore,
     private readonly mobileAccess?: MobileAccessManager,
     private readonly projectDirectories = new ProjectDirectoryRegistry(),
     gatewayConfigPath?: string,
+    fetchImpl?: typeof fetch,
   ) {
     super();
-    this.gateway = new GatewayModule(gatewayRoot, undefined, gatewayConfigPath);
+    this.gateway = new GatewayModule(gatewayRoot, undefined, gatewayConfigPath, fetchImpl);
+    const transferServerUrl = process.env.RHZYCODE_TRANSFER_SERVER_URL?.trim() || DEFAULT_TRANSFER_SERVER_URL;
+    this.desktopRelay = mobileAccess && transferServerUrl
+      ? new DesktopRelayClient({ serverUrl: transferServerUrl, fetchImpl })
+      : null;
+    this.desktopRelay?.on("error", (error) => this.emit(
+      "agent:diagnostic",
+      `Public relay connection failed: ${error instanceof Error ? error.message : String(error)}`,
+    ));
     this.managedFiles = new ManagedFileStore(path.join(codexHome, "attachments"));
     removeRemoteAttachments(path.join(codexHome, "temp", "mobile-attachments"));
     this.syncStatus = {
       state: "stopped",
-      host: resolveAdvertisedSyncHost(syncHost),
-      port: syncPort,
+      host: this.syncHost,
+      port: this.syncPort,
       url: null,
       error: null,
     };
@@ -242,6 +275,7 @@ export class DesktopRuntime extends EventEmitter {
     }
 
     this.gateway.on("status", (status) => this.emit("gateway:status", status));
+    this.gateway.on("request", (event: GatewayRequestEvent) => this.handleGatewayRequest(event));
     this.agent.on("status", (status) => this.emit("agent:status", status));
     this.agent.on("diagnostic", (message) => this.emit("agent:diagnostic", message));
     this.agent.on("message", (message) => this.handleAgentMessage(message as RpcMessage));
@@ -249,11 +283,19 @@ export class DesktopRuntime extends EventEmitter {
       this.emit("projects:changed", projects);
       this.controlPlane?.store.setProjects(projects);
     });
+    mobileAccess?.on("status", (status) => {
+      const accessKey = status.accessKey?.key;
+      if (accessKey && this.syncStatus.url) this.desktopRelay?.updateAccess(this.syncStatus.url, accessKey);
+    });
   }
 
   async start(): Promise<void> {
-    await this.startSync();
-    await this.startGatewayAndAgent();
+    const agentStartup = this.startGatewayAndAgent();
+    void this.startSync().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit("agent:diagnostic", `Mobile sync failed to start: ${message}`);
+    });
+    await agentStartup;
   }
 
   async stop(): Promise<void> {
@@ -261,17 +303,21 @@ export class DesktopRuntime extends EventEmitter {
     this.stopping = true;
     this.activeTurns.clear();
     this.pendingTurnStarts.clear();
+    this.clearAllGatewayFailures();
     for (const pending of this.pendingCompactions.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error("Agent Host stopped during conversation compaction."));
     }
     this.pendingCompactions.clear();
+    this.timelinePublishCoalescer.dispose();
     this.loadedThreadIds.clear();
     this.threadLoadPromises.clear();
+    this.threadDetailCache.clear();
     this.publishedGeneratedImageIds.clear();
     this.clearAllRemoteAttachments();
     this.cancelPendingRequests();
     this.agent.stop();
+    this.desktopRelay?.stop();
     this.terminalSession = null;
     await this.gateway.stop().catch(() => undefined);
     await this.stopSyncServer();
@@ -283,18 +329,20 @@ export class DesktopRuntime extends EventEmitter {
   async restartGateway(): Promise<void> {
     this.activeTurns.clear();
     this.pendingTurnStarts.clear();
+    this.clearAllGatewayFailures();
     this.clearAllRemoteAttachments();
     this.cancelPendingRequests();
     this.agent.stop();
     this.terminalSession = null;
     this.emit("terminal:status", null);
-    await this.gateway.restart();
-    await this.startAgent();
+    const gatewayStatus = await this.gateway.restart();
+    if (gatewayStatus.state === "running") await this.startAgent();
   }
 
   async stopGateway(): Promise<void> {
     this.activeTurns.clear();
     this.pendingTurnStarts.clear();
+    this.clearAllGatewayFailures();
     this.clearAllRemoteAttachments();
     this.cancelPendingRequests();
     this.agent.stop();
@@ -304,33 +352,12 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   async startGatewayAndAgent(): Promise<void> {
-    await this.gateway.start();
-    await this.startAgent();
+    const gatewayStatus = await this.gateway.start();
+    if (gatewayStatus.state === "running") await this.startAgent();
   }
 
   getSyncStatus(): SyncModuleStatus {
     return { ...this.syncStatus };
-  }
-
-  async setSyncPort(port: number): Promise<SyncModuleStatus> {
-    if (!isValidSyncPort(port)) throw new Error("Sync port must be between 1 and 65535.");
-    if (port === this.syncPort && this.syncStatus.state === "running") return this.getSyncStatus();
-
-    const previousPort = this.syncPort;
-    const store = this.controlPlane?.store || this.restoredControlStore;
-    await this.stopSyncServer();
-    this.syncPort = port;
-    await this.startSync(store);
-    if (this.syncStatus.state === "running") return this.getSyncStatus();
-
-    const requestedError = this.syncStatus.error || `Port ${port} is unavailable.`;
-    this.syncPort = previousPort;
-    await this.startSync(store);
-    const restoredStatus = this.getSyncStatus();
-    if (restoredStatus.state !== "running") {
-      throw new Error(`${requestedError} The previous port could not be restored: ${restoredStatus.error || "unknown error"}`);
-    }
-    throw new Error(requestedError);
   }
 
   getTerminalStatus(): TerminalSessionStatus | null {
@@ -350,6 +377,7 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   async deleteProjectDirectory(projectPath: string): Promise<{ deletedConversationCount: number }> {
+    const removalSequence = this.controlPlane?.store.snapshot().lastSequence;
     const diskThreadIds = await listProjectConversationThreadIds(this.codexHome, projectPath);
     const runtimeThreads = [...this.threads.values()].filter((thread) =>
       thread.projectPath && comparablePath(thread.projectPath) === comparablePath(projectPath));
@@ -367,7 +395,7 @@ export class DesktopRuntime extends EventEmitter {
     await deleteConversationSessionFiles(this.codexHome, threadIds);
     for (const threadId of threadIds) {
       this.managedFiles.removeThread(threadId);
-      this.removeRuntimeThread(threadId);
+      this.removeRuntimeThread(threadId, removalSequence);
     }
 
     this.projectDirectories.forget(projectPath);
@@ -379,6 +407,23 @@ export class DesktopRuntime extends EventEmitter {
     destinationPath: string,
   ): Promise<ConversationBackupResult> {
     return createConversationBackup(this.codexHome, projectPath, destinationPath);
+  }
+
+  exportConversations(
+    threadIds: string[],
+    destinationPath: string,
+  ): Promise<ConversationBackupResult> {
+    return createSelectedConversationBackup(this.codexHome, threadIds, destinationPath);
+  }
+
+  async listExportConversations(): Promise<ConversationExportItem[]> {
+    return (await listConversationSessions(this.codexHome)).map((session) => ({
+      threadId: session.threadId,
+      projectPath: session.projectPath,
+      title: session.title,
+      archived: session.archived,
+      modifiedAt: session.modifiedAt,
+    }));
   }
 
   async restoreProjectConversations(backupPath: string): Promise<ConversationRestoreResult> {
@@ -472,8 +517,26 @@ export class DesktopRuntime extends EventEmitter {
     };
   }
 
-  async listModels<T>(): Promise<T> {
-    return this.agent.request<T>("model/list", { cursor: null, includeHidden: false, limit: 100 });
+  getRendererBootstrapState(): RendererBootstrapState {
+    const { threads, approvals, userInputs } = this.getSnapshot();
+    return { threads, approvals, userInputs };
+  }
+
+  async listModels(): Promise<ModelListResponse> {
+    const response = await this.agent.request<{
+      data?: Array<Omit<ModelOption, "supportedReasoningEfforts" | "isDefault"> & {
+        supportedReasoningEfforts?: ModelOption["supportedReasoningEfforts"];
+        isDefault?: boolean;
+      }>;
+    }>("model/list", { cursor: null, includeHidden: false, limit: 100 });
+    return {
+      ...response,
+      data: response.data?.map((model) => ({
+        ...model,
+        supportedReasoningEfforts: model.supportedReasoningEfforts || [],
+        isDefault: model.isDefault === true,
+      })),
+    };
   }
 
   async listSkills(forceReload = false): Promise<{
@@ -530,16 +593,21 @@ export class DesktopRuntime extends EventEmitter {
     searchTerm?: string;
     archived?: boolean;
   } = {}): Promise<ThreadSummary[]> {
-    const response = await this.agent.request<{ data?: ServerThread[] }>("thread/list", {
-      cursor: null,
-      limit: 100,
-      sortKey: "updated_at",
-      sortDirection: "desc",
-      ...(options.cwd ? { cwd: options.cwd } : {}),
-      ...(options.searchTerm?.trim() ? { searchTerm: options.searchTerm.trim() } : {}),
-      archived: Boolean(options.archived),
-    });
-    const serverThreads = (response.data || []).flatMap((serverThread) => {
+    let response: { data?: ServerThread[] } = { data: [] };
+    try {
+      response = await this.agent.request<{ data?: ServerThread[] }>("thread/list", {
+        cursor: null,
+        limit: 100,
+        sortKey: "updated_at",
+        sortDirection: "desc",
+        ...(options.cwd ? { cwd: options.cwd } : {}),
+        ...(options.searchTerm?.trim() ? { searchTerm: options.searchTerm.trim() } : {}),
+        archived: Boolean(options.archived),
+      });
+    } catch {
+      // The local session index below remains available without App Server or network access.
+    }
+    const listedServerThreads = (response.data || []).flatMap((serverThread) => {
       const threadId = serverThread.id;
       if (!threadId) return [];
       const summary = toThreadSummary(
@@ -557,8 +625,12 @@ export class DesktopRuntime extends EventEmitter {
       }
       return [summary];
     });
+    const conversationListing = await listConversationSessionsWithDuplicates(this.codexHome);
+    const duplicateThreadIds = new Set(conversationListing.duplicateThreadIds);
+    for (const duplicateThreadId of duplicateThreadIds) this.removeRuntimeThread(duplicateThreadId);
+    const serverThreads = listedServerThreads.filter((thread) => !duplicateThreadIds.has(thread.id));
     const serverThreadIds = new Set(serverThreads.map((thread) => thread.id));
-    const diskSessions = (await listConversationSessions(this.codexHome))
+    const diskSessions = conversationListing.sessions
       .filter((session) => session.archived === Boolean(options.archived));
     const searchTerm = options.searchTerm?.trim().toLowerCase();
     const matchesOptions = (thread: ThreadSummary) => (
@@ -634,11 +706,13 @@ export class DesktopRuntime extends EventEmitter {
       throw new Error("Thread model is invalid.");
     }
     if (!this.threads.has(threadId)) throw new Error("Thread not found.");
+    this.gateway.setThreadModel(threadId, normalized);
     this.updateThread(threadId, { model: normalized });
     return this.threads.get(threadId)!;
   }
 
   async deleteThread(threadId: string): Promise<void> {
+    const removalSequence = this.controlPlane?.store.snapshot().lastSequence;
     if (this.activeTurns.has(threadId)) await this.interruptTurn(threadId);
     else if (this.pendingTurnStarts.has(threadId)) {
       throw new Error("Wait for the task to finish starting, then delete the conversation again.");
@@ -646,7 +720,7 @@ export class DesktopRuntime extends EventEmitter {
     await this.requestPermanentThreadDeletion(threadId, true);
     await deleteConversationSessionFiles(this.codexHome, [threadId]);
     this.managedFiles.removeThread(threadId);
-    this.removeRuntimeThread(threadId);
+    this.removeRuntimeThread(threadId, removalSequence);
   }
 
   private async requestPermanentThreadDeletion(threadId: string, allowDiskFallback = false): Promise<void> {
@@ -660,19 +734,68 @@ export class DesktopRuntime extends EventEmitter {
     }
   }
 
-  async openThread(threadId: string): Promise<ThreadDetail> {
+  async openThread(threadId: string, requireAgent = false): Promise<ThreadDetail> {
+    const cached = !requireAgent || this.loadedThreadIds.has(threadId)
+      ? this.threadDetailCache.get(threadId)
+      : null;
+    if (cached) {
+      this.rememberThreadDetail(threadId, cached);
+      this.activeThreadId = threadId;
+      return cached;
+    }
     const pending = this.threadLoadPromises.get(threadId);
-    if (pending) return pending;
+    if (pending) {
+      const detail = await pending;
+      if (!requireAgent || this.loadedThreadIds.has(threadId)) return detail;
+    }
 
-    const operation = this.resumeThread(threadId);
+    const operation = requireAgent
+      ? this.resumeThread(threadId)
+      : this.loadThreadForDisplay(threadId);
     this.threadLoadPromises.set(threadId, operation);
     try {
-      return await operation;
+      const detail = await operation;
+      this.rememberThreadDetail(threadId, detail);
+      return detail;
     } finally {
       if (this.threadLoadPromises.get(threadId) === operation) {
         this.threadLoadPromises.delete(threadId);
       }
     }
+  }
+
+  private async loadThreadForDisplay(threadId: string): Promise<ThreadDetail> {
+    const localThread = this.threads.get(threadId);
+    const localDetail = localThread
+      ? await this.loadLocalThreadDetail(localThread)
+      : null;
+
+    // Complete local history can be shown without waking App Server. Sparse
+    // rollouts (user turns without assistant finals) are common while a turn is
+    // still tool-calling or after some Codex builds omit agent_message rows;
+    // resume fills those missing replies when the agent is available.
+    if (localDetail && !isIncompleteRolloutHistory(localDetail)) {
+      this.activeThreadId = threadId;
+      return localDetail;
+    }
+
+    try {
+      const resumed = await this.resumeThread(threadId);
+      return preferRicherThreadDetail(localDetail, resumed);
+    } catch (error) {
+      if (localDetail) {
+        this.activeThreadId = threadId;
+        return localDetail;
+      }
+      throw error;
+    }
+  }
+
+  private async loadLocalThreadDetail(thread: ThreadSummary): Promise<ThreadDetail | null> {
+    for (const image of await loadRolloutUploadedImages(this.codexHome, thread.id)) {
+      this.managedFiles.storeUploadedImageData(thread.id, image.turnId, image.dataUrl, image.name);
+    }
+    return loadLocalRolloutThread(this.codexHome, thread, this.managedFiles.listThread(thread.id));
   }
 
   private async resumeThread(threadId: string): Promise<ThreadDetail> {
@@ -692,6 +815,14 @@ export class DesktopRuntime extends EventEmitter {
       } catch (error) {
         const localThread = this.threads.get(threadId);
         const message = error instanceof Error ? error.message : String(error);
+        if (localThread) {
+          const localDetail = await this.loadLocalThreadDetail(localThread);
+          if (localDetail) {
+            this.activeThreadId = threadId;
+            this.loadedThreadIds.add(threadId);
+            return localDetail;
+          }
+        }
         if (!localThread || !isRolloutNotReadyMessage(message)) throw error;
         if (this.isEmptyLocalThread(threadId)) {
           this.activeThreadId = threadId;
@@ -718,7 +849,9 @@ export class DesktopRuntime extends EventEmitter {
     this.controlPlane?.store.upsertThread(summary);
 
     const rolloutImages = loadRolloutGeneratedImages(this.codexHome, summary.id);
-    for (const image of rolloutImages) this.publishedGeneratedImageIds.add(generatedImageKey(summary.id, image.id));
+    for (const image of rolloutImages) {
+      this.publishedGeneratedImageIds.add(generatedImageKey(summary.id, image.turnId, image.id));
+    }
     for (const turn of response.thread.turns || []) {
       const turnId = typeof turn.id === "string" ? turn.id : null;
       for (const item of turn.items || []) {
@@ -729,6 +862,9 @@ export class DesktopRuntime extends EventEmitter {
           this.managedFiles.storeGenerated(summary.id, turnId, filePath);
         }
       }
+    }
+    for (const image of await loadRolloutUploadedImages(this.codexHome, summary.id)) {
+      this.managedFiles.storeUploadedImageData(summary.id, image.turnId, image.dataUrl, image.name);
     }
     const managedFiles = this.managedFiles.listThread(summary.id);
     for (const file of managedFiles) this.publishedManagedFileIds.add(file.id);
@@ -772,6 +908,7 @@ export class DesktopRuntime extends EventEmitter {
     });
     const threadId = response.thread?.id;
     if (threadId) {
+      if (params.model) this.gateway.setThreadModel(threadId, params.model);
       this.activeThreadId = threadId;
       this.loadedThreadIds.add(threadId);
       const thread: ThreadSummary = {
@@ -792,6 +929,7 @@ export class DesktopRuntime extends EventEmitter {
   async startTurn(params: {
     threadId: string;
     text: string;
+    clientMessageId?: string;
     model?: string;
     approvalPolicy?: ApprovalPolicy;
     sandboxMode?: SandboxMode;
@@ -799,13 +937,13 @@ export class DesktopRuntime extends EventEmitter {
     attachments?: ComposerAttachment[];
   }): Promise<{ turn?: { id?: string }; files?: ConversationFile[] }> {
     if (!this.loadedThreadIds.has(params.threadId)) {
-      await this.openThread(params.threadId);
+      await this.openThread(params.threadId, true);
     }
     const current = this.threads.get(params.threadId);
     this.activeThreadId = params.threadId;
     if (params.model) {
       try {
-        await this.compactBeforeSmallerModel(params.threadId, params.model);
+        await this.prepareThreadModel(params.threadId, params.model);
       } catch (error) {
         this.updateThread(params.threadId, { status: "failed" });
         throw error;
@@ -820,16 +958,15 @@ export class DesktopRuntime extends EventEmitter {
     const attachments = validateAttachments(params.attachments || []);
     const managedAttachments = this.managedFiles.registerUploads(params.threadId, attachments);
     this.publishTimeline({
-      id: `user-${Date.now()}`,
+      id: params.clientMessageId ? `user-${params.clientMessageId}` : `user-${Date.now()}`,
       threadId: params.threadId,
+      ...(params.clientMessageId ? { clientMessageId: params.clientMessageId } : {}),
       kind: "user",
       status: "completed",
       title: "你",
       content: params.text,
-      ...(managedAttachments.some((attachment) => attachment.kind === "file") ? {
-        files: managedAttachments
-          .filter((attachment) => attachment.kind === "file")
-          .map((attachment) => managedFileReference(attachment)),
+      ...(managedAttachments.length ? {
+        files: managedAttachments.map((attachment) => managedFileReference(attachment)),
       } : {}),
       createdAt: new Date().toISOString(),
     });
@@ -865,9 +1002,7 @@ export class DesktopRuntime extends EventEmitter {
         this.activeTurns.set(params.threadId, turnId);
         this.managedFiles.bindTurn(managedAttachments.map((attachment) => attachment.id), turnId);
       }
-      const files = managedAttachments
-        .filter((attachment) => attachment.kind === "file")
-        .map((attachment) => managedFileReference(attachment, true));
+      const files = managedAttachments.map((attachment) => managedFileReference(attachment, true));
       return { ...response, ...(files.length ? { files } : {}) };
     } catch (error) {
       this.managedFiles.removeRecords(managedAttachments.map((attachment) => attachment.id));
@@ -881,7 +1016,10 @@ export class DesktopRuntime extends EventEmitter {
   async interruptTurn(threadId: string): Promise<unknown> {
     const turnId = this.activeTurns.get(threadId);
     if (!turnId) throw new Error("No active turn is available to interrupt.");
-    const response = await this.agent.request("turn/interrupt", { threadId, turnId });
+    this.clearGatewayFailure(turnId);
+    const interruptRequest = this.agent.request("turn/interrupt", { threadId, turnId });
+    this.gateway.interruptTurn(turnId);
+    const response = await interruptRequest;
     this.activeTurns.delete(threadId);
     this.updateThread(threadId, { status: "interrupted" });
     this.finalizeThreadTimeline(threadId, false);
@@ -904,6 +1042,7 @@ export class DesktopRuntime extends EventEmitter {
       submitUserInput: (requestId, request) => this.submitRemoteUserInput(requestId, request),
       setThreadModel: (threadId, request) => this.setRemoteThreadModel(threadId, request),
       renameThread: (threadId, request) => this.renameRemoteThread(threadId, request),
+      compactThread: (threadId) => this.compactRemoteThread(threadId),
       archiveThread: (threadId) => this.archiveRemoteThread(threadId),
       unarchiveThread: (threadId) => this.unarchiveRemoteThread(threadId),
       deleteThread: (threadId) => this.deleteRemoteThread(threadId),
@@ -934,7 +1073,6 @@ export class DesktopRuntime extends EventEmitter {
     if (this.controlPlane) return;
     let controlPlane: ControlPlaneHandle | null = null;
     try {
-      const tls = resolveSyncTlsConfiguration(this.syncHost, process.env, undefined, true);
       controlPlane = await createControlPlane({
         logLevel: "warn",
         ...(store ? { store } : {}),
@@ -942,20 +1080,20 @@ export class DesktopRuntime extends EventEmitter {
         ...(this.mobileAccess ? { commands: this.remoteCommandHandlers() } : {}),
         generatedImageDirectory: path.join(this.codexHome, "generated_images"),
         managedFiles: this.managedFiles,
-        ...(tls ? { tls } : {}),
       });
       const address = await controlPlane.start({ host: this.syncHost, port: this.syncPort });
       this.controlPlane = controlPlane;
       this.controlStoreUnsubscribe = controlPlane.store.onEvent((event) => this.handleSyncEvent(event));
       controlPlane.store.setProjects(this.projectDirectories.list());
-      const advertisedHost = resolveAdvertisedSyncHost(this.syncHost);
       this.syncStatus = {
         state: "running",
-        host: advertisedHost,
+        host: this.syncHost,
         port: address.port,
-        url: `${tls ? "https" : "http"}://${formatNetworkHost(advertisedHost)}:${address.port}`,
+        url: `http://${this.syncHost}:${address.port}`,
         error: null,
       };
+      const accessKey = this.mobileAccess?.status().accessKey?.key;
+      if (accessKey && this.syncStatus.url) this.desktopRelay?.updateAccess(this.syncStatus.url, accessKey);
       controlPlane.store.upsertHost({
         id: "local-desktop",
         name: os.hostname(),
@@ -989,9 +1127,11 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   private async startAgent(): Promise<void> {
+    if (this.agent.getStatus().state === "connected") return;
     const catalogPath = this.gateway.getCatalogPath();
     this.loadedThreadIds.clear();
     this.threadLoadPromises.clear();
+    this.threadDetailCache.clear();
     this.activeThreadId = null;
     await this.agent.start({
       codexHome: this.codexHome,
@@ -1000,13 +1140,83 @@ export class DesktopRuntime extends EventEmitter {
         "model_providers.rhzy_gateway.name": "RHZYCODE Internal Gateway",
         "model_providers.rhzy_gateway.base_url": this.gateway.getBaseUrl(),
         "model_providers.rhzy_gateway.wire_api": "responses",
-        "model_providers.OpenAI.name": "RHZYCODE Legacy Gateway",
-        "model_providers.OpenAI.base_url": this.gateway.getBaseUrl(),
-        "model_providers.OpenAI.wire_api": "responses",
-        "model_providers.OpenAI.requires_openai_auth": false,
         model_catalog_json: catalogPath,
       },
     });
+  }
+
+  private handleGatewayRequest(event: GatewayRequestEvent): void {
+    const turnId = typeof event.turn_id === "string" ? event.turn_id : "";
+    if (!turnId) return;
+    const status = Number(event.status);
+    if (event.event === "request_started"
+      || (event.event === "request_completed" && Number.isFinite(status) && status < 500)) {
+      this.clearGatewayFailure(turnId);
+      return;
+    }
+    const terminalFailure = (
+      (event.event === "request_failed" || event.event === "request_completed")
+      && Number.isFinite(status)
+      && status >= 500
+    ) || event.event === "stream_interrupted";
+    if (!terminalFailure) return;
+
+    const threadId = [...this.activeTurns].find((entry) => entry[1] === turnId)?.[0];
+    if (!threadId) return;
+    this.clearGatewayFailure(turnId);
+    const detail = typeof event.message === "string" && event.message
+      ? event.message
+      : `The model gateway returned HTTP ${Number.isFinite(status) ? status : 502}.`;
+    const timer = setTimeout(() => {
+      this.failUnresolvedGatewayTurn(threadId, turnId, detail);
+    }, this.gatewayFailureGraceMs);
+    timer.unref();
+    this.pendingGatewayFailures.set(turnId, { threadId, timer });
+  }
+
+  private failUnresolvedGatewayTurn(threadId: string, turnId: string, detail: string): void {
+    this.pendingGatewayFailures.delete(turnId);
+    if (this.activeTurns.get(threadId) !== turnId) return;
+
+    const message = `${detail} Agent Host did not finish the turn after the gateway request ended.`;
+    this.gateway.interruptTurn(turnId);
+    void this.agent.request("turn/interrupt", { threadId, turnId }, 10_000).catch((error) => {
+      this.emit(
+        "agent:diagnostic",
+        `Unable to interrupt unresolved turn ${turnId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+    this.pendingCompactions.get(threadId)?.reject(new Error(message));
+    this.activeTurns.delete(threadId);
+    this.updateThread(threadId, { status: "failed" });
+    this.publishTimeline({
+      id: `error-gateway-${turnId}`,
+      threadId,
+      kind: "notice",
+      status: "failed",
+      title: "任务失败",
+      content: message,
+      createdAt: new Date().toISOString(),
+    });
+    this.finalizeThreadTimeline(threadId, true);
+    this.clearRemoteAttachments(threadId);
+  }
+
+  private clearGatewayFailure(turnId: string): void {
+    const pending = this.pendingGatewayFailures.get(turnId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingGatewayFailures.delete(turnId);
+  }
+
+  private clearGatewayFailuresForThread(threadId: string): void {
+    for (const [turnId, pending] of this.pendingGatewayFailures) {
+      if (pending.threadId === threadId) this.clearGatewayFailure(turnId);
+    }
+  }
+
+  private clearAllGatewayFailures(): void {
+    for (const turnId of [...this.pendingGatewayFailures.keys()]) this.clearGatewayFailure(turnId);
   }
 
   private handleAgentMessage(message: RpcMessage): void {
@@ -1034,16 +1244,33 @@ export class DesktopRuntime extends EventEmitter {
       || threadForTurn
       || soleCandidate
       || (unresolvedCandidates.size === 0 ? this.activeThreadId : null);
+    if (threadId) this.threadDetailCache.delete(threadId);
+    const effectiveTurnId = turnId || (threadId ? this.activeTurns.get(threadId) || null : null);
     let forwardedParams = params;
     let completedGeneratedImage: StoredGeneratedImage | null = null;
     if (method === "item/started" || method === "item/completed") {
       const item = (params.item || {}) as Record<string, unknown>;
+      if (item.type === "userMessage" && threadId) {
+        const uploadedFiles = this.managedFiles.listThread(threadId)
+          .filter((file) => file.source === "upload" && file.turnId === effectiveTurnId)
+          .map((file) => managedFileReference(file, true));
+        if (uploadedFiles.length) forwardedParams = {
+          ...params,
+          item: { ...item, files: uploadedFiles },
+        };
+      }
       if (item.type === "imageGeneration") {
         const image = method === "item/completed"
           ? materializeGeneratedImage(path.join(this.codexHome, "generated_images"), item)
           : null;
         completedGeneratedImage = image;
-        if (image && threadId) this.publishedGeneratedImageIds.add(generatedImageKey(threadId, String(item.id || image.name)));
+        if (image && threadId) {
+          this.publishedGeneratedImageIds.add(generatedImageKey(
+            threadId,
+            effectiveTurnId,
+            String(item.id || image.name),
+          ));
+        }
         const rendererItem = { ...item };
         delete rendererItem.result;
         if (image) Object.assign(rendererItem, {
@@ -1057,9 +1284,18 @@ export class DesktopRuntime extends EventEmitter {
         forwardedParams = { ...params, item: rendererItem };
       }
     }
-    this.emit("agent:message", threadId && !extractThreadId(forwardedParams)
-      ? { ...message, params: { ...forwardedParams, threadId } }
-      : forwardedParams === params ? message : { ...message, params: forwardedParams });
+    const shouldAddThreadId = Boolean(threadId && !extractThreadId(forwardedParams));
+    const shouldAddTurnId = Boolean(effectiveTurnId && !extractTurnId(forwardedParams));
+    this.emit("agent:message", shouldAddThreadId || shouldAddTurnId || forwardedParams !== params
+      ? {
+          ...message,
+          params: {
+            ...forwardedParams,
+            ...(shouldAddThreadId ? { threadId } : {}),
+            ...(shouldAddTurnId ? { turnId: effectiveTurnId } : {}),
+          },
+        }
+      : message);
 
     if (method === "item/completed" && threadId) {
       const item = (params.item || {}) as Record<string, unknown>;
@@ -1085,7 +1321,7 @@ export class DesktopRuntime extends EventEmitter {
     }
 
     if (message.id != null && isApprovalRequest(method) && threadId) {
-      this.publishApproval(message.id, method, params, threadId);
+      this.publishApproval(message.id, method, params, threadId, effectiveTurnId);
       return;
     }
 
@@ -1097,6 +1333,8 @@ export class DesktopRuntime extends EventEmitter {
     }
     if (method === "turn/completed") {
       const turn = (params.turn || {}) as Record<string, unknown>;
+      const completedTurnId = typeof turn.id === "string" ? turn.id : effectiveTurnId;
+      if (completedTurnId) this.clearGatewayFailure(completedTurnId);
       const status = mapTurnStatus(String(turn.status || "completed"));
       const pendingCompaction = this.pendingCompactions.get(threadId);
       if (pendingCompaction) {
@@ -1115,7 +1353,7 @@ export class DesktopRuntime extends EventEmitter {
       this.clearRemoteAttachments(threadId);
     }
     if (method === "item/agentMessage/delta") {
-      const itemId = String(params.itemId || `assistant-${threadId}`);
+      const itemId = turnScopedItemId(effectiveTurnId, params.itemId || `assistant-${threadId}`);
       const content = (this.timelineText.get(itemId) || "") + String(params.delta || "");
       this.timelineText.set(itemId, content);
       this.publishTimeline({
@@ -1129,7 +1367,7 @@ export class DesktopRuntime extends EventEmitter {
       });
     }
     if (method === "item/commandExecution/outputDelta") {
-      const itemId = String(params.itemId || `command-${threadId}`);
+      const itemId = turnScopedItemId(effectiveTurnId, params.itemId || `command-${threadId}`);
       const content = this.appendItemDetail(itemId, String(params.delta || ""), "commandExecution");
       this.publishTimeline({
         id: itemId,
@@ -1142,7 +1380,7 @@ export class DesktopRuntime extends EventEmitter {
       });
     }
     if (method === "item/reasoning/summaryTextDelta" || method === "item/reasoning/textDelta") {
-      const itemId = String(params.itemId || `reasoning-${threadId}`);
+      const itemId = turnScopedItemId(effectiveTurnId, params.itemId || `reasoning-${threadId}`);
       const content = this.appendItemDetail(itemId, String(params.delta || ""), "reasoning");
       this.publishTimeline({
         id: itemId,
@@ -1169,6 +1407,7 @@ export class DesktopRuntime extends EventEmitter {
     if (method === "error") {
       const error = (params.error || {}) as Record<string, unknown>;
       const willRetry = Boolean(params.willRetry);
+      if (effectiveTurnId) this.clearGatewayFailure(effectiveTurnId);
       this.publishTimeline({
         id: `error-${params.turnId || Date.now()}`,
         threadId,
@@ -1189,7 +1428,7 @@ export class DesktopRuntime extends EventEmitter {
       this.resolveServerRequest(params.requestId);
     }
     if (method === "item/fileChange/patchUpdated") {
-      const itemId = String(params.itemId || `file-change-${Date.now()}`);
+      const itemId = turnScopedItemId(effectiveTurnId, params.itemId || `file-change-${Date.now()}`);
       const content = describeFileChanges(params.changes);
       this.itemDetails.set(itemId, content);
       this.publishTimeline({
@@ -1204,7 +1443,7 @@ export class DesktopRuntime extends EventEmitter {
     }
     if (method === "item/started" || method === "item/completed") {
       const item = (params.item || {}) as Record<string, unknown>;
-      const itemId = String(item.id || `${method}-${Date.now()}`);
+      const itemId = turnScopedItemId(effectiveTurnId, item.id || `${method}-${Date.now()}`);
       const itemType = String(item.type || "notice");
       if (itemType === "userMessage") return;
       if (itemType === "imageGeneration") {
@@ -1251,7 +1490,7 @@ export class DesktopRuntime extends EventEmitter {
   private publishRolloutGeneratedImages(threadId: string, turnId: string | null): void {
     for (const generated of loadRolloutGeneratedImages(this.codexHome, threadId)) {
       if (turnId && generated.turnId && generated.turnId !== turnId) continue;
-      const key = generatedImageKey(threadId, generated.id);
+      const key = generatedImageKey(threadId, generated.turnId, generated.id);
       if (this.publishedGeneratedImageIds.has(key)) continue;
       this.publishedGeneratedImageIds.add(key);
       const item = {
@@ -1265,7 +1504,7 @@ export class DesktopRuntime extends EventEmitter {
       };
       this.emit("agent:message", {
         method: "item/completed",
-        params: { threadId, item },
+        params: { threadId, ...(generated.turnId ? { turnId: generated.turnId } : {}), item },
       });
       this.publishTimeline(generatedImageTimelineItem(
         generated.id,
@@ -1328,28 +1567,20 @@ export class DesktopRuntime extends EventEmitter {
 
   private publishApproval(
     rpcId: number | string,
-    method: string,
+    method: ApprovalMethod,
     params: Record<string, unknown>,
     threadId: string,
+    turnId: string | null,
   ): void {
-    if (!/commandExecution|fileChange|permissions|execCommandApproval|applyPatchApproval/.test(method)) return;
-    const id = `approval-${String(rpcId)}`;
-    const permissions = method === "item/permissions/requestApproval"
-      ? ((params.permissions || {}) as Record<string, unknown>)
-      : undefined;
-    this.pendingApprovals.set(id, { rpcId, method, threadId, permissions });
-    const isFileChange = /fileChange|applyPatch/.test(method);
-    const isPermission = method === "item/permissions/requestApproval";
-    const approval: ApprovalRequest = {
-      id,
+    const { id, pending, approval } = createApprovalRequest({
+      rpcId,
+      method,
+      params,
       threadId,
-      kind: isPermission ? "permission" : isFileChange ? "file_change" : "command",
-      title: isPermission ? "批准额外权限" : isFileChange ? "批准文件修改" : "批准命令执行",
-      detail: isPermission
-        ? describePermissions(params)
-        : describeApproval(params, isFileChange, this.itemDetails),
-      createdAt: new Date().toISOString(),
-    };
+      turnId,
+      itemDetails: this.itemDetails,
+    });
+    this.pendingApprovals.set(id, pending);
     this.controlPlane?.store.publish({ type: "approval.requested", approval });
     this.updateThread(threadId, { status: "waiting_for_approval" });
   }
@@ -1450,13 +1681,27 @@ export class DesktopRuntime extends EventEmitter {
   private async openRemoteThread(threadId: string): Promise<RemoteThreadOpenResult> {
     if (!this.threads.has(threadId)) throw new ControlCommandError("not_found");
     try {
-      const detail = await this.openThread(threadId);
-      const timelineById = new Map([
-        ...detail.timeline,
-        ...remoteMessageTimeline(detail),
-      ].map((item) => [item.id, item]));
+      const localThread = this.threads.get(threadId)!;
+      const localDetail = await this.loadLocalThreadDetail(localThread);
+      // Mobile has no separate messages store; force App Server resume so
+      // incomplete local rollouts cannot hide assistant replies. Still keep the
+      // richer side when resume only returns an empty idle stub.
+      let detail: ThreadDetail;
+      try {
+        detail = preferRicherThreadDetail(localDetail, await this.openThread(threadId, true));
+      } catch (error) {
+        if (!localDetail) throw error;
+        detail = localDetail;
+      }
+      const timelineById = new Map<string, (typeof detail.timeline)[number]>();
+      for (const item of [...detail.timeline, ...remoteMessageTimeline(detail)]) {
+        const current = timelineById.get(item.id);
+        timelineById.set(item.id, current ? preferTimelineItem(current, item) : item);
+      }
       for (const item of this.controlPlane?.store.snapshot().timeline || []) {
-        if (item.threadId === threadId) timelineById.set(item.id, item);
+        if (item.threadId !== threadId) continue;
+        const current = timelineById.get(item.id);
+        timelineById.set(item.id, current ? preferTimelineItem(current, item) : item);
       }
       return {
         thread: detail.thread,
@@ -1506,9 +1751,7 @@ export class DesktopRuntime extends EventEmitter {
 
   private async listRemoteModels(): Promise<RemoteModelListResult> {
     try {
-      const response = await this.listModels<{ data?: Array<RemoteModelListResult["models"][number] & {
-        supportedReasoningEfforts?: Array<{ reasoningEffort?: string }>;
-      }> }>();
+      const response = await this.listModels();
       const gatewayModels = new Map(this.gateway.getStatus().models.flatMap((model) => [
         [model.id, model] as const,
         [model.upstreamModel, model] as const,
@@ -1516,14 +1759,14 @@ export class DesktopRuntime extends EventEmitter {
       return {
         models: (response.data || []).map((model) => {
           const gatewayModel = gatewayModels.get(model.model) || gatewayModels.get(model.id);
+          if (!gatewayModel) throw new Error(`Model ${model.model} is missing from the current gateway catalog.`);
           const { supportedReasoningEfforts: _supportedReasoningEfforts, ...remoteModel } = model;
           return {
             ...remoteModel,
-            ...(gatewayModel ? {
-              source: gatewayModelSourceName(gatewayModel),
-              sourceModelName: gatewayModel.upstreamModel,
-            } : {}),
+            source: gatewayModelSourceName(gatewayModel),
+            sourceModelName: gatewayModel.upstreamModel,
             reasoningEfforts: supportedReasoningEfforts(model),
+            isDefault: model.isDefault === true,
           };
         }),
       };
@@ -1584,6 +1827,7 @@ export class DesktopRuntime extends EventEmitter {
       const response = await this.startTurn({
         threadId,
         text: request.text,
+        ...(request.clientMessageId ? { clientMessageId: request.clientMessageId } : {}),
         ...(request.model ? { model: request.model } : {}),
         approvalPolicy: request.approvalPolicy || "on-request",
         sandboxMode: request.sandboxMode || "read-only",
@@ -1675,6 +1919,19 @@ export class DesktopRuntime extends EventEmitter {
     }
   }
 
+  private async compactRemoteThread(threadId: string): Promise<RemoteThreadMutationResult> {
+    const thread = this.threads.get(threadId);
+    if (!thread) throw new ControlCommandError("not_found");
+    if (isActiveThreadStatus(thread.status)) throw new ControlCommandError("conflict");
+    try {
+      await this.compactThread(threadId);
+      return { threadId, acceptedAt: new Date().toISOString() };
+    } catch (error) {
+      if (error instanceof ControlCommandError) throw error;
+      throw new ControlCommandError("unavailable");
+    }
+  }
+
   private async unarchiveRemoteThread(threadId: string): Promise<RemoteThreadMutationResult> {
     if (this.threads.has(threadId)) throw new ControlCommandError("conflict");
     try {
@@ -1695,7 +1952,8 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   private async deleteRemoteThread(threadId: string): Promise<RemoteThreadMutationResult> {
-    const thread = this.threads.get(threadId);
+    const thread = this.threads.get(threadId)
+      || (await this.listThreads({ archived: true })).find((candidate) => candidate.id === threadId);
     if (!thread) throw new ControlCommandError("not_found");
     if (isActiveThreadStatus(thread.status)) throw new ControlCommandError("conflict");
     try {
@@ -1721,11 +1979,20 @@ export class DesktopRuntime extends EventEmitter {
     }
   }
 
-  private removeRuntimeThread(threadId: string): void {
+  private removeRuntimeThread(threadId: string, ensureEventAfterSequence?: number): void {
+    this.clearGatewayFailuresForThread(threadId);
     const existed = this.threads.delete(threadId);
     this.loadedThreadIds.delete(threadId);
     this.threadLoadPromises.delete(threadId);
-    if (existed) this.controlPlane?.store.removeThread(threadId);
+    this.threadDetailCache.delete(threadId);
+    const store = this.controlPlane?.store;
+    const removalAlreadyPublished = ensureEventAfterSequence === undefined
+      ? false
+      : store?.listEvents(ensureEventAfterSequence).some((event) =>
+        event.type === "thread.removed" && event.threadId === threadId);
+    if (existed || (ensureEventAfterSequence !== undefined && !removalAlreadyPublished)) {
+      store?.removeThread(threadId);
+    }
     if (this.activeThreadId === threadId) this.activeThreadId = null;
   }
 
@@ -1770,10 +2037,33 @@ export class DesktopRuntime extends EventEmitter {
   private updateThread(threadId: string, patch: Partial<Pick<ThreadSummary, "title" | "model" | "status">>): void {
     const current = this.threads.get(threadId);
     if (!current) return;
+    this.threadDetailCache.delete(threadId);
     const thread = { ...current, ...patch, updatedAt: new Date().toISOString() };
     this.threads.set(threadId, thread);
     this.controlPlane?.store.upsertThread(thread);
     this.updateHostTaskCount();
+  }
+
+  private rememberThreadDetail(threadId: string, detail: ThreadDetail): void {
+    this.threadDetailCache.delete(threadId);
+    this.threadDetailCache.set(threadId, detail);
+    while (this.threadDetailCache.size > MAX_CACHED_THREAD_DETAILS) {
+      const oldestId = this.threadDetailCache.keys().next().value;
+      if (typeof oldestId !== "string") break;
+      this.threadDetailCache.delete(oldestId);
+    }
+  }
+
+  private async prepareThreadModel(threadId: string, targetModel: string): Promise<void> {
+    this.gateway.setThreadModel(threadId, targetModel);
+    const previousModel = loadRolloutThreadState(this.codexHome, threadId).lastSuccessfulModel;
+    await this.compactBeforeSmallerModel(threadId, targetModel);
+    if (previousModel && previousModel !== targetModel) {
+      await this.agent.request("thread/settings/update", {
+        threadId,
+        model: targetModel,
+      });
+    }
   }
 
   private async compactBeforeSmallerModel(threadId: string, targetModel: string): Promise<void> {
@@ -1800,7 +2090,7 @@ export class DesktopRuntime extends EventEmitter {
     await this.compactThread(threadId);
   }
 
-  private async compactThread(threadId: string): Promise<void> {
+  async compactThread(threadId: string): Promise<void> {
     if (this.pendingCompactions.has(threadId)) {
       throw new Error("Conversation compaction is already running.");
     }
@@ -1841,7 +2131,9 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   private publishTimeline(item: TimelineItem): void {
-    this.controlPlane?.store.publish({ type: "timeline.upserted", item });
+    // Coalesce running stream deltas so weak mobile links are not flooded with
+    // full-content upserts on every token while still publishing completions immediately.
+    this.timelinePublishCoalescer.enqueue(item);
   }
 
   private finalizeThreadTimeline(threadId: string, failed: boolean): void {
@@ -1866,13 +2158,9 @@ function gatewayModelSourceName(model: { ownedBy: string; providerId: string }):
 }
 
 function supportedReasoningEfforts(model: {
-  defaultReasoningEffort: string;
-  reasoningEfforts?: string[];
   supportedReasoningEfforts?: Array<{ reasoningEffort?: string }>;
 }): Array<"none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"> {
-  const declared = model.reasoningEfforts
-    ?? model.supportedReasoningEfforts?.map((option) => option.reasoningEffort || "");
-  const values = declared ?? [model.defaultReasoningEffort];
+  const values = model.supportedReasoningEfforts?.map((option) => option.reasoningEffort || "") || [];
   return [...new Set(values)].filter((value): value is "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" => reasoningEffortValues.has(value));
 }
 
@@ -1930,13 +2218,16 @@ function toThreadDetail(
   for (const turn of thread.turns || []) {
     const firstMessageIndex = messages.length;
     const turnFiles = managedFiles.filter((file) => file.turnId === turn.id);
-    const uploadedFiles = turnFiles.filter((file) => file.source === "upload" && file.kind === "file");
+    const uploadedFiles = turnFiles.filter((file) => file.source === "upload");
     const createdAt = timestampToIso(turn.startedAt || turn.completedAt || thread.updatedAt);
     for (const item of turn.items || []) {
-      const itemId = String(item.id || `${turn.id || "turn"}-${messages.length + timeline.length}`);
+      const rawItemId = String(item.id || `${turn.id || "turn"}-${messages.length + timeline.length}`);
+      const itemId = turnScopedItemId(turn.id, rawItemId);
       const itemType = String(item.type || "notice");
       if (itemType === "userMessage") {
-        const images = describeUserImages(item.content);
+        const images = uploadedFiles.some((file) => file.kind === "image")
+          ? []
+          : describeUserImages(item.content);
         messages.push({
           id: itemId,
           role: "user",
@@ -1957,7 +2248,7 @@ function toThreadDetail(
         if (image) {
           messages.push({ id: itemId, role: "assistant", content: "", images: [image] });
         }
-        pendingRolloutImages.delete(itemId);
+        pendingRolloutImages.delete(rawItemId);
         continue;
       }
       timeline.push({
@@ -2002,7 +2293,7 @@ function toThreadDetail(
     for (const generated of pendingRolloutImages.values()) {
       if (generated.turnId !== turn.id) continue;
       messages.push({
-        id: generated.id,
+        id: turnScopedItemId(generated.turnId, generated.id),
         role: "assistant",
         content: "",
         images: [generated.image],
@@ -2012,18 +2303,98 @@ function toThreadDetail(
   }
 
   for (const generated of pendingRolloutImages.values()) {
-    messages.push({ id: generated.id, role: "assistant", content: "", images: [generated.image] });
+    messages.push({
+      id: turnScopedItemId(generated.turnId, generated.id),
+      role: "assistant",
+      content: "",
+      images: [generated.image],
+    });
   }
 
   return { thread: summary, messages, timeline };
 }
 
+function isVisibleHistoryMessage(message: ConversationMessage): boolean {
+  if (!message.content.trim() && !(message.images?.length || message.files?.length)) return false;
+  if (message.role !== "user") return true;
+  const normalized = message.content.trimStart();
+  return !(
+    normalized.startsWith("<environment_context>")
+    || normalized.startsWith("<permissions instructions>")
+    || normalized.startsWith("<collaboration_mode>")
+    || normalized.startsWith("<skills_instructions>")
+    || normalized.startsWith("<turn_aborted>")
+    || normalized.startsWith("# AGENTS.md instructions")
+  );
+}
+
+/** Local rollouts sometimes only contain user rows until resume reconstitutes replies. */
+function isIncompleteRolloutHistory(detail: ThreadDetail): boolean {
+  const visible = detail.messages.filter(isVisibleHistoryMessage);
+  if (!visible.length) return false;
+  const users = visible.filter((message) => message.role === "user").length;
+  const assistants = visible.filter((message) => message.role === "assistant").length;
+  return users > 0 && assistants === 0;
+}
+
+function historyCompletenessScore(detail: ThreadDetail): number {
+  let score = 0;
+  for (const message of detail.messages) {
+    if (!isVisibleHistoryMessage(message)) continue;
+    score += 1;
+    if (message.role === "assistant") score += 10;
+    if (message.content.trim()) score += Math.min(8, Math.floor(message.content.trim().length / 80));
+    score += (message.images?.length || 0) * 3;
+    score += (message.files?.length || 0) * 2;
+  }
+  score += detail.timeline.length;
+  return score;
+}
+
+function preferRicherThreadDetail(
+  localDetail: ThreadDetail | null,
+  resumed: ThreadDetail,
+): ThreadDetail {
+  if (!localDetail) return resumed;
+  const localIncomplete = isIncompleteRolloutHistory(localDetail);
+  const resumedIncomplete = isIncompleteRolloutHistory(resumed);
+  const localHasAssistant = localDetail.messages.some((message) => (
+    message.role === "assistant" && isVisibleHistoryMessage(message)
+  ));
+  const resumedHasAssistant = resumed.messages.some((message) => (
+    message.role === "assistant" && isVisibleHistoryMessage(message)
+  ));
+  if (localIncomplete && resumedHasAssistant) return resumed;
+  if (resumedIncomplete && localHasAssistant) {
+    return {
+      thread: resumed.thread,
+      messages: localDetail.messages,
+      timeline: resumed.timeline.length ? resumed.timeline : localDetail.timeline,
+    };
+  }
+  const localScore = historyCompletenessScore(localDetail);
+  const resumedScore = historyCompletenessScore(resumed);
+  if (resumedScore >= localScore) {
+    if (resumedScore > localScore || resumed.messages.length >= localDetail.messages.length) {
+      return resumed;
+    }
+  }
+  // Keep local messages when resume came back emptier (e.g. idle stub), but prefer
+  // the resumed thread summary/status from App Server when available.
+  return {
+    thread: resumed.thread,
+    messages: localDetail.messages,
+    timeline: resumed.timeline.length ? resumed.timeline : localDetail.timeline,
+  };
+}
+
 function remoteMessageTimeline(detail: ThreadDetail): TimelineItem[] {
   const finalTimestamp = Date.parse(detail.thread.updatedAt);
+  const messages = detail.messages.filter(isVisibleHistoryMessage);
   const baseTimestamp = Number.isFinite(finalTimestamp)
-    ? finalTimestamp - Math.max(0, detail.messages.length - 1)
+    ? finalTimestamp - Math.max(0, messages.length - 1)
     : Date.now();
-  return detail.messages.map((message, index) => {
+  return messages.map((message, index) => {
     const files = message.files?.map(({ path: _path, ...file }) => file);
     const images = message.images
       ?.filter((image) => image.generated)
@@ -2054,11 +2425,12 @@ function managedFileReference(record: ManagedFileRecord, includePath = false): C
 }
 
 function stripAttachedFileInstructions(value: string): string {
-  return value.split("\n\nAttached files (use these absolute paths):\n", 1)[0] || value;
+  const clean = stripImageAttachmentMarkup(value);
+  return clean.split("\n\nAttached files (use these absolute paths):\n", 1)[0] || clean;
 }
 
-function generatedImageKey(threadId: string, itemId: string): string {
-  return `${threadId}\u0000${itemId}`;
+function generatedImageKey(threadId: string, turnId: string | null | undefined, itemId: string): string {
+  return `${threadId}\u0000${turnScopedItemId(turnId, itemId)}`;
 }
 
 function toGeneratedImageTimeline(
@@ -2073,7 +2445,10 @@ function toGeneratedImageTimeline(
       if (item.type !== "imageGeneration") continue;
       const image = materializeGeneratedImage(generatedImageDirectory, item);
       if (!image) continue;
-      const itemId = String(item.id || `${turn.id || "turn"}-generated-image-${timeline.length}`);
+      const itemId = turnScopedItemId(
+        turn.id,
+        item.id || `${turn.id || "turn"}-generated-image-${timeline.length}`,
+      );
       timeline.push(generatedImageTimelineItem(itemId, summary.id, image, createdAt));
     }
   }
@@ -2113,28 +2488,37 @@ function serverThreadStatus(thread: ServerThread): ThreadStatus {
 
 function describeUserContent(value: unknown): string {
   if (!Array.isArray(value)) return "";
-  return value
+  return stripImageAttachmentMarkup(value
     .map((rawItem) => {
       const item = (rawItem || {}) as Record<string, unknown>;
-      if (item.type === "text") return String(item.text || "");
+      if (item.type === "text" || item.type === "input_text") return String(item.text || "");
       if (item.type === "skill") return `Skill: ${String(item.name || item.path || "")}`;
       if (item.type === "mention") return `Mention: ${String(item.name || item.path || "")}`;
       if (item.type === "image" || item.type === "localImage") return "";
       return "";
     })
     .filter(Boolean)
-    .join("\n");
+    .join("\n"));
 }
 
 function describeUserImages(value: unknown): Array<{ path: string; name: string }> {
   if (!Array.isArray(value)) return [];
   return value.flatMap((rawItem) => {
     const item = (rawItem || {}) as Record<string, unknown>;
-    if (item.type !== "image" && item.type !== "localImage") return [];
-    const imagePath = String(item.path || "");
+    if (item.type !== "image" && item.type !== "localImage" && item.type !== "input_image") return [];
+    const imagePath = String(item.path || item.image_url || "");
     if (!imagePath) return [];
+    if (imagePath.startsWith("data:")) return [];
     return [{ path: imagePath, name: path.basename(imagePath) || "image" }];
   });
+}
+
+function stripImageAttachmentMarkup(value: string): string {
+  return value
+    .replace(/<image\b[^>]*\bpath=(?:"[^"]*"|'[^']*')[^>]*>\s*<\/image>/gi, "")
+    .replace(/<image\b[^>]*\bpath=(?:"[^"]*"|'[^']*')[^>]*>/gi, "")
+    .replace(/<\/image>/gi, "")
+    .trim();
 }
 
 function describeHistoricalItem(item: Record<string, unknown>): string {
@@ -2205,98 +2589,9 @@ function describeFileChanges(value: unknown): string {
   return limitDetail(detail || "等待文件差异");
 }
 
-function describeLegacyFileChanges(value: unknown): string | null {
-  if (!value || typeof value !== "object") return null;
-  const detail = Object.entries(value as Record<string, unknown>)
-    .map(([filePath, rawChange]) => {
-      const change = (rawChange || {}) as Record<string, unknown>;
-      const content = change.unified_diff || change.content || change.type;
-      return [filePath, content].filter(Boolean).join("\n");
-    })
-    .join("\n\n");
-  return detail ? limitDetail(detail) : null;
-}
-
-function describeApproval(
-  params: Record<string, unknown>,
-  isFileChange: boolean,
-  itemDetails: Map<string, string>,
-): string {
-  const itemId = String(params.itemId || params.callId || "");
-  const itemDetail = itemId ? itemDetails.get(itemId) : null;
-  const legacyChanges = isFileChange ? describeLegacyFileChanges(params.fileChanges) : null;
-  const command = Array.isArray(params.command) ? params.command.join(" ") : params.command;
-  return limitDetail(
-    String(
-      command ||
-        itemDetail ||
-        legacyChanges ||
-        params.reason ||
-        params.cwd ||
-        "Agent 请求继续执行",
-    ),
-  );
-}
-
 function limitDetail(detail: string): string {
   const maxLength = 12_000;
   return detail.length > maxLength ? `${detail.slice(0, maxLength)}\n...` : detail;
-}
-
-function isApprovalRequest(method: string): boolean {
-  return method === "item/commandExecution/requestApproval" ||
-    method === "item/fileChange/requestApproval" ||
-    method === "item/permissions/requestApproval" ||
-    method === "execCommandApproval" ||
-    method === "applyPatchApproval";
-}
-
-function approvalDecision(
-  method: string,
-  decision: "approved" | "declined",
-): "accept" | "decline" | "approved" | "denied" {
-  const legacy = method === "execCommandApproval" || method === "applyPatchApproval";
-  if (legacy) return decision === "approved" ? "approved" : "denied";
-  return decision === "approved" ? "accept" : "decline";
-}
-
-function approvalResponse(
-  pending: PendingApproval,
-  decision: "approved" | "declined",
-): Record<string, unknown> {
-  if (pending.method === "item/permissions/requestApproval") {
-    return {
-      permissions: decision === "approved" ? grantedPermissions(pending.permissions) : {},
-      scope: "turn",
-    };
-  }
-  return { decision: approvalDecision(pending.method, decision) };
-}
-
-function grantedPermissions(value: Record<string, unknown> | undefined): Record<string, unknown> {
-  if (!value) return {};
-  const granted: Record<string, unknown> = {};
-  if (value.network && typeof value.network === "object") granted.network = value.network;
-  if (value.fileSystem && typeof value.fileSystem === "object") granted.fileSystem = value.fileSystem;
-  return granted;
-}
-
-function describePermissions(params: Record<string, unknown>): string {
-  const permissions = (params.permissions || {}) as Record<string, unknown>;
-  const network = permissions.network as Record<string, unknown> | null | undefined;
-  const fileSystem = permissions.fileSystem as Record<string, unknown> | null | undefined;
-  const details = [params.reason, params.cwd];
-  if (network?.enabled) details.push("Network access");
-  if (fileSystem) {
-    const read = Array.isArray(fileSystem.read) ? fileSystem.read : [];
-    const write = Array.isArray(fileSystem.write) ? fileSystem.write : [];
-    if (read.length) details.push(`Read: ${read.join(", ")}`);
-    if (write.length) details.push(`Write: ${write.join(", ")}`);
-    if (Array.isArray(fileSystem.entries) && fileSystem.entries.length) {
-      details.push(`Additional filesystem entries: ${fileSystem.entries.length}`);
-    }
-  }
-  return limitDetail(details.filter(Boolean).map(String).join("\n") || "Agent requested additional permissions");
 }
 
 function normalizeUserInputQuestion(value: unknown): UserInputQuestion | null {
@@ -2350,43 +2645,6 @@ function validateAttachments(attachments: ComposerAttachment[]): ComposerAttachm
 }
 
 
-function isLoopbackHost(host: string): boolean {
-  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
-  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1";
-}
-
-export function resolveAdvertisedSyncHost(
-  bindHost: string,
-  networkInterfaces: ReturnType<typeof os.networkInterfaces> = os.networkInterfaces(),
-): string {
-  const normalized = bindHost.trim().toLowerCase().replace(/^\[|\]$/g, "");
-  if (normalized !== "0.0.0.0" && normalized !== "::") return bindHost;
-  const candidates = Object.entries(networkInterfaces).flatMap(([name, addresses]) =>
-    (addresses || []).flatMap((address) =>
-      address.family === "IPv4" && !address.internal
-        ? [{ name, address: address.address }]
-        : []));
-  candidates.sort((left, right) => networkAddressScore(left) - networkAddressScore(right));
-  return candidates[0]?.address || "127.0.0.1";
-}
-
-function networkAddressScore(candidate: { name: string; address: string }): number {
-  const name = candidate.name.toLowerCase();
-  const virtualPenalty = /virtual|vmware|vethernet|wsl|docker|hyper-v|loopback/.test(name) ? 20 : 0;
-  const address = candidate.address;
-  if (address.startsWith("192.168.")) return virtualPenalty;
-  if (address.startsWith("10.")) return 2 + virtualPenalty;
-  const secondOctet = Number(address.split(".")[1]);
-  if (address.startsWith("172.") && secondOctet >= 16 && secondOctet <= 31) {
-    return 4 + virtualPenalty;
-  }
-  if (address.startsWith("169.254.")) return 40 + virtualPenalty;
-  return 10 + virtualPenalty;
-}
-
-function formatNetworkHost(host: string): string {
-  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-}
 
 function comparablePath(value: string): string {
   const resolved = path.resolve(value);
@@ -2401,31 +2659,6 @@ function mapProjectDirectoryError(error: unknown): ControlCommandError {
 
 function isActiveThreadStatus(status: ThreadStatus): boolean {
   return status === "running" || status === "waiting_for_approval" || status === "waiting_for_input";
-}
-
-export function resolveSyncTlsConfiguration(
-  host: string,
-  environment: NodeJS.ProcessEnv = process.env,
-  readFile: (filePath: string) => Buffer = (filePath) => fs.readFileSync(filePath),
-  allowInsecureLan = false,
-): HttpsServerOptions | undefined {
-  const certificatePath = environment.RHZYCODE_SYNC_TLS_CERT?.trim();
-  const keyPath = environment.RHZYCODE_SYNC_TLS_KEY?.trim();
-  const caPath = environment.RHZYCODE_SYNC_TLS_CA?.trim();
-  if (Boolean(certificatePath) !== Boolean(keyPath)) {
-    throw new Error("RHZYCODE_SYNC_TLS_CERT and RHZYCODE_SYNC_TLS_KEY must be configured together.");
-  }
-  if (!certificatePath || !keyPath) {
-    if (!isLoopbackHost(host) && !allowInsecureLan) {
-      throw new Error("Non-loopback control requires HTTPS/WSS certificate and key files.");
-    }
-    return undefined;
-  }
-  return {
-    cert: readFile(path.resolve(certificatePath)),
-    key: readFile(path.resolve(keyPath)),
-    ...(caPath ? { ca: readFile(path.resolve(caPath)) } : {}),
-  };
 }
 
 function terminalCommand(): string[] {

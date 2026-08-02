@@ -24,6 +24,19 @@ interface AppServerStartOptions {
   configOverrides?: Record<string, string | boolean | number>;
 }
 
+export function appServerInitializeParams() {
+  return {
+    clientInfo: {
+      name: "rhzycode_desktop",
+      title: "RHZYCODE Desktop",
+      version: "0.1.0",
+    },
+    capabilities: {
+      experimentalApi: true,
+    },
+  } as const;
+}
+
 export class AppServerClient extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null;
   private startPromise: Promise<void> | null = null;
@@ -75,13 +88,7 @@ export class AppServerClient extends EventEmitter {
     });
 
     try {
-      await this.request("initialize", {
-        clientInfo: {
-          name: "rhzycode_desktop",
-          title: "RHZYCODE Desktop",
-          version: "0.1.0",
-        },
-      });
+      await this.request("initialize", appServerInitializeParams());
       this.notify("initialized", {});
       this.setState("connected");
     } catch (error) {

@@ -189,13 +189,6 @@ export function validateClipboardText(value: unknown): string {
   return requireString(value, "clipboard text", 4_096, true);
 }
 
-export function validateSyncPort(value: unknown): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 65_535) {
-    invalid("sync port", "must be an integer between 1 and 65535");
-  }
-  return value;
-}
-
 export function validateApprovalResolution(id: unknown, decision: unknown): {
   id: string;
   decision: ApprovalDecision;

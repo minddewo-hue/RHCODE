@@ -1,4 +1,4 @@
-import type { ApprovalRequest, ThreadSummary, TimelineItem } from "@rhzycode/protocol";
+import type { ApprovalRequest, ConversationMessage, ThreadSummary, TimelineItem } from "@rhzycode/protocol";
 import type { ApprovalPolicy, CredentialStatus, ModelOption, ReasoningEffort, SandboxMode, UpdateStatus } from "../../shared/desktop-api";
 
 export interface ActivityEntry {
@@ -6,6 +6,16 @@ export interface ActivityEntry {
   label: string;
   detail: string;
   state: "running" | "done" | "error";
+}
+
+export interface ChatMessage extends ConversationMessage {
+  streaming?: boolean;
+}
+
+export interface ActivityDelta {
+  label: string;
+  delta: string;
+  state: ActivityEntry["state"];
 }
 
 export interface ModelGroup {
@@ -26,12 +36,93 @@ const modelNameCollator = new Intl.Collator(["zh-CN", "en"], {
   sensitivity: "base",
 });
 
+export function mergeStreamingMessageDeltas(
+  messages: ChatMessage[],
+  deltas: ReadonlyMap<string, string>,
+): ChatMessage[] {
+  if (deltas.size === 0) return messages;
+  const remaining = new Map(deltas);
+  let changed = false;
+  const next = messages.map((message) => {
+    const delta = remaining.get(message.id);
+    if (!delta) return message;
+    remaining.delete(message.id);
+    changed = true;
+    return { ...message, content: message.content + delta, streaming: true };
+  });
+  for (const [id, delta] of remaining) {
+    if (!delta) continue;
+    changed = true;
+    next.push({ id, role: "assistant", content: delta, streaming: true });
+  }
+  return changed ? next : messages;
+}
+
+export function completeAssistantMessage(
+  messages: ChatMessage[],
+  id: string,
+  content: string,
+): ChatMessage[] {
+  const existingIndex = messages.findIndex((message) => message.id === id);
+  if (existingIndex === -1) {
+    return content ? [...messages, { id, role: "assistant", content }] : messages;
+  }
+
+  const existing = messages[existingIndex]!;
+  const completed = {
+    ...existing,
+    role: "assistant" as const,
+    content: content || existing.content,
+    streaming: false,
+  };
+  return messages.map((message, index) => index === existingIndex ? completed : message);
+}
+
+export function mergeActivityDeltas(
+  activities: ActivityEntry[],
+  deltas: ReadonlyMap<string, ActivityDelta>,
+): ActivityEntry[] {
+  if (deltas.size === 0) return activities;
+  let next = activities;
+  for (const [id, update] of deltas) {
+    if (!update.delta) continue;
+    const existingIndex = next.findIndex((entry) => entry.id === id);
+    const existing = existingIndex === -1 ? null : next[existingIndex]!;
+    const entry: ActivityEntry = {
+      id,
+      label: update.label,
+      detail: `${existing?.detail || ""}${update.delta}`.slice(-12_000),
+      state: update.state,
+    };
+    if (existingIndex === -1) {
+      next = [entry, ...next].slice(0, 30);
+    } else {
+      next = next.map((value, index) => index === existingIndex ? entry : value);
+    }
+  }
+  return next;
+}
+
 export function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).at(-1) || path;
 }
 
 export function isSameProjectPath(left: string, right: string): boolean {
   return comparableProjectPath(left) === comparableProjectPath(right);
+}
+
+export function reconcileProjectRegistry(
+  previousProjects: string[],
+  nextProjects: string[],
+  forgottenProjects: string[],
+): { projects: string[]; forgottenProjects: string[]; removedProjects: string[] } {
+  const projects = uniqueProjectPaths(nextProjects).slice(0, 50);
+  const removedProjects = uniqueProjectPaths(previousProjects)
+    .filter((path) => !projects.some((project) => isSameProjectPath(project, path)));
+  const stillForgotten = forgottenProjects.filter((path) =>
+    !projects.some((project) => isSameProjectPath(project, path)));
+  const nextForgotten = uniqueProjectPaths([...stillForgotten, ...removedProjects]).slice(-50);
+  return { projects, forgottenProjects: nextForgotten, removedProjects };
 }
 
 export function groupThreadsByProject(
@@ -59,9 +150,11 @@ export function groupThreadsByProject(
 
   const term = searchTerm.trim().toLocaleLowerCase();
   return [...paths.entries()].flatMap(([key, path]) => {
+    // Search project name/path and task titles only. Model ids are excluded because
+    // substrings like "test" falsely match names such as "grok-latest".
     const projectMatches = !term || `${basename(path)} ${path}`.toLocaleLowerCase().includes(term);
     const projectThreads = (threadsByProject.get(key) || [])
-      .filter((thread) => projectMatches || `${thread.title} ${thread.model}`.toLocaleLowerCase().includes(term));
+      .filter((thread) => projectMatches || thread.title.toLocaleLowerCase().includes(term));
     if (term && !projectMatches && projectThreads.length === 0) return [];
     return [{ key, path, name: basename(path), threads: projectThreads }];
   });
@@ -70,6 +163,15 @@ export function groupThreadsByProject(
 function comparableProjectPath(path: string): string {
   const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
   return /^[a-z]:\//i.test(normalized) ? normalized.toLocaleLowerCase() : normalized;
+}
+
+function uniqueProjectPaths(paths: string[]): string[] {
+  const unique = new Map<string, string>();
+  for (const path of paths) {
+    const key = comparableProjectPath(path);
+    if (key && !unique.has(key)) unique.set(key, path);
+  }
+  return [...unique.values()];
 }
 
 export function credentialSourceLabel(source: CredentialStatus["providers"][number]["source"]): string {
@@ -165,15 +267,10 @@ export function storedSelectedModel(): string {
 const reasoningEffortValues: ReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 export function modelReasoningEfforts(model: ModelOption | undefined): ReasoningEffort[] {
-  if (model?.supportedReasoningEfforts) {
-    const declared = model.supportedReasoningEfforts
-      .map((option) => option.reasoningEffort)
-      .filter((value): value is ReasoningEffort => reasoningEffortValues.includes(value as ReasoningEffort));
-    return [...new Set(declared)];
-  }
-  return reasoningEffortValues.includes(model?.defaultReasoningEffort as ReasoningEffort)
-    ? [model?.defaultReasoningEffort as ReasoningEffort]
-    : ["high"];
+  const declared = (model?.supportedReasoningEfforts || [])
+    .map((option) => option.reasoningEffort)
+    .filter((value): value is ReasoningEffort => reasoningEffortValues.includes(value as ReasoningEffort));
+  return [...new Set(declared)];
 }
 
 export function groupModelsBySource(
@@ -333,8 +430,45 @@ export function storedForgottenProjects(): string[] {
   }
 }
 
+export function storedCollapsedProjectPaths(): string[] {
+  try {
+    return normalizeProjectPaths(JSON.parse(localStorage.getItem("rhzycode.collapsedProjects") || "[]"));
+  } catch {
+    return [];
+  }
+}
+
+export function storeCollapsedProjectPaths(paths: Iterable<string>): void {
+  localStorage.setItem("rhzycode.collapsedProjects", JSON.stringify(normalizeProjectPaths([...paths])));
+}
+
+function normalizeProjectPaths(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const paths: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !entry.trim()) continue;
+    if (!paths.some((path) => isSameProjectPath(path, entry))) paths.push(entry);
+  }
+  return paths.slice(0, 50);
+}
+
 export function formatFileSize(size: number): string {
   if (size < 1_024) return `${size} B`;
   if (size < 1_048_576) return `${Math.round(size / 1_024)} KB`;
   return `${(size / 1_048_576).toFixed(1)} MB`;
+}
+
+export function fitImagePreviewSize(
+  naturalWidth: number,
+  naturalHeight: number,
+  maxDimension = 420,
+): { width: number; height: number } | null {
+  if (!Number.isFinite(naturalWidth) || !Number.isFinite(naturalHeight)
+    || !Number.isFinite(maxDimension)
+    || naturalWidth <= 0 || naturalHeight <= 0 || maxDimension <= 0) return null;
+  const scale = Math.min(1, maxDimension / naturalWidth, maxDimension / naturalHeight);
+  return {
+    width: Math.max(1, Math.round(naturalWidth * scale)),
+    height: Math.max(1, Math.round(naturalHeight * scale)),
+  };
 }

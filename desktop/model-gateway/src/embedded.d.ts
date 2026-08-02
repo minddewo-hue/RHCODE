@@ -25,6 +25,18 @@ export interface EmbeddedGatewayModel {
   runtimeInstructions: string | null;
 }
 
+export interface EmbeddedGatewayLogEvent {
+  time: string;
+  level: string;
+  event?: string;
+  request_id?: string;
+  turn_id?: string | null;
+  status?: number;
+  code?: string;
+  message?: string;
+  [key: string]: unknown;
+}
+
 export interface EmbeddedGatewayHandle {
   host: string;
   port: number;
@@ -35,6 +47,8 @@ export interface EmbeddedGatewayHandle {
   providers: EmbeddedGatewayProvider[];
   models: EmbeddedGatewayModel[];
   probeProviders(options?: { timeoutMs?: number }): Promise<EmbeddedGatewayProvider[]>;
+  interruptTurn(turnId: string): number;
+  setThreadModel(threadId: string, modelId: string): boolean;
   stop(): Promise<void>;
 }
 
@@ -46,4 +60,6 @@ export function startEmbeddedGateway(options: {
   configPath?: string;
   contextConfigPath?: string;
   discoveryTimeoutMs?: number;
+  fetchImpl?: typeof fetch;
+  onLog?: (event: EmbeddedGatewayLogEvent) => void;
 }): Promise<EmbeddedGatewayHandle>;

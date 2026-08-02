@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compareVersions, fetchMobileUpdate } from "../src/platform/update/mobile-update";
+import { compareVersions, fetchMobileUpdate, recoverMobileUpdateAfterInstaller } from "../src/platform/update/mobile-update";
 
 const validManifest = {
   schemaVersion: 2,
@@ -8,10 +8,10 @@ const validManifest = {
     android: {
       version: "0.2.0",
       versionCode: 2,
-      downloadUrl: "https://minio.gshbzw.com/wxfile/rhzycode/android/RHZYCODE-Android-0.2.0.apk",
+      downloadUrl: "http://218.201.210.211:8000/updates/android/RHZYCODE-Android-0.2.0.apk",
       bytes: 1234,
       sha256: "a".repeat(64),
-      releaseNotes: "MinIO release",
+      releaseNotes: "Transfer server release",
     },
   },
 };
@@ -22,14 +22,14 @@ test("compares stable semantic versions", () => {
   assert.equal(compareVersions("1.0.0", "1.0.1"), -1);
 });
 
-test("detects an available Android APK from the MinIO update manifest", async () => {
+test("detects an available Android APK from the transfer server manifest", async () => {
   const status = await fetchMobileUpdate("0.1.0", {
     platform: "android",
     fetchImpl: async () => new Response(JSON.stringify(validManifest), { status: 200 }),
   });
   assert.equal(status.state, "available");
   assert.equal(status.latest.versionCode, 2);
-  assert.match(status.latest.downloadUrl, /minio\.gshbzw\.com/);
+  assert.match(status.latest.downloadUrl, /218\.201\.210\.211:8000/);
 });
 
 test("reports the installed Android version as current", async () => {
@@ -47,6 +47,15 @@ test("uses Android versionCode when the visible version is unchanged", async () 
     fetchImpl: async () => new Response(JSON.stringify(validManifest), { status: 200 }),
   });
   assert.equal(status.state, "available");
+});
+
+test("makes a downloaded Android update retryable after returning from the installer", () => {
+  const latest = {
+    platform: "android" as const,
+    ...validManifest.platforms.android,
+  };
+  const recovered = recoverMobileUpdateAfterInstaller({ state: "installing", latest, error: null });
+  assert.deepEqual(recovered, { state: "ready_to_install", latest, error: null });
 });
 
 test("rejects malformed Android update metadata", async () => {

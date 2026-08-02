@@ -1,7 +1,7 @@
 import {
   Activity,
   Archive,
-  ArchiveRestore,
+  ArrowUpDown,
   Bot,
   Brain,
   Check,
@@ -13,11 +13,11 @@ import {
   File,
   FolderOpen,
   GitBranch,
+  House,
   Image as ImageIcon,
   KeyRound,
-  Network,
+  Moon,
   MoreHorizontal,
-  PanelRight,
   Paperclip,
   Pencil,
   Play,
@@ -28,20 +28,20 @@ import {
   Send,
   Search,
   Save,
-  Server,
   ShieldCheck,
   Smartphone,
+  Sun,
   Settings,
   Square,
-  SquareCode,
+  TerminalSquare,
   Trash2,
   Upload,
   X,
 } from "lucide-react";
+import { codexComposerCommandPrompt, parseCodexComposerCommand, type ParsedCodexComposerCommand } from "@rhzycode/protocol";
 import type {
   AgentEvent,
   ApprovalRequest,
-  ConversationMessage,
   ThreadDetail,
   ThreadSummary,
   UserInputAnswers,
@@ -51,6 +51,7 @@ import type {
   AgentStatus,
   ApprovalPolicy,
   ComposerAttachment,
+  ConversationExportItem,
   CredentialStatus,
   GatewayStatus,
   LlmProviderConfigurationInput,
@@ -63,16 +64,23 @@ import type {
   SkillImportSource,
   SkillsStatus,
   SyncStatus,
+  TerminalStatus,
   UpdateStatus,
 } from "../../shared/desktop-api";
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { turnScopedItemId } from "../../shared/item-identity";
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal as XtermTerminal } from "@xterm/xterm";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import "@xterm/xterm/css/xterm.css";
 import {
   activityFromTimeline,
   activityLabel,
   approvalKindLabel,
   basename,
+  completeAssistantMessage,
   credentialSourceLabel,
   describeItem,
+  fitImagePreviewSize,
   formatFileChanges,
   formatFileSize,
   getErrorMessage,
@@ -81,11 +89,15 @@ import {
   isActiveThreadStatus,
   isComposerRunning,
   isSameProjectPath,
+  mergeActivityDeltas,
+  mergeStreamingMessageDeltas,
   modelReasoningEfforts,
   notificationThreadId,
   providerDisplayName,
   providerCredentialPresentation,
+  reconcileProjectRegistry,
   storedApprovalPolicy,
+  storedCollapsedProjectPaths,
   storedForgottenProjects,
   storedLastProject,
   storedLastThread,
@@ -93,19 +105,46 @@ import {
   storedReasoningEffort,
   storedSandboxMode,
   storedSelectedModel,
+  storeCollapsedProjectPaths,
   storeLastThread,
   summarizePrompt,
   updateStateLabel,
+  type ActivityDelta,
   type ActivityEntry,
+  type ChatMessage,
 } from "./app-utils";
-
-interface ChatMessage extends ConversationMessage {
-  streaming?: boolean;
-}
 
 interface ComposerDraft {
   text: string;
   attachments: ComposerAttachment[];
+}
+
+interface PendingMessageDelta {
+  threadId: string;
+  delta: string;
+}
+
+interface PendingActivityDelta extends ActivityDelta {
+  threadId: string;
+}
+
+interface ThreadViewSnapshot {
+  messages: ChatMessage[];
+  activities: ActivityEntry[];
+  failedPrompt: string | null;
+  lastPrompt: string;
+}
+
+const MAX_CACHED_THREAD_VIEWS = 10;
+
+type AppDialogView = "settings" | "skills" | "transfer" | "export";
+type ThemeMode = "light" | "dark";
+
+interface ExportProjectGroup {
+  key: string;
+  path: string;
+  name: string;
+  conversations: ConversationExportItem[];
 }
 
 const emptyGateway: GatewayStatus = {
@@ -122,7 +161,7 @@ const emptyGateway: GatewayStatus = {
 const emptySync: SyncStatus = {
   state: "stopped",
   host: "127.0.0.1",
-  port: 8790,
+  port: 0,
   url: null,
   error: null,
 };
@@ -134,6 +173,7 @@ const emptyCredentials: CredentialStatus = {
 
 const emptyUpdates: UpdateStatus = {
   enabled: false,
+  currentVersion: null,
   state: "disabled",
   version: null,
   percent: null,
@@ -160,13 +200,19 @@ const emptySkills: SkillsStatus = {
   },
 };
 
+function storedThemeMode(): ThemeMode {
+  const mode = localStorage.getItem("rhzycode.themeMode") === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = mode;
+  document.documentElement.style.colorScheme = mode;
+  return mode;
+}
+
 export function App() {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(storedThemeMode);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>({ state: "connecting", error: null });
   const [gatewayStatus, setGatewayStatus] = useState<GatewayStatus>(emptyGateway);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(emptySync);
   const [credentialStatus, setCredentialStatus] = useState<CredentialStatus>(emptyCredentials);
-  const [credentialDrafts, setCredentialDrafts] = useState<Record<string, string>>({});
-  const [savingCredentialId, setSavingCredentialId] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>(emptyUpdates);
   const [mobileAccessStatus, setMobileAccessStatus] = useState<MobileAccessStatus>(emptyMobileAccess);
   const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatus>(emptyPersistence);
@@ -176,7 +222,7 @@ export function App() {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [threadSearch, setThreadSearch] = useState("");
-  const [collapsedProjectPaths, setCollapsedProjectPaths] = useState<Set<string>>(() => new Set());
+  const [collapsedProjectPaths, setCollapsedProjectPaths] = useState<Set<string>>(() => new Set(storedCollapsedProjectPaths()));
   const [threadActionsId, setThreadActionsId] = useState<string | null>(null);
   const [threadMenuPosition, setThreadMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
@@ -190,6 +236,7 @@ export function App() {
   const [userInputs, setUserInputs] = useState<UserInputRequest[]>([]);
   const [resolvingUserInputId, setResolvingUserInputId] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
+  const [composerFocusRequest, setComposerFocusRequest] = useState(0);
   const [recentProjects, setRecentProjects] = useState<string[]>(() => storedRecentProjects());
   const [forgottenProjectPaths, setForgottenProjectPaths] = useState<string[]>(() => storedForgottenProjects());
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
@@ -201,9 +248,25 @@ export function App() {
   const [submittingTurn, setSubmittingTurn] = useState(false);
   const [activeThreadIds, setActiveThreadIds] = useState<Set<string>>(() => new Set());
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
-  const [rightView, setRightView] = useState<"activity" | "settings" | "skills">("activity");
+  const [primaryView, setPrimaryView] = useState<"workspace" | "terminal">("workspace");
+  const [dialogView, setDialogView] = useState<AppDialogView | null>(null);
+  const [exportItems, setExportItems] = useState<ConversationExportItem[]>([]);
+  const [selectedExportThreadIds, setSelectedExportThreadIds] = useState<Set<string>>(() => new Set());
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importStatus, setImportStatus] = useState<string | null>(null);
   const threadActionsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const conversationRef = useRef<HTMLElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerValueRef = useRef(composer);
+  const attachmentsRef = useRef(attachments);
+  const bootstrapStartedRef = useRef(false);
+  const bootstrapCompleteRef = useRef(false);
+  const bootstrapComposerTouchedRef = useRef(false);
+  const threadSearchRef = useRef<HTMLInputElement | null>(null);
+  const modelSelectRef = useRef<HTMLSelectElement | null>(null);
   const selectedModelRef = useRef(selectedModel);
   const selectedProjectPathRef = useRef(projectPath);
   const selectedThreadIdRef = useRef<string | null>(null);
@@ -213,11 +276,35 @@ export function App() {
   const followConversationRef = useRef(true);
   const lastPrompt = useRef("");
   const composerDraftsRef = useRef(new Map<string, ComposerDraft>());
+  const threadViewCacheRef = useRef(new Map<string, ThreadViewSnapshot>());
+  const pendingThreadDeletionsRef = useRef(new Set<string>());
   const composerDragDepthRef = useRef(0);
+  const streamingFrameRef = useRef<number | null>(null);
+  const pendingMessageDeltasRef = useRef(new Map<string, PendingMessageDelta>());
+  const pendingActivityDeltasRef = useRef(new Map<string, PendingActivityDelta>());
+  const recentProjectsRef = useRef(recentProjects);
+  const forgottenProjectPathsRef = useRef(forgottenProjectPaths);
+
+  composerValueRef.current = composer;
+  attachmentsRef.current = attachments;
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = themeMode;
+    document.documentElement.style.colorScheme = themeMode;
+    localStorage.setItem("rhzycode.themeMode", themeMode);
+  }, [themeMode]);
 
   useEffect(() => {
     selectedModelRef.current = selectedModel;
   }, [selectedModel]);
+
+  useEffect(() => {
+    recentProjectsRef.current = recentProjects;
+  }, [recentProjects]);
+
+  useEffect(() => {
+    forgottenProjectPathsRef.current = forgottenProjectPaths;
+  }, [forgottenProjectPaths]);
 
   useEffect(() => {
     selectedProjectPathRef.current = projectPath;
@@ -230,6 +317,42 @@ export function App() {
   }, [projectPath, threadId]);
 
   useEffect(() => {
+    if (!dialogView) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDialogView(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [dialogView]);
+
+  useLayoutEffect(() => {
+    if (composerFocusRequest === 0 || primaryView !== "workspace" || dialogView) return;
+    composerRef.current?.focus({ preventScroll: true });
+  }, [composerFocusRequest, dialogView, primaryView]);
+
+  useEffect(() => {
+    const focusComposerWhenWindowActivates = () => {
+      if (document.visibilityState !== "visible" || primaryView !== "workspace" || dialogView) return;
+      if (document.activeElement === document.body || document.activeElement === null) {
+        composerRef.current?.focus({ preventScroll: true });
+      }
+    };
+    window.addEventListener("focus", focusComposerWhenWindowActivates);
+    document.addEventListener("visibilitychange", focusComposerWhenWindowActivates);
+    return () => {
+      window.removeEventListener("focus", focusComposerWhenWindowActivates);
+      document.removeEventListener("visibilitychange", focusComposerWhenWindowActivates);
+    };
+  }, [dialogView, primaryView]);
+
+  useEffect(() => window.rhzycode.onWindowFocus(() => {
+    if (primaryView !== "workspace" || dialogView) return;
+    if (document.activeElement === document.body || document.activeElement === null) {
+      composerRef.current?.focus({ preventScroll: true });
+    }
+  }), [dialogView, primaryView]);
+
+  useEffect(() => {
     const unsubscribers = [
       window.rhzycode.onAgentStatus(setAgentStatus),
       window.rhzycode.onGatewayStatus(setGatewayStatus),
@@ -239,13 +362,25 @@ export function App() {
       window.rhzycode.onUpdateStatus(setUpdateStatus),
       window.rhzycode.onMobileAccessStatus(setMobileAccessStatus),
       window.rhzycode.onProjectsChanged((projects) => {
-        const forgotten = storedForgottenProjects();
-        const paths = projects
-          .map((project) => project.path)
-          .filter((path) => !forgotten.some((entry) => isSameProjectPath(entry, path)))
-          .slice(0, 50);
-        setRecentProjects(paths);
-        localStorage.setItem("rhzycode.recentProjects", JSON.stringify(paths));
+        const synchronized = reconcileProjectRegistry(
+          recentProjectsRef.current,
+          projects.map((project) => project.path),
+          forgottenProjectPathsRef.current,
+        );
+        recentProjectsRef.current = synchronized.projects;
+        forgottenProjectPathsRef.current = synchronized.forgottenProjects;
+        setRecentProjects(synchronized.projects);
+        setForgottenProjectPaths(synchronized.forgottenProjects);
+        localStorage.setItem("rhzycode.recentProjects", JSON.stringify(synchronized.projects));
+        localStorage.setItem("rhzycode.forgottenProjects", JSON.stringify(synchronized.forgottenProjects));
+
+        if (synchronized.removedProjects.some((path) =>
+          isSameProjectPath(path, selectedProjectPathRef.current))) {
+          navigationRevisionRef.current += 1;
+          localStorage.removeItem("rhzycode.lastProject");
+          setWorkspaceProject("");
+          resetConversation();
+        }
       }),
       window.rhzycode.onDiagnostic((message) => {
         if (/error|failed/i.test(message)) {
@@ -254,19 +389,12 @@ export function App() {
       }),
     ];
 
-    void connectAndLoad();
+    if (!bootstrapStartedRef.current) {
+      bootstrapStartedRef.current = true;
+      void connectAndLoad();
+    }
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
   }, []);
-
-  useEffect(() => {
-    if (agentStatus.state !== "connected") return;
-    const timeout = window.setTimeout(() => {
-      void loadThreads().catch((error) => {
-        upsertActivity(`history-error-${Date.now()}`, "History unavailable", getErrorMessage(error), "error");
-      });
-    }, 220);
-    return () => window.clearTimeout(timeout);
-  }, [agentStatus.state]);
 
   useEffect(() => {
     if (!followConversationRef.current) return;
@@ -293,6 +421,8 @@ export function App() {
       window.removeEventListener("drop", preventFileNavigation);
     };
   }, []);
+
+  useEffect(() => () => discardPendingStreamingUpdates(), []);
 
   useEffect(() => {
     if (!threadActionsId) return;
@@ -353,6 +483,23 @@ export function App() {
       threadSearch,
     );
   }, [forgottenProjectPaths, projectPath, recentProjects, threadSearch, threads]);
+  const exportProjectGroups = useMemo<ExportProjectGroup[]>(() => {
+    const paths = new Map<string, string>();
+    const addPath = (value: string) => {
+      const key = value.replace(/\\/g, "/").replace(/\/+$/, "").toLocaleLowerCase();
+      if (!paths.has(key)) paths.set(key, value);
+    };
+    for (const path of recentProjects) addPath(path);
+    for (const item of exportItems) addPath(item.projectPath);
+    return [...paths.entries()].flatMap(([key, path]) => {
+      const conversations = exportItems
+        .filter((item) => isSameProjectPath(item.projectPath, path))
+        .sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
+      return conversations.length > 0
+        ? [{ key, path, name: basename(path), conversations }]
+        : [];
+    });
+  }, [exportItems, recentProjects]);
   const reasoningEfforts = useMemo(() => modelReasoningEfforts(activeModel), [activeModel]);
 
   useEffect(() => {
@@ -364,6 +511,85 @@ export function App() {
   }, [reasoningEffort, reasoningEfforts]);
 
   const running = isComposerRunning(threadId, activeThreadIds, submittingTurn);
+  const isOpeningSelectedThread = threadId !== null && openingThreadId === threadId;
+
+  function applyPendingStreamingUpdates(): void {
+    const selectedThreadId = selectedThreadIdRef.current;
+    const messageDeltas = new Map<string, string>();
+    const activityDeltas = new Map<string, ActivityDelta>();
+    for (const [id, update] of pendingMessageDeltasRef.current) {
+      if (update.threadId === selectedThreadId) messageDeltas.set(id, update.delta);
+    }
+    for (const [id, update] of pendingActivityDeltasRef.current) {
+      if (update.threadId === selectedThreadId) {
+        activityDeltas.set(id, {
+          label: update.label,
+          delta: update.delta,
+          state: update.state,
+        });
+      }
+    }
+    pendingMessageDeltasRef.current.clear();
+    pendingActivityDeltasRef.current.clear();
+    if (messageDeltas.size > 0) {
+      setMessages((current) => mergeStreamingMessageDeltas(current, messageDeltas));
+    }
+    if (activityDeltas.size > 0) {
+      setActivities((current) => mergeActivityDeltas(current, activityDeltas));
+    }
+  }
+
+  function scheduleStreamingUpdate(): void {
+    if (streamingFrameRef.current !== null) return;
+    streamingFrameRef.current = window.requestAnimationFrame(() => {
+      streamingFrameRef.current = null;
+      applyPendingStreamingUpdates();
+    });
+  }
+
+  function flushPendingStreamingUpdates(): void {
+    if (streamingFrameRef.current !== null) {
+      window.cancelAnimationFrame(streamingFrameRef.current);
+      streamingFrameRef.current = null;
+    }
+    applyPendingStreamingUpdates();
+  }
+
+  function discardPendingStreamingUpdates(): void {
+    if (streamingFrameRef.current !== null) {
+      window.cancelAnimationFrame(streamingFrameRef.current);
+      streamingFrameRef.current = null;
+    }
+    pendingMessageDeltasRef.current.clear();
+    pendingActivityDeltasRef.current.clear();
+  }
+
+  function appendMessageDelta(threadId: string, messageId: string, delta: string): void {
+    const pending = pendingMessageDeltasRef.current.get(messageId);
+    pendingMessageDeltasRef.current.set(messageId, {
+      threadId,
+      delta: pending?.threadId === threadId ? pending.delta + delta : delta,
+    });
+    scheduleStreamingUpdate();
+  }
+
+  function appendActivityDelta(
+    threadId: string,
+    id: string,
+    label: string,
+    delta: string,
+    state: ActivityEntry["state"],
+  ): void {
+    if (!delta) return;
+    const pending = pendingActivityDeltasRef.current.get(id);
+    pendingActivityDeltasRef.current.set(id, {
+      threadId,
+      label,
+      delta: `${pending?.threadId === threadId ? pending.delta : ""}${delta}`.slice(-12_000),
+      state,
+    });
+    scheduleStreamingUpdate();
+  }
 
   function setWorkspaceProject(path: string): void {
     selectedProjectPathRef.current = path;
@@ -396,11 +622,17 @@ export function App() {
     const project = selectedProjectPathRef.current;
     if (!project) return;
     const key = composerDraftKey(project, selectedThreadIdRef.current);
-    if (!composer.trim() && attachments.length === 0) {
+    const text = composerValueRef.current;
+    const currentAttachments = attachmentsRef.current;
+    if (!text.trim() && currentAttachments.length === 0) {
       composerDraftsRef.current.delete(key);
       return;
     }
-    composerDraftsRef.current.set(key, { text: composer, attachments: [...attachments] });
+    composerDraftsRef.current.set(key, { text, attachments: [...currentAttachments] });
+  }
+
+  function markBootstrapComposerTouched(): void {
+    if (!bootstrapCompleteRef.current) bootstrapComposerTouchedRef.current = true;
   }
 
   function restoreComposerDraft(project: string, id: string): void {
@@ -409,7 +641,32 @@ export function App() {
     setAttachments(draft ? [...draft.attachments] : []);
   }
 
+  function rememberThreadView(id: string, snapshot: ThreadViewSnapshot): void {
+    const cache = threadViewCacheRef.current;
+    cache.delete(id);
+    cache.set(id, snapshot);
+    while (cache.size > MAX_CACHED_THREAD_VIEWS) {
+      const oldestId = cache.keys().next().value;
+      if (typeof oldestId !== "string") break;
+      cache.delete(oldestId);
+    }
+  }
+
+  function cacheCurrentThreadView(): void {
+    const currentThreadId = selectedThreadIdRef.current;
+    if (!currentThreadId || loadedThreadIdRef.current !== currentThreadId) return;
+    rememberThreadView(currentThreadId, {
+      messages,
+      activities,
+      failedPrompt,
+      lastPrompt: lastPrompt.current,
+    });
+  }
+
   function resetConversation(): void {
+    discardPendingStreamingUpdates();
+    openingThreadIdRef.current = null;
+    setOpeningThreadId(null);
     setWorkspaceThread(null);
     loadedThreadIdRef.current = null;
     setMessages([]);
@@ -420,24 +677,46 @@ export function App() {
     lastPrompt.current = "";
   }
 
+  function focusComposer(): void {
+    composerRef.current?.focus({ preventScroll: true });
+    setComposerFocusRequest((current) => current + 1);
+  }
+
+  function leaveRemovedThread(removedThreadId: string): void {
+    if (removedThreadId !== selectedThreadIdRef.current) return;
+    navigationRevisionRef.current += 1;
+    composerDraftsRef.current.delete(composerDraftKey(selectedProjectPathRef.current, removedThreadId));
+    resetConversation();
+    focusComposer();
+  }
+
   function applyThreadDetail(detail: ThreadDetail, availableModels: ModelOption[] = models): void {
+    discardPendingStreamingUpdates();
     const changedThread = selectedThreadIdRef.current !== detail.thread.id
       || !isSameProjectPath(selectedProjectPathRef.current, detail.thread.projectPath);
     if (changedThread) {
       saveComposerDraft();
       restoreComposerDraft(detail.thread.projectPath, detail.thread.id);
     }
+    const nextActivities = detail.timeline.map(activityFromTimeline);
+    const previousPrompt = [...detail.messages].reverse()
+      .find((message) => message.role === "user")?.content || "";
+    const nextFailedPrompt = detail.thread.status === "failed" && previousPrompt ? previousPrompt : null;
+    rememberThreadView(detail.thread.id, {
+      messages: detail.messages,
+      activities: nextActivities,
+      failedPrompt: nextFailedPrompt,
+      lastPrompt: previousPrompt,
+    });
     setWorkspaceProject(detail.thread.projectPath);
     setWorkspaceThread(detail.thread.id);
     loadedThreadIdRef.current = detail.thread.id;
     setMessages(detail.messages);
-    setActivities(detail.timeline.map(activityFromTimeline));
+    setActivities(nextActivities);
     const active = isActiveThreadStatus(detail.thread.status);
     markThreadActive(detail.thread.id, active);
-    const previousPrompt = [...detail.messages].reverse()
-      .find((message) => message.role === "user")?.content || "";
     lastPrompt.current = previousPrompt;
-    setFailedPrompt(detail.thread.status === "failed" && previousPrompt ? previousPrompt : null);
+    setFailedPrompt(nextFailedPrompt);
     if (availableModels.some((entry) => entry.model === detail.thread.model)) {
       setSelectedModel(detail.thread.model);
       localStorage.setItem("rhzycode.selectedModel", detail.thread.model);
@@ -448,6 +727,7 @@ export function App() {
     selectedThreadId: string,
     revision: number,
     availableModels: ModelOption[] = models,
+    skipIfBootstrapComposerTouched = false,
   ): Promise<void> {
     openingThreadIdRef.current = selectedThreadId;
     setOpeningThreadId(selectedThreadId);
@@ -455,6 +735,7 @@ export function App() {
       followConversationRef.current = true;
       const detail = await window.rhzycode.openThread(selectedThreadId);
       if (revision !== navigationRevisionRef.current) return;
+      if (skipIfBootstrapComposerTouched && bootstrapComposerTouchedRef.current) return;
       applyThreadDetail(detail, availableModels);
     } catch (error) {
       if (revision === navigationRevisionRef.current) {
@@ -467,8 +748,17 @@ export function App() {
   }
 
   async function connectAndLoad() {
+    const initialBootstrap = !bootstrapCompleteRef.current;
+    const initialNavigationRevision = navigationRevisionRef.current;
+    const connection = window.rhzycode.connectAgent().then(
+      (status) => {
+        setAgentStatus(status);
+        return { ok: true as const, status };
+      },
+      (error: unknown) => ({ ok: false as const, error }),
+    );
     try {
-      const [gateway, sync, snapshot, credentials, updates, mobileAccess, persistence, projects] = await Promise.all([
+      const initialState = await Promise.all([
         window.rhzycode.getGatewayStatus(),
         window.rhzycode.getSyncStatus(),
         window.rhzycode.getSyncSnapshot(),
@@ -477,7 +767,20 @@ export function App() {
         window.rhzycode.getMobileAccessStatus(),
         window.rhzycode.getPersistenceStatus(),
         window.rhzycode.listProjects(),
-      ]);
+      ]).catch((error) => {
+        upsertActivity(`startup-state-error-${Date.now()}`, "Workspace state unavailable", getErrorMessage(error), "error");
+        return null;
+      });
+      const [gateway, sync, snapshot, credentials, updates, mobileAccess, persistence, projects] = initialState || [
+        emptyGateway,
+        emptySync,
+        { threads: [], approvals: [], userInputs: [] },
+        emptyCredentials,
+        emptyUpdates,
+        emptyMobileAccess,
+        emptyPersistence,
+        [],
+      ];
       setGatewayStatus(gateway);
       setSyncStatus(sync);
       setCredentialStatus(credentials);
@@ -498,27 +801,36 @@ export function App() {
         ...projects.map((project) => project.path).filter((path) => !isForgottenProject(path)),
         ...rememberedStoredProjects.filter((path) => !projects.some((project) => isSameProjectPath(project.path, path))),
       ].slice(0, 50);
+      recentProjectsRef.current = synchronizedProjects;
       setRecentProjects(synchronizedProjects);
       setApprovals(snapshot.approvals);
       setUserInputs(snapshot.userInputs || []);
-      setActiveThreadIds(new Set(snapshot.threads.filter((thread) => isActiveThreadStatus(thread.status)).map((thread) => thread.id)));
-      const status = await window.rhzycode.connectAgent();
-      setAgentStatus(status);
-      if (status.state !== "connected") return;
+      setActiveThreadIds(new Set(
+        snapshot.threads.filter((thread) => isActiveThreadStatus(thread.status)).map((thread) => thread.id),
+      ));
+      const connectionResult = await connection;
+      if (!connectionResult.ok) throw connectionResult.error;
+      const status = connectionResult.status;
       const refreshedProjects = await window.rhzycode.listProjects();
       const connectedProjects = [
         ...refreshedProjects.map((project) => project.path).filter((path) => !isForgottenProject(path)),
         ...rememberedStoredProjects.filter((path) =>
           !refreshedProjects.some((project) => isSameProjectPath(project.path, path))),
       ].slice(0, 50);
+      recentProjectsRef.current = connectedProjects;
       setRecentProjects(connectedProjects);
       const restoredProject = connectedProjects.find((path) => isSameProjectPath(path, selectedProjectPathRef.current))
         ? selectedProjectPathRef.current
         : connectedProjects[0] || "";
-      const revision = ++navigationRevisionRef.current;
-      setWorkspaceProject(restoredProject);
+      const shouldRestoreWorkspace = navigationRevisionRef.current === initialNavigationRevision;
+      const revision = shouldRestoreWorkspace
+        ? ++navigationRevisionRef.current
+        : navigationRevisionRef.current;
+      if (shouldRestoreWorkspace) setWorkspaceProject(restoredProject);
       const [response, availableThreads] = await Promise.all([
-        window.rhzycode.listModels(),
+        status.state === "connected"
+          ? window.rhzycode.listModels().catch(() => ({ data: [] }))
+          : Promise.resolve({ data: [] }),
         window.rhzycode.listThreads(),
       ]);
       const available = response.data || [];
@@ -535,14 +847,24 @@ export function App() {
       setSelectedModel(initialModel);
       if (initialModel) localStorage.setItem("rhzycode.selectedModel", initialModel);
 
+      if (!shouldRestoreWorkspace || revision !== navigationRevisionRef.current) return;
+
       const preferredThreadId = restoredProject ? storedLastThread(restoredProject) : null;
       const projectThreads = availableThreads.filter((thread) => isSameProjectPath(thread.projectPath, restoredProject));
       const preferredThread = projectThreads.find((thread) => thread.id === preferredThreadId)
         || projectThreads[0];
-      if (preferredThread) await loadThreadDetail(preferredThread.id, revision, available);
-      else if (revision === navigationRevisionRef.current) resetConversation();
+      if (preferredThread) {
+        await loadThreadDetail(preferredThread.id, revision, available, initialBootstrap);
+      } else if (
+        revision === navigationRevisionRef.current
+        && !(initialBootstrap && bootstrapComposerTouchedRef.current)
+      ) {
+        resetConversation();
+      }
     } catch (error) {
       setAgentStatus({ state: "error", error: getErrorMessage(error) });
+    } finally {
+      if (initialBootstrap) bootstrapCompleteRef.current = true;
     }
   }
 
@@ -551,14 +873,17 @@ export function App() {
   }
 
   async function chooseProject(): Promise<string | null> {
+    const navigationRevision = navigationRevisionRef.current;
     const path = await window.rhzycode.chooseProject();
     if (!path) return null;
+    if (navigationRevision !== navigationRevisionRef.current) return path;
     await selectProject(path);
     return path;
   }
 
   async function selectProject(path: string): Promise<void> {
     const revision = ++navigationRevisionRef.current;
+    cacheCurrentThreadView();
     saveComposerDraft();
     setWorkspaceProject(path);
     rememberProject(path);
@@ -632,9 +957,11 @@ export function App() {
         localStorage.setItem("rhzycode.recentProjects", JSON.stringify(next));
         return next;
       });
-      setCollapsedProjectPaths((current) => new Set(
-        [...current].filter((entry) => !isSameProjectPath(entry, path)),
-      ));
+      setCollapsedProjectPaths((current) => {
+        const next = new Set([...current].filter((entry) => !isSameProjectPath(entry, path)));
+        storeCollapsedProjectPaths(next);
+        return next;
+      });
 
       if (isSameProjectPath(selectedProjectPathRef.current, path)) {
         localStorage.removeItem("rhzycode.lastProject");
@@ -659,42 +986,82 @@ export function App() {
     }
   }
 
-  async function backupProject(path: string): Promise<void> {
-    closeThreadActions();
-    try {
-      const result = await window.rhzycode.backupProjectConversations(path);
-      if (!result) return;
-      upsertActivity(
-        `conversation-backup-${Date.now()}`,
-        "Conversation backup complete",
-        `${result.conversationCount} conversation${result.conversationCount === 1 ? "" : "s"} saved to ${result.filePath}`,
-        "done",
-      );
-      window.alert(`Conversation backup complete: ${result.conversationCount} saved.`);
-    } catch (error) {
-      const message = getErrorMessage(error);
-      upsertActivity(`conversation-backup-error-${Date.now()}`, "Conversation backup failed", message, "error");
-      window.alert(`Conversation backup failed: ${message}`);
-    }
-  }
-
   async function restoreConversationBackup(): Promise<void> {
     closeThreadActions();
+    setImporting(true);
+    setImportStatus(null);
     try {
       const result = await window.rhzycode.restoreProjectConversations();
       if (!result) return;
       for (const restoredProjectPath of result.projectPaths) rememberProject(restoredProjectPath);
       await loadThreads();
-      if (!selectedProjectPathRef.current && result.projectPaths[0]) {
-        await selectProject(result.projectPaths[0]);
-      }
       const detail = `${result.importedCount} restored, ${result.skippedCount} already present`;
       upsertActivity(`conversation-restore-${Date.now()}`, "Conversation restore complete", detail, "done");
-      window.alert(`Conversation restore complete: ${detail}.`);
+      setImportStatus(detail);
     } catch (error) {
       const message = getErrorMessage(error);
       upsertActivity(`conversation-restore-error-${Date.now()}`, "Conversation restore failed", message, "error");
-      window.alert(`Conversation restore failed: ${message}`);
+      setImportStatus(message);
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function openExportDialog(): Promise<void> {
+    closeThreadActions();
+    setDialogView("export");
+    setExportItems([]);
+    setSelectedExportThreadIds(new Set());
+    setExportStatus(null);
+    setExportLoading(true);
+    try {
+      setExportItems(await window.rhzycode.listExportConversations());
+    } catch (error) {
+      setExportStatus(getErrorMessage(error));
+    } finally {
+      setExportLoading(false);
+    }
+  }
+
+  function toggleExportProject(group: ExportProjectGroup): void {
+    setSelectedExportThreadIds((current) => {
+      const next = new Set(current);
+      const everySelected = group.conversations.every((conversation) => next.has(conversation.threadId));
+      for (const conversation of group.conversations) {
+        if (everySelected) next.delete(conversation.threadId);
+        else next.add(conversation.threadId);
+      }
+      return next;
+    });
+    setExportStatus(null);
+  }
+
+  function toggleExportConversation(threadId: string): void {
+    setSelectedExportThreadIds((current) => {
+      const next = new Set(current);
+      if (next.has(threadId)) next.delete(threadId);
+      else next.add(threadId);
+      return next;
+    });
+    setExportStatus(null);
+  }
+
+  async function exportSelectedConversations(): Promise<void> {
+    if (selectedExportThreadIds.size === 0) return;
+    setExporting(true);
+    setExportStatus(null);
+    try {
+      const result = await window.rhzycode.exportConversations([...selectedExportThreadIds]);
+      if (!result) return;
+      const detail = `${result.conversationCount} conversation${result.conversationCount === 1 ? "" : "s"} exported`;
+      upsertActivity(`conversation-export-${Date.now()}`, "Conversation export complete", `${detail} to ${result.filePath}`, "done");
+      setExportStatus(detail);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      upsertActivity(`conversation-export-error-${Date.now()}`, "Conversation export failed", message, "error");
+      setExportStatus(message);
+    } finally {
+      setExporting(false);
     }
   }
 
@@ -702,8 +1069,10 @@ export function App() {
     closeThreadActions();
     setCollapsedProjectPaths((current) => {
       const next = new Set(current);
-      if (next.has(path)) next.delete(path);
+      const storedPath = [...next].find((entry) => isSameProjectPath(entry, path));
+      if (storedPath) next.delete(storedPath);
       else next.add(path);
+      storeCollapsedProjectPaths(next);
       return next;
     });
   }
@@ -711,10 +1080,23 @@ export function App() {
   function startNewTask() {
     navigationRevisionRef.current += 1;
     closeThreadActions();
-    setOpeningThreadId(null);
+    cacheCurrentThreadView();
     saveComposerDraft();
     composerDraftsRef.current.delete(composerDraftKey(selectedProjectPathRef.current, null));
     resetConversation();
+    focusComposer();
+  }
+
+  function startNewTaskInProject(path: string) {
+    navigationRevisionRef.current += 1;
+    closeThreadActions();
+    cacheCurrentThreadView();
+    saveComposerDraft();
+    setWorkspaceProject(path);
+    rememberProject(path);
+    composerDraftsRef.current.delete(composerDraftKey(path, null));
+    resetConversation();
+    focusComposer();
   }
 
   function changeSelectedModel(nextModel: string) {
@@ -742,6 +1124,7 @@ export function App() {
   }
 
   function appendAttachments(selected: ComposerAttachment[]) {
+    if (selected.length > 0) markBootstrapComposerTouched();
     setAttachments((current) => {
       const combined = [...current];
       for (const attachment of selected) {
@@ -849,19 +1232,30 @@ export function App() {
     if (thread && isActiveThreadStatus(thread.status)) {
       closeThreadActions();
       window.alert("Stop the running task before deleting it.");
+      focusComposer();
       return;
     }
-    if (!window.confirm(`Permanently delete "${thread?.title || "this thread"}" and its data from this computer?\n\nThis cannot be undone.`)) return;
+    const confirmed = window.confirm(`Permanently delete "${thread?.title || "this thread"}" and its data from this computer?\n\nThis cannot be undone.`);
     closeThreadActions();
+    focusComposer();
+    if (!confirmed) return;
+    const deletingSelectedThread = selectedThreadId === selectedThreadIdRef.current;
+    pendingThreadDeletionsRef.current.add(selectedThreadId);
+    leaveRemovedThread(selectedThreadId);
+    if (!deletingSelectedThread) focusComposer();
     try {
       await window.rhzycode.deleteThread(selectedThreadId);
+      threadViewCacheRef.current.delete(selectedThreadId);
       markThreadActive(selectedThreadId, false);
       setThreads((current) => current.filter((entry) => entry.id !== selectedThreadId));
-      if (selectedThreadId === threadId) startNewTask();
+      leaveRemovedThread(selectedThreadId);
     } catch (error) {
       const message = getErrorMessage(error);
       upsertActivity(`delete-error-${Date.now()}`, "Delete failed", message, "error");
       window.alert(`Delete failed: ${message}`);
+    } finally {
+      pendingThreadDeletionsRef.current.delete(selectedThreadId);
+      if (pendingThreadDeletionsRef.current.size === 0) focusComposer();
     }
   }
 
@@ -873,8 +1267,10 @@ export function App() {
       return;
     }
     closeThreadActions();
+    if (selectedThreadId === selectedThreadIdRef.current) startNewTask();
     try {
       await window.rhzycode.archiveThread(selectedThreadId);
+      threadViewCacheRef.current.delete(selectedThreadId);
       setThreads((current) => current.filter((entry) => entry.id !== selectedThreadId));
       if (selectedThreadId === selectedThreadIdRef.current) startNewTask();
     } catch (error) {
@@ -918,21 +1314,131 @@ export function App() {
       && (loadedThreadIdRef.current === selectedThreadId || openingThreadIdRef.current === selectedThreadId)
     ) return;
     const revision = ++navigationRevisionRef.current;
+    const selectedThread = threads.find((thread) => thread.id === selectedThreadId);
+    const targetProjectPath = selectedThread?.projectPath || selectedProjectPathRef.current;
     if (selectedThreadIdRef.current !== selectedThreadId) {
+      cacheCurrentThreadView();
       saveComposerDraft();
-      restoreComposerDraft(selectedProjectPathRef.current, selectedThreadId);
+      restoreComposerDraft(targetProjectPath, selectedThreadId);
     }
+    if (targetProjectPath) setWorkspaceProject(targetProjectPath);
     setWorkspaceThread(selectedThreadId);
-    setMessages([]);
-    setActivities([]);
-    setFailedPrompt(null);
+    focusComposer();
+    const cached = threadViewCacheRef.current.get(selectedThreadId);
+    if (cached) {
+      rememberThreadView(selectedThreadId, cached);
+      loadedThreadIdRef.current = selectedThreadId;
+      setMessages(cached.messages);
+      setActivities(cached.activities);
+      setFailedPrompt(cached.failedPrompt);
+      lastPrompt.current = cached.lastPrompt;
+    } else {
+      loadedThreadIdRef.current = null;
+      setMessages([]);
+      setActivities([]);
+      setFailedPrompt(null);
+      lastPrompt.current = "";
+    }
     await loadThreadDetail(selectedThreadId, revision);
+  }
+
+  async function executeComposerCommand(command: ParsedCodexComposerCommand): Promise<string | null> {
+    const prompt = codexComposerCommandPrompt(command);
+    if (prompt) return prompt;
+    if (!command.known) {
+      window.alert(`Unknown Codex command: /${command.name}`);
+      return null;
+    }
+    if (attachments.length) {
+      window.alert("Remove attachments before running a Codex command.");
+      return null;
+    }
+
+    if (command.name === "new" || command.name === "clear") {
+      startNewTask();
+      return null;
+    }
+    if (command.name === "resume") {
+      setComposer("");
+      const target = command.args
+        ? threads.find((thread) => thread.id === command.args)
+          || threads.find((thread) => thread.title.toLocaleLowerCase() === command.args.toLocaleLowerCase())
+        : null;
+      if (target) await openThread(target.id);
+      else {
+        setThreadSearch(command.args);
+        window.requestAnimationFrame(() => threadSearchRef.current?.focus());
+      }
+      return null;
+    }
+    if (command.name === "model") {
+      setComposer("");
+      if (command.args) {
+        const target = models.find((model) => model.model === command.args)
+          || models.find((model) => model.displayName.toLocaleLowerCase().includes(command.args.toLocaleLowerCase()));
+        if (target) changeSelectedModel(target.model);
+        else window.alert(`Model not found: ${command.args}`);
+      } else {
+        window.requestAnimationFrame(() => {
+          modelSelectRef.current?.focus();
+          modelSelectRef.current?.showPicker?.();
+        });
+      }
+      return null;
+    }
+    if (command.name === "compact") {
+      if (!threadId) {
+        window.alert("Open a conversation before running /compact.");
+        return null;
+      }
+      setComposer("");
+      setSubmittingTurn(true);
+      try {
+        await window.rhzycode.compactThread(threadId);
+        upsertActivity(`compact-${Date.now()}`, "Conversation compacted", "Context was summarized successfully.", "done");
+      } catch (error) {
+        window.alert(`Conversation compaction failed: ${getErrorMessage(error)}`);
+      } finally {
+        setSubmittingTurn(false);
+      }
+      return null;
+    }
+    if (command.name === "status" || command.name === "permissions") {
+      setComposer("");
+      window.alert([
+        `Model: ${selectedModelRef.current || "default"}`,
+        `Sandbox: ${sandboxMode}`,
+        `Approvals: ${approvalPolicy}`,
+        `Project: ${selectedProjectPathRef.current || "none"}`,
+        `Conversation: ${selectedThreadIdRef.current || "new"}`,
+      ].join("\n"));
+      return null;
+    }
+    if (command.name === "skills") {
+      setComposer("");
+      setDialogView("skills");
+      return null;
+    }
+    if (command.name === "help") {
+      setComposer("");
+      window.alert("Supported commands: /new, /clear, /resume, /model, /compact, /status, /permissions, /review, /diff, /init, /skills");
+      return null;
+    }
+
+    window.alert(`/${command.name} is recognized but is not available in RHZYCODE yet.`);
+    return null;
   }
 
   async function sendTurn(retryText?: string) {
     const selectedAttachments = retryText == null ? attachments : [];
-    const text = (retryText ?? composer).trim() || (selectedAttachments.length ? "Review the attached files." : "");
-    if (!text || running || agentStatus.state !== "connected") return;
+    let text = (retryText ?? composer).trim() || (selectedAttachments.length ? "Review the attached files." : "");
+    const command = retryText == null ? parseCodexComposerCommand(text) : null;
+    if (command) {
+      const commandPrompt = await executeComposerCommand(command);
+      if (!commandPrompt) return;
+      text = commandPrompt;
+    }
+    if (!text || running || isOpeningSelectedThread || agentStatus.state !== "connected") return;
     if (!projectPath) {
       await chooseProject();
       return;
@@ -1029,7 +1535,11 @@ export function App() {
       });
       if (result.files?.length) {
         setMessages((current) => current.map((message) => message.id === optimisticMessageId
-          ? { ...message, files: result.files }
+          ? {
+              ...message,
+              ...(result.files?.some(isImageFile) ? { images: undefined } : {}),
+              files: result.files,
+            }
           : message));
       }
     } catch (error) {
@@ -1068,25 +1578,6 @@ export function App() {
     }
   }
 
-  async function saveProviderCredential(providerId: string, apiKey: string) {
-    setSavingCredentialId(providerId);
-    try {
-      const result = await window.rhzycode.setProviderCredential(providerId, apiKey);
-      setCredentialStatus(result.credentials);
-      setGatewayStatus(result.gateway);
-      setCredentialDrafts((current) => ({ ...current, [providerId]: "" }));
-      if (result.gatewayError) {
-        upsertActivity(`credential-error-${Date.now()}`, "Gateway configuration incomplete", result.gatewayError, "error");
-      } else {
-        await connectAndLoad();
-      }
-    } catch (error) {
-      upsertActivity(`credential-error-${Date.now()}`, "Credential update failed", getErrorMessage(error), "error");
-    } finally {
-      setSavingCredentialId(null);
-    }
-  }
-
   async function configureLlmProvider(input: LlmProviderConfigurationInput) {
     try {
       if (typeof window.rhzycode.configureLlmProvider !== "function") {
@@ -1095,7 +1586,6 @@ export function App() {
       const result = await window.rhzycode.configureLlmProvider(input);
       setCredentialStatus(result.credentials);
       setGatewayStatus(result.gateway);
-      setCredentialDrafts((current) => ({ ...current, [input.providerId]: "" }));
       if (result.gatewayError) {
         upsertActivity(`provider-error-${Date.now()}`, "Provider saved; gateway unavailable", result.gatewayError, "error");
       } else {
@@ -1157,12 +1647,6 @@ export function App() {
     }
   }
 
-  async function updateSyncPort(port: number): Promise<SyncStatus> {
-    const status = await window.rhzycode.setSyncPort(port);
-    setSyncStatus(status);
-    return status;
-  }
-
   async function resolveApproval(id: string, decision: "approved" | "declined") {
     setResolvingApprovalId(id);
     try {
@@ -1201,6 +1685,13 @@ export function App() {
     const method = notification.method || "unknown";
     const params = notification.params || {};
     const eventThreadId = notificationThreadId(params);
+    const eventTurnId = typeof params.turnId === "string"
+      ? params.turnId
+      : typeof (params.turn as Record<string, unknown> | undefined)?.id === "string"
+        ? String((params.turn as Record<string, unknown>).id)
+        : null;
+    const eventItemId = (itemId: unknown, fallback: string) =>
+      turnScopedItemId(eventTurnId, itemId || fallback);
     const isSelectedThread = eventThreadId !== null && eventThreadId === selectedThreadIdRef.current;
 
     if (method === "turn/started" && eventThreadId) {
@@ -1216,16 +1707,13 @@ export function App() {
     if (method === "item/agentMessage/delta") {
       const delta = String(params.delta || "");
       if (!delta) return;
-      const messageId = String(params.itemId || `assistant-${eventThreadId || "current"}`);
-      setMessages((current) => current.some((message) => message.id === messageId)
-        ? current.map((message) => message.id === messageId
-          ? { ...message, content: message.content + delta, streaming: true }
-          : message)
-        : [...current, { id: messageId, role: "assistant", content: delta, streaming: true }]);
+      const messageId = eventItemId(params.itemId, `assistant-${eventThreadId || "current"}`);
+      appendMessageDelta(eventThreadId!, messageId, delta);
       return;
     }
 
     if (method === "turn/completed") {
+      flushPendingStreamingUpdates();
       const turn = (params.turn || {}) as Record<string, unknown>;
       const status = String(turn.status || "completed");
       if (/fail/i.test(status)) {
@@ -1246,8 +1734,9 @@ export function App() {
     }
 
     if (method === "item/commandExecution/outputDelta") {
-      appendActivity(
-        String(params.itemId || "command-output"),
+      appendActivityDelta(
+        eventThreadId!,
+        eventItemId(params.itemId, "command-output"),
         "Command output",
         String(params.delta || ""),
         "running",
@@ -1255,8 +1744,9 @@ export function App() {
     }
 
     if (method === "item/reasoning/summaryTextDelta" || method === "item/reasoning/textDelta") {
-      appendActivity(
-        String(params.itemId || "reasoning"),
+      appendActivityDelta(
+        eventThreadId!,
+        eventItemId(params.itemId, "reasoning"),
         "Analysis",
         String(params.delta || ""),
         "running",
@@ -1265,7 +1755,7 @@ export function App() {
 
     if (method === "item/fileChange/patchUpdated") {
       upsertActivity(
-        String(params.itemId || "file-change"),
+        eventItemId(params.itemId, "file-change"),
         "File change",
         formatFileChanges(params.changes),
         "running",
@@ -1298,8 +1788,15 @@ export function App() {
 
     if (method === "item/started" || method === "item/completed") {
       const item = (params.item || {}) as Record<string, unknown>;
-      const itemId = String(item.id || `${method}-${Date.now()}`);
+      const itemId = eventItemId(item.id, `${method}-${Date.now()}`);
       const itemType = String(item.type || "activity");
+      if (itemType === "agentMessage") {
+        if (method === "item/completed") {
+          flushPendingStreamingUpdates();
+          setMessages((current) => completeAssistantMessage(current, itemId, String(item.text || "")));
+        }
+        return;
+      }
       if (method === "item/completed" && itemType === "imageGeneration") {
         const imagePath = String(item.savedPath || "");
         if (imagePath) {
@@ -1350,7 +1847,15 @@ export function App() {
         setMessages((current) => {
           const exactIndex = current.findIndex((message) => message.id === itemId);
           if (exactIndex !== -1) {
-            return current.map((message, index) => index === exactIndex ? incoming : message);
+            return current.map((message, index) => index === exactIndex
+              ? {
+                  ...incoming,
+                  images: (incoming.files || message.files)?.some(isImageFile)
+                    ? undefined
+                    : incoming.images || message.images,
+                  files: incoming.files || message.files,
+                }
+              : message);
           }
           const reversedIndex = [...current].reverse().findIndex((message) => (
             message.role === "user" && message.content.trim() === incoming.content.trim()
@@ -1358,7 +1863,11 @@ export function App() {
           const optimisticIndex = reversedIndex === -1 ? -1 : current.length - reversedIndex - 1;
           if (optimisticIndex !== -1) {
             return current.map((message, index) => index === optimisticIndex
-              ? { ...message, images: incoming.images }
+              ? {
+                  ...message,
+                  images: message.files?.some(isImageFile) ? undefined : incoming.images,
+                  files: incoming.files || message.files,
+                }
               : message);
           }
           return [...current, incoming];
@@ -1385,16 +1894,16 @@ export function App() {
       });
     }
     if (event.type === "thread.removed") {
+      threadViewCacheRef.current.delete(event.threadId);
       markThreadActive(event.threadId, false);
       setThreads((current) => current.filter((thread) => thread.id !== event.threadId));
-      if (event.threadId === selectedThreadIdRef.current) resetConversation();
+      leaveRemovedThread(event.threadId);
     }
     if (event.type === "approval.requested") {
       setApprovals((current) => [
         event.approval,
         ...current.filter((approval) => approval.id !== event.approval.id),
       ]);
-      setRightView("activity");
       setRightPanelOpen(true);
       upsertActivity(
         `sync-${event.sequence}`,
@@ -1417,7 +1926,6 @@ export function App() {
         event.request,
         ...current.filter((request) => request.id !== event.request.id),
       ]);
-      setRightView("activity");
       setRightPanelOpen(true);
       upsertActivity(
         `sync-${event.sequence}`,
@@ -1438,6 +1946,7 @@ export function App() {
     detail: string,
     state: ActivityEntry["state"],
   ) {
+    flushPendingStreamingUpdates();
     setActivities((current) => {
       const entry = { id, label, detail, state };
       return current.some((value) => value.id === id)
@@ -1446,44 +1955,66 @@ export function App() {
     });
   }
 
-  function appendActivity(
-    id: string,
-    label: string,
-    delta: string,
-    state: ActivityEntry["state"],
-  ) {
-    if (!delta) return;
-    setActivities((current) => {
-      const existing = current.find((entry) => entry.id === id);
-      const detail = `${existing?.detail || ""}${delta}`.slice(-12_000);
-      const entry = { id, label, detail, state };
-      return existing
-        ? current.map((value) => (value.id === id ? entry : value))
-        : [entry, ...current].slice(0, 30);
-    });
-  }
-
   return (
     <div className={`app-shell ${rightPanelOpen ? "with-panel" : ""}`}>
-      <aside className="sidebar">
-        <div className="sidebar-header">
-          <div className="brand-lockup">
-            <span className="product-mark" aria-hidden="true"><SquareCode size={18} /></span>
-            <div><span className="product-name">RHZYCODE</span><span className="product-channel">Desktop workspace</span></div>
-          </div>
+      <nav className="app-rail" aria-label="Primary navigation">
+        <button
+          className={`rail-brand ${primaryView === "workspace" ? "active" : ""}`}
+          title="Workspace"
+          aria-label="Workspace"
+          aria-current={primaryView === "workspace" ? "page" : undefined}
+          onClick={() => { setDialogView(null); setPrimaryView("workspace"); }}
+        >
+          <House size={21} />
+          <span className="rail-label">工作台</span>
+        </button>
+        <div className="rail-actions">
+          <button
+            className={`${rightPanelOpen ? "panel-open" : ""} ${approvals.length + userInputs.length > 0 ? "attention" : ""}`}
+            title={approvals.length + userInputs.length > 0 ? `${approvals.length + userInputs.length} request${approvals.length + userInputs.length === 1 ? "" : "s"} need attention` : "Activity"}
+            aria-label="Activity"
+            aria-pressed={rightPanelOpen}
+            onClick={() => setRightPanelOpen((value) => !value)}
+          >
+            <Activity className={running ? "activity-wave-running" : ""} size={20} />
+            <span className="rail-label">活动</span>
+            {approvals.length + userInputs.length > 0 && <span className="rail-badge">{Math.min(approvals.length + userInputs.length, 99)}</span>}
+          </button>
+          <button
+            className={dialogView === "transfer" || dialogView === "export" ? "active" : ""}
+            title="Import or export conversations"
+            aria-label="Import or export conversations"
+            onClick={() => { setImportStatus(null); setExportStatus(null); setDialogView("transfer"); }}
+          >
+            <ArrowUpDown size={19} />
+            <span className="rail-label">传输</span>
+          </button>
+          <button
+            className={primaryView === "terminal" ? "active" : ""}
+            title="Terminal"
+            aria-label="Terminal"
+            aria-current={primaryView === "terminal" ? "page" : undefined}
+            onClick={() => { setDialogView(null); setPrimaryView("terminal"); }}
+          >
+            <TerminalSquare size={19} />
+            <span className="rail-label">终端</span>
+          </button>
+          <button className={dialogView === "skills" ? "active" : ""} title="Skills" aria-label="Skills" onClick={() => setDialogView("skills")}>
+            <Puzzle size={19} />
+            <span className="rail-label">技能</span>
+          </button>
         </div>
-
+        <div className="rail-footer">
+          <button className={dialogView === "settings" ? "active" : ""} title="Settings" aria-label="Settings" onClick={() => setDialogView("settings")}>
+            <Settings size={19} />
+            <span className="rail-label">设置</span>
+          </button>
+        </div>
+      </nav>
+      <aside className="sidebar">
         <div className="section-heading">
           <span className="section-title">Projects</span>
           <div>
-            <button
-              className="icon-button compact"
-              title="Restore project conversations"
-              aria-label="Restore project conversations"
-              onClick={() => void restoreConversationBackup()}
-            >
-              <ArchiveRestore size={15} />
-            </button>
             <button
               className="icon-button compact"
               title="Open project folder"
@@ -1492,12 +2023,12 @@ export function App() {
             >
               <FolderOpen size={15} />
             </button>
-            <button className="icon-button compact primary" title="New task" aria-label="New task" onClick={startNewTask}><Plus size={15} /></button>
           </div>
         </div>
         <label className="thread-search">
           <Search size={13} />
           <input
+            ref={threadSearchRef}
             value={threadSearch}
             onChange={(event) => setThreadSearch(event.target.value)}
             placeholder="Search projects and tasks"
@@ -1507,7 +2038,7 @@ export function App() {
         </label>
         <div className="project-thread-list">
           {projectGroups.length > 0 ? projectGroups.map((group) => {
-            const collapsed = collapsedProjectPaths.has(group.path) && !threadSearch.trim();
+            const collapsed = [...collapsedProjectPaths].some((path) => isSameProjectPath(path, group.path)) && !threadSearch.trim();
             const contentId = `project-threads-${encodeURIComponent(group.key)}`;
             return (
               <section className={`project-group ${isSameProjectPath(group.path, projectPath) ? "selected" : ""}`} key={group.key}>
@@ -1525,28 +2056,27 @@ export function App() {
                       <strong>{group.name}</strong>
                     </span>
                   </button>
-                  <button
-                    className="project-backup-toggle"
-                    aria-label={`Back up conversations for ${group.name}`}
-                    title={`Back up conversations for ${group.name}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void backupProject(group.path);
-                    }}
-                  >
-                    <Download size={13} />
-                  </button>
-                  <button
-                    className="project-remove-toggle"
-                    aria-label={`Permanently delete project ${group.name}`}
-                    title={`Permanently delete ${group.name} conversations`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void removeProject(group.path);
-                    }}
-                  >
-                    <Trash2 size={13} />
-                  </button>
+                  <div className="project-group-actions">
+                    <button
+                      className="project-action project-remove-toggle"
+                      aria-label={`Permanently delete project ${group.name}`}
+                      title={`Permanently delete ${group.name} conversations`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void removeProject(group.path);
+                      }}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                    <button
+                      className="project-action project-new-task"
+                      aria-label={`New task in project ${group.name}`}
+                      title={`New task in ${group.name}`}
+                      onClick={() => startNewTaskInProject(group.path)}
+                    >
+                      <Plus size={13} />
+                    </button>
+                  </div>
                 </div>
                 {!collapsed && (
                   <div className="project-group-threads" id={contentId}>
@@ -1565,13 +2095,13 @@ export function App() {
                           </button>
                         )}
                         {renamingThreadId !== thread.id && (
-                          <button className="thread-actions-toggle" title={`Thread actions for ${thread.title}`} aria-label={`Thread actions for ${thread.title}`} aria-haspopup="menu" aria-expanded={threadActionsId === thread.id} onClick={(event) => toggleThreadActions(event, thread.id)}><MoreHorizontal size={14} /></button>
+                          <button className="thread-actions-toggle" title={`Thread actions for ${thread.title}`} aria-label={`Thread actions for ${thread.title}`} aria-haspopup="menu" aria-expanded={threadActionsId === thread.id} onMouseDown={(event) => event.preventDefault()} onClick={(event) => toggleThreadActions(event, thread.id)}><MoreHorizontal size={14} /></button>
                         )}
                         {threadActionsId === thread.id && threadMenuPosition && (
                           <div className="thread-actions-menu" role="menu" style={threadMenuPosition}>
                             <button role="menuitem" onClick={() => beginRename(thread)}><Pencil size={13} /> Rename task</button>
                             <button role="menuitem" onClick={() => void archiveSelectedThread(thread.id)}><Archive size={13} /> Archive task</button>
-                            <button role="menuitem" className="danger" onClick={() => void permanentlyDeleteThread(thread.id)}><Trash2 size={13} /> Delete task permanently</button>
+                            <button role="menuitem" className="danger" onMouseDown={(event) => event.preventDefault()} onClick={() => void permanentlyDeleteThread(thread.id)}><Trash2 size={13} /> Delete task permanently</button>
                           </div>
                         )}
                       </div>
@@ -1585,6 +2115,9 @@ export function App() {
 
       </aside>
 
+      {primaryView === "terminal" ? (
+        <TerminalWorkspace cwd={projectPath} onChooseProject={chooseProject} />
+      ) : (
       <main className="workspace">
         <header className="workspace-header">
           <div className="workspace-title">
@@ -1595,7 +2128,7 @@ export function App() {
           <div className="header-actions">
             <label className="model-select" title="Model for the next turn">
               <Bot size={15} />
-              <select value={selectedModel} onChange={(event) => changeSelectedModel(event.target.value)} disabled={!models.length} aria-label="Model for next turn">
+              <select ref={modelSelectRef} value={selectedModel} onChange={(event) => changeSelectedModel(event.target.value)} disabled={!models.length} aria-label="Model for next turn">
                 {!models.length && <option value="">Loading models</option>}
                 {modelGroups.map((group) => (
                   <optgroup key={group.key} label={group.source}>
@@ -1604,9 +2137,6 @@ export function App() {
                 ))}
               </select>
             </label>
-            <button className={`icon-button ${rightPanelOpen ? "selected" : ""}`} title="Side panel" aria-label="Side panel" aria-pressed={rightPanelOpen} onClick={() => setRightPanelOpen((value) => !value)}>
-              <PanelRight size={17} />
-            </button>
           </div>
         </header>
 
@@ -1621,44 +2151,26 @@ export function App() {
               element.scrollHeight - element.scrollTop - element.clientHeight <= 48;
           }}
         >
-          {messages.length === 0 ? (
+          {isOpeningSelectedThread && messages.length > 0 && (
+            <div className="conversation-refresh" role="progressbar" aria-label="Refreshing conversation" />
+          )}
+          {messages.length === 0 && isOpeningSelectedThread ? (
+            <div className="conversation-loading" role="status" aria-label="Loading conversation">
+              <span className="conversation-loading-line wide" />
+              <span className="conversation-loading-line medium" />
+              <span className="conversation-loading-line short" />
+              <span className="conversation-loading-line assistant" />
+            </div>
+          ) : messages.length === 0 ? (
             <div className="empty-thread">
               <div className="empty-icon"><Bot size={28} /></div>
-              <h1>{projectPath ? "Start a new task" : "Select a project"}</h1>
+              <h1>{threadId ? "No messages yet" : projectPath ? "Start a new task" : "Select a project"}</h1>
               <p>{projectPath ? activeModel?.displayName || "Agent ready" : "Connect a local repository to begin"}</p>
             </div>
           ) : (
             <div className="message-list">
               {messages.map((message) => (
-                <article key={message.id} className={`message ${message.role}`}>
-                  <div className="message-body">
-                    {message.streaming && <div className="message-author"><span className="streaming-label">Streaming</span></div>}
-                    <div className="message-content">
-                      {!!message.content && <div>{message.content}</div>}
-                      {!!(message.images?.length || message.files?.some(isGeneratedImageFile)) && (
-                        <div className="message-images">
-                          {message.images?.map((image) => (
-                            <MessageImage key={image.path} image={image} onOpen={setPreviewImage} />
-                          ))}
-                          {message.files?.filter(isGeneratedImageFile).map((file) => (
-                            <MessageImage
-                              key={file.id}
-                              image={{ path: file.path!, name: file.name, generated: true }}
-                              onOpen={setPreviewImage}
-                            />
-                          ))}
-                        </div>
-                      )}
-                      {!!message.files?.some((file) => !isGeneratedImageFile(file)) && (
-                        <div className="message-files">
-                          {message.files.filter((file) => !isGeneratedImageFile(file)).map((file) => (
-                            <MessageFile key={file.id} file={file} />
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </article>
+                <ChatMessageRow key={message.id} message={message} onOpenImage={setPreviewImage} />
               ))}
             </div>
           )}
@@ -1679,17 +2191,31 @@ export function App() {
                   <div className={`attachment-chip ${attachment.kind}`} key={attachment.path} title={attachment.path}>
                     {attachment.kind === "image" ? <ImageIcon size={14} /> : <File size={14} />}
                     <span><strong>{attachment.name}</strong><small>{formatFileSize(attachment.size)}</small></span>
-                    <button title={`Remove ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((entry) => entry.path !== attachment.path))}><X size={12} /></button>
+                    <button title={`Remove ${attachment.name}`} onClick={() => {
+                      markBootstrapComposerTouched();
+                      setAttachments((current) => current.filter((entry) => entry.path !== attachment.path));
+                    }}><X size={12} /></button>
                   </div>
                 ))}
               </div>
             )}
             <textarea
+              ref={composerRef}
+              autoFocus
               value={composer}
-              onChange={(event) => setComposer(event.target.value)}
+              onChange={(event) => {
+                markBootstrapComposerTouched();
+                setComposer(event.target.value);
+              }}
               onPaste={(event) => void pasteComposerImages(event)}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
+                if (
+                  event.key === "Enter"
+                  && !event.shiftKey
+                  && !running
+                  && !isOpeningSelectedThread
+                  && agentStatus.state === "connected"
+                ) {
                   event.preventDefault();
                   void sendTurn();
                 }
@@ -1762,52 +2288,127 @@ export function App() {
               {running ? (
                 <button className="send-button stop" title="Stop" onClick={interruptTurn}><CircleStop size={17} /></button>
               ) : (
-                <button className="send-button" title="Send" onClick={() => void sendTurn()} disabled={(!composer.trim() && attachments.length === 0) || agentStatus.state !== "connected"}><Send size={17} /></button>
+                <button
+                  className="send-button"
+                  title={agentStatus.state === "connecting"
+                    ? "Starting agent"
+                    : agentStatus.state === "error"
+                      ? "Agent unavailable"
+                      : isOpeningSelectedThread ? "Opening task" : "Send"}
+                  onClick={() => void sendTurn()}
+                  disabled={(!composer.trim() && attachments.length === 0) || isOpeningSelectedThread || agentStatus.state !== "connected"}
+                >{agentStatus.state === "connecting"
+                    ? <RefreshCw className="spinning" size={17} />
+                    : <Send size={17} />}</button>
               )}
             </div>
           </div>
         </div>
       </main>
+      )}
 
       {rightPanelOpen && (
         <aside className="activity-panel">
-          <div className="panel-tabs" role="tablist" aria-label="Side panel views">
-            <button role="tab" aria-selected={rightView === "activity"} aria-busy={running} className={rightView === "activity" ? "active" : ""} onClick={() => setRightView("activity")}><Activity className={running ? "activity-wave-running" : ""} size={15} /> Activity</button>
-            <button role="tab" aria-selected={rightView === "settings"} className={rightView === "settings" ? "active" : ""} onClick={() => setRightView("settings")}><Settings size={15} /> Settings</button>
-            <button role="tab" aria-selected={rightView === "skills"} className={rightView === "skills" ? "active" : ""} onClick={() => setRightView("skills")}><Puzzle size={15} /> Skills</button>
-            <button className="panel-close" title="Close side panel" aria-label="Close side panel" onClick={() => setRightPanelOpen(false)}><X size={15} /></button>
-          </div>
-          {rightView === "activity" ? (
-            <ActivityView
-              activities={activities}
-              approvals={approvals}
-              resolvingApprovalId={resolvingApprovalId}
-              onResolve={resolveApproval}
-              userInputs={userInputs}
-              resolvingUserInputId={resolvingUserInputId}
-              onResolveUserInput={resolveUserInput}
-            />
-          ) : rightView === "settings" ? (
-            <SettingsView
-              status={credentialStatus}
-              updateStatus={updateStatus}
-              mobileAccessStatus={mobileAccessStatus}
-              persistenceStatus={persistenceStatus}
-              syncStatus={syncStatus}
-              drafts={credentialDrafts}
-              savingProviderId={savingCredentialId}
-              onChange={(providerId, value) => setCredentialDrafts((current) => ({ ...current, [providerId]: value }))}
-              onSave={saveProviderCredential}
-              onConfigure={configureLlmProvider}
-              onRemove={removeLlmProvider}
-              onUpdateAction={runUpdateAction}
-              onRotateAccessKey={rotateMobileAccessKey}
-              onSyncPortChange={updateSyncPort}
-            />
-          ) : (
-            <SkillsView />
-          )}
+          <ActivityView
+            activities={activities}
+            approvals={approvals}
+            resolvingApprovalId={resolvingApprovalId}
+            onResolve={resolveApproval}
+            userInputs={userInputs}
+            resolvingUserInputId={resolvingUserInputId}
+            onResolveUserInput={resolveUserInput}
+          />
         </aside>
+      )}
+      {dialogView === "settings" && (
+        <AppModal title="Settings" icon={<Settings size={18} />} className="settings-modal" onClose={() => setDialogView(null)}>
+          <SettingsView
+            themeMode={themeMode}
+            status={credentialStatus}
+            updateStatus={updateStatus}
+            mobileAccessStatus={mobileAccessStatus}
+            persistenceStatus={persistenceStatus}
+            syncStatus={syncStatus}
+            onConfigure={configureLlmProvider}
+            onRemove={removeLlmProvider}
+            onUpdateAction={runUpdateAction}
+            onRotateAccessKey={rotateMobileAccessKey}
+            onThemeModeChange={setThemeMode}
+          />
+        </AppModal>
+      )}
+      {dialogView === "skills" && (
+        <AppModal title="Skills" icon={<Puzzle size={18} />} className="skills-modal" onClose={() => setDialogView(null)}>
+          <SkillsView />
+        </AppModal>
+      )}
+      {dialogView === "transfer" && (
+        <AppModal title="Import / Export" icon={<ArrowUpDown size={18} />} className="transfer-modal" onClose={() => setDialogView(null)}>
+          <div className="transfer-choices">
+            <button disabled={importing} onClick={() => void restoreConversationBackup()}>
+              <span>{importing ? <RefreshCw className="spinning" size={20} /> : <Upload size={20} />}</span>
+              <strong>Import</strong>
+              <small>Restore conversations from a backup file</small>
+            </button>
+            <button disabled={importing} onClick={() => void openExportDialog()}>
+              <span><Download size={20} /></span>
+              <strong>Export</strong>
+              <small>Select projects and conversations to back up</small>
+            </button>
+          </div>
+          {importStatus && <p className="transfer-status" role="status">{importStatus}</p>}
+        </AppModal>
+      )}
+      {dialogView === "export" && (
+        <AppModal title="Export conversations" icon={<Download size={18} />} className="export-modal" onClose={() => setDialogView(null)}>
+          <div className="export-dialog-body">
+            <div className="export-summary">
+              <span>{exportItems.length} conversations</span>
+              <strong>{selectedExportThreadIds.size} selected</strong>
+            </div>
+            <div className="export-tree" aria-busy={exportLoading}>
+              {exportLoading && <div className="transfer-empty"><RefreshCw className="spinning" size={18} /></div>}
+              {!exportLoading && exportProjectGroups.length === 0 && <div className="transfer-empty">No conversations available</div>}
+              {!exportLoading && exportProjectGroups.map((group) => {
+                const selectedCount = group.conversations.filter((conversation) => selectedExportThreadIds.has(conversation.threadId)).length;
+                return (
+                  <section className="export-project" key={group.key}>
+                    <label className="export-project-row" title={group.path}>
+                      <SelectionCheckbox
+                        checked={selectedCount === group.conversations.length}
+                        indeterminate={selectedCount > 0 && selectedCount < group.conversations.length}
+                        onChange={() => toggleExportProject(group)}
+                        ariaLabel={`Select all conversations in ${group.name}`}
+                      />
+                      <span><strong>{group.name}</strong><small>{group.conversations.length}</small></span>
+                    </label>
+                    <div className="export-conversations">
+                      {group.conversations.map((conversation) => (
+                        <label className="export-conversation-row" key={conversation.threadId}>
+                          <input
+                            type="checkbox"
+                            checked={selectedExportThreadIds.has(conversation.threadId)}
+                            onChange={() => toggleExportConversation(conversation.threadId)}
+                          />
+                          <span title={conversation.title}>{conversation.title}</span>
+                          {conversation.archived && <small>Archived</small>}
+                        </label>
+                      ))}
+                    </div>
+                  </section>
+                );
+              })}
+            </div>
+            {exportStatus && <p className="transfer-status" role="status">{exportStatus}</p>}
+            <div className="modal-actions">
+              <button className="secondary" onClick={() => setDialogView(null)}>Cancel</button>
+              <button className="primary" disabled={exporting || selectedExportThreadIds.size === 0} onClick={() => void exportSelectedConversations()}>
+                {exporting ? <RefreshCw className="spinning" size={15} /> : <Download size={15} />}
+                {selectedExportThreadIds.size > 0 ? `Export ${selectedExportThreadIds.size}` : "Export"}
+              </button>
+            </div>
+          </div>
+        </AppModal>
       )}
       {previewImage && (
         <button className="image-preview" aria-label="Close image preview" onClick={() => setPreviewImage(null)}>
@@ -1819,16 +2420,104 @@ export function App() {
   );
 }
 
+function AppModal({
+  title,
+  icon,
+  className,
+  onClose,
+  children,
+}: {
+  title: string;
+  icon: ReactNode;
+  className?: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const titleId = `app-modal-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  return (
+    <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className={`app-modal ${className || ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId}>
+        <header className="app-modal-header">
+          <div>{icon}<h2 id={titleId}>{title}</h2></div>
+          <button className="icon-button compact" title={`Close ${title}`} aria-label={`Close ${title}`} onClick={onClose}><X size={16} /></button>
+        </header>
+        <div className="app-modal-body">{children}</div>
+      </section>
+    </div>
+  );
+}
+
+function SelectionCheckbox({
+  checked,
+  indeterminate,
+  onChange,
+  ariaLabel,
+}: {
+  checked: boolean;
+  indeterminate: boolean;
+  onChange: () => void;
+  ariaLabel: string;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (inputRef.current) inputRef.current.indeterminate = indeterminate;
+  }, [indeterminate]);
+  return <input ref={inputRef} type="checkbox" checked={checked} aria-label={ariaLabel} onChange={onChange} />;
+}
+
+const ChatMessageRow = memo(function ChatMessageRow({
+  message,
+  onOpenImage,
+}: {
+  message: ChatMessage;
+  onOpenImage: (source: string) => void;
+}) {
+  return (
+    <article className={`message ${message.role}`}>
+      <div className="message-body">
+        {message.streaming && <div className="message-author"><span className="streaming-label">Streaming</span></div>}
+        <div className="message-content">
+          {!!message.content && <div>{message.content}</div>}
+          {!!(message.images?.length || message.files?.some(isImageFile)) && (
+            <div className="message-images">
+              {message.images?.map((image) => (
+                <MessageImage key={image.path} image={image} onOpen={onOpenImage} />
+              ))}
+              {message.files?.filter(isImageFile).map((file) => (
+                <MessageImage
+                  key={file.id}
+                  image={{ path: file.path!, name: file.name, generated: file.source === "generated" }}
+                  onOpen={onOpenImage}
+                />
+              ))}
+            </div>
+          )}
+          {!!message.files?.some((file) => !isImageFile(file)) && (
+            <div className="message-files">
+              {message.files.filter((file) => !isImageFile(file)).map((file) => (
+                <MessageFile key={file.id} file={file} />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </article>
+  );
+});
+
 function MessageImage({
   image,
   onOpen,
 }: {
-  image: NonNullable<ConversationMessage["images"]>[number];
+  image: NonNullable<ChatMessage["images"]>[number];
   onOpen: (source: string) => void;
 }) {
   const [source, setSource] = useState<string | null>(null);
+  const [previewSize, setPreviewSize] = useState<{ width: number; height: number } | null>(null);
   useEffect(() => {
     let active = true;
+    setSource(null);
+    setPreviewSize(null);
     void window.rhzycode.readLocalImage(image.path)
       .then((value) => { if (active) setSource(value); })
       .catch(() => undefined);
@@ -1836,30 +2525,38 @@ function MessageImage({
   }, [image.path]);
   if (!source) return null;
   return (
-    <div className={`message-image-wrap${image.generated ? " generated" : ""}`}>
+    <div
+      className={`message-image-wrap${image.generated ? " generated" : ""}${previewSize ? " ready" : ""}`}
+      style={{
+        width: previewSize?.width ?? 1,
+        aspectRatio: previewSize ? `${previewSize.width} / ${previewSize.height}` : "1 / 1",
+      }}
+    >
       <button
         className="message-image"
+        aria-label={`Open ${image.name}`}
         title={`Open ${image.name}`}
         onClick={() => onOpen(source)}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          void window.rhzycode.showImageContextMenu(image.path, image.name).catch(() => undefined);
+        }}
       >
-        <img src={source} alt={image.name} />
+        <img
+          src={source}
+          alt={image.name}
+          onLoad={(event) => setPreviewSize(fitImagePreviewSize(
+            event.currentTarget.naturalWidth,
+            event.currentTarget.naturalHeight,
+          ))}
+        />
       </button>
-      {image.generated && (
-        <button
-          className="message-image-save"
-          aria-label={`Save ${image.name}`}
-          title={`Save ${image.name}`}
-          onClick={() => void window.rhzycode.saveLocalFile(image.path, image.name)}
-        >
-          <Download size={16} />
-        </button>
-      )}
     </div>
   );
 }
 
 function MessageFile({ file }: {
-  file: NonNullable<ConversationMessage["files"]>[number];
+  file: NonNullable<ChatMessage["files"]>[number];
 }) {
   const open = () => file.path && window.rhzycode.openLocalFile(file.path).catch(() => undefined);
   const reveal = () => file.path && window.rhzycode.revealLocalFile(file.path).catch(() => undefined);
@@ -1887,26 +2584,212 @@ function MessageFile({ file }: {
   );
 }
 
-function isGeneratedImageFile(
-  file: NonNullable<ConversationMessage["files"]>[number],
+function isImageFile(
+  file: NonNullable<ChatMessage["files"]>[number],
 ): boolean {
-  return file.source === "generated" && Boolean(file.path) && file.mimeType?.startsWith("image/") === true;
+  return Boolean(file.path) && file.mimeType?.startsWith("image/") === true;
 }
 
 function userMessageFromNotification(id: string, item: Record<string, unknown>): ChatMessage {
   const contentItems = Array.isArray(item.content) ? item.content : [];
-  const content = contentItems.flatMap((rawItem) => {
+  const content = stripUserAttachmentMarkup(contentItems.flatMap((rawItem) => {
     const entry = (rawItem || {}) as Record<string, unknown>;
-    return entry.type === "text" ? [String(entry.text || "")] : [];
-  }).filter(Boolean).join("\n").split("\n\nAttached files (use these absolute paths):\n", 1)[0] || "";
-  const images = contentItems.flatMap((rawItem) => {
+    return entry.type === "text" || entry.type === "input_text" ? [String(entry.text || "")] : [];
+  }).filter(Boolean).join("\n"));
+  const files = Array.isArray(item.files) ? item.files.flatMap((rawFile) => {
+    const file = (rawFile || {}) as Record<string, unknown>;
+    if (!file.id || !file.name || !file.path) return [];
+    return [{
+      id: String(file.id),
+      name: String(file.name),
+      path: String(file.path),
+      size: Number(file.size || 0),
+      mimeType: file.mimeType ? String(file.mimeType) : undefined,
+      source: file.source === "generated" ? "generated" as const : "upload" as const,
+    }];
+  }) : [];
+  const images = files.some(isImageFile) ? [] : contentItems.flatMap((rawItem) => {
     const entry = (rawItem || {}) as Record<string, unknown>;
-    if (entry.type !== "image" && entry.type !== "localImage") return [];
-    const imagePath = String(entry.path || "");
-    if (!imagePath) return [];
+    if (entry.type !== "image" && entry.type !== "localImage" && entry.type !== "input_image") return [];
+    const imagePath = String(entry.path || entry.image_url || "");
+    if (!imagePath || imagePath.startsWith("data:")) return [];
     return [{ path: imagePath, name: imagePath.split(/[\\/]/).at(-1) || "image" }];
   });
-  return { id, role: "user", content, ...(images.length ? { images } : {}) };
+  return {
+    id,
+    role: "user",
+    content,
+    ...(images.length ? { images } : {}),
+    ...(files.length ? { files } : {}),
+  };
+}
+
+function stripUserAttachmentMarkup(value: string): string {
+  const clean = value
+    .replace(/<image\b[^>]*\bpath=(?:"[^"]*"|'[^']*')[^>]*>\s*<\/image>/gi, "")
+    .replace(/<image\b[^>]*\bpath=(?:"[^"]*"|'[^']*')[^>]*>/gi, "")
+    .replace(/<\/image>/gi, "")
+    .trim();
+  return clean.split("\n\nAttached files (use these absolute paths):\n", 1)[0] || clean;
+}
+
+function TerminalWorkspace({
+  cwd,
+  onChooseProject,
+}: {
+  cwd: string;
+  onChooseProject: () => Promise<string | null>;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<XtermTerminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const statusRef = useRef<TerminalStatus | null>(null);
+  const [status, setStatus] = useState<TerminalStatus | null>(null);
+  const [starting, setStarting] = useState(false);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const terminal = new XtermTerminal({
+      cursorBlink: true,
+      fontFamily: '"Cascadia Code", "SFMono-Regular", Consolas, monospace',
+      fontSize: 12,
+      letterSpacing: 0,
+      lineHeight: 1.2,
+      scrollback: 5_000,
+      theme: {
+        background: "#0b111d",
+        foreground: "#e5e8f2",
+        cursor: "#a9b2c7",
+        selectionBackground: "#655bd066",
+        black: "#171e2e",
+        red: "#e37b70",
+        green: "#83bc91",
+        yellow: "#d8b66b",
+        blue: "#80a9cf",
+        magenta: "#b89bd1",
+        cyan: "#77b9b5",
+        white: "#e5e8f2",
+      },
+    });
+    const fit = new FitAddon();
+    terminal.loadAddon(fit);
+    terminal.open(containerRef.current);
+    terminalRef.current = terminal;
+    fitRef.current = fit;
+
+    const fitTerminal = () => {
+      try {
+        fit.fit();
+        const current = statusRef.current;
+        if (current?.running) {
+          void window.rhzycode.resizeTerminal(current.processId, terminal.cols, terminal.rows);
+        }
+      } catch {
+        return;
+      }
+    };
+    const resizeObserver = new ResizeObserver(fitTerminal);
+    resizeObserver.observe(containerRef.current);
+    requestAnimationFrame(fitTerminal);
+
+    const dataDisposable = terminal.onData((data) => {
+      const current = statusRef.current;
+      if (current?.running) {
+        void window.rhzycode.writeTerminal(current.processId, data).catch((error: unknown) => {
+          terminal.writeln(`\r\n[write failed: ${getErrorMessage(error)}]`);
+        });
+      }
+    });
+    const unsubscribeStatus = window.rhzycode.onTerminalStatus((value) => {
+      const previous = statusRef.current;
+      statusRef.current = value;
+      setStatus(value);
+      if (previous?.running && value && !value.running) {
+        terminal.writeln(`\r\n[process exited${value.exitCode == null ? "" : `: ${value.exitCode}`}]`);
+      }
+    });
+    const unsubscribeOutput = window.rhzycode.onTerminalOutput((value) => {
+      if (!statusRef.current || value.processId === statusRef.current.processId) {
+        terminal.write(value.delta);
+      }
+    });
+    void window.rhzycode.getTerminalStatus().then((value) => {
+      statusRef.current = value;
+      setStatus(value);
+      if (value?.output) terminal.write(value.output);
+    });
+
+    return () => {
+      resizeObserver.disconnect();
+      dataDisposable.dispose();
+      unsubscribeStatus();
+      unsubscribeOutput();
+      terminal.dispose();
+      terminalRef.current = null;
+      fitRef.current = null;
+    };
+  }, []);
+
+  async function start() {
+    const selectedCwd = cwd || await onChooseProject();
+    if (!selectedCwd || !terminalRef.current) return;
+    setStarting(true);
+    try {
+      terminalRef.current.reset();
+      fitRef.current?.fit();
+      const next = await window.rhzycode.startTerminal({
+        cwd: selectedCwd,
+        cols: terminalRef.current.cols,
+        rows: terminalRef.current.rows,
+      });
+      statusRef.current = next;
+      setStatus(next);
+      terminalRef.current.focus();
+    } catch (error) {
+      terminalRef.current.writeln(`[start failed: ${getErrorMessage(error)}]`);
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  async function stop() {
+    if (!status?.running) return;
+    try {
+      await window.rhzycode.stopTerminal(status.processId);
+    } catch (error) {
+      terminalRef.current?.writeln(`\r\n[stop failed: ${getErrorMessage(error)}]`);
+    }
+  }
+
+  return (
+    <main className="terminal-workspace">
+      <header className="workspace-header terminal-header">
+        <div className="workspace-title">
+          <TerminalSquare size={16} />
+          <span>Terminal</span>
+          <span className="branch-name">{status?.cwd || cwd || "No project"}</span>
+        </div>
+        <div className="terminal-actions">
+          {status?.running ? (
+            <button className="icon-button" title="Stop terminal" aria-label="Stop terminal" onClick={() => void stop()}><Square size={15} /></button>
+          ) : status ? (
+            <button className="icon-button" title="Start terminal" aria-label="Start terminal" disabled={starting} onClick={() => void start()}>
+              {starting ? <RefreshCw className="spinning" size={15} /> : <Play size={15} />}
+            </button>
+          ) : null}
+        </div>
+      </header>
+      <section className="terminal-surface">
+        <div className="terminal-container" ref={containerRef} role="application" aria-label="Terminal session" />
+        {!status && !starting && (
+          <button className="terminal-start" onClick={() => void start()}>
+            <Play size={16} /> {cwd ? "Start terminal" : "Select project"}
+          </button>
+        )}
+        {status?.error && <div className="terminal-error" role="alert">{status.error}</div>}
+      </section>
+    </main>
+  );
 }
 
 function ActivityView({
@@ -2057,66 +2940,6 @@ function UserInputRequestCard({
         </button>
       </div>
     </section>
-  );
-}
-
-function GatewayView({
-  status,
-  syncStatus,
-  busy,
-  onAction,
-}: {
-  status: GatewayStatus;
-  syncStatus: SyncStatus;
-  busy: boolean;
-  onAction: (action: "start" | "stop" | "restart" | "probe") => Promise<void>;
-}) {
-  return (
-    <div className="gateway-view">
-      <section className="gateway-summary">
-        <div className="gateway-heading"><Server size={18} /><div><strong>Internal Model Gateway</strong><small>Managed by RHZYCODE Desktop</small></div></div>
-        <dl>
-          <div><dt>Status</dt><dd className={`status-text ${status.state}`}>{status.state}</dd></div>
-          <div><dt>Transport</dt><dd>Private runtime</dd></div>
-          <div><dt>Providers</dt><dd>{status.providerCount}</dd></div>
-          <div><dt>Models</dt><dd>{status.modelCount}</dd></div>
-        </dl>
-        {status.error && <p className="gateway-error">{status.error}</p>}
-        <div className="gateway-actions">
-          {status.state === "stopped" || status.state === "error" ? (
-            <button title="Start gateway" disabled={busy} onClick={() => onAction("start")}><Play size={15} /> Start</button>
-          ) : (
-            <button title="Stop gateway" disabled={busy} onClick={() => onAction("stop")}><Square size={14} /> Stop</button>
-          )}
-          <button title="Restart gateway" disabled={status.state !== "running" || busy} onClick={() => onAction("restart")}><RotateCcw size={15} /> Restart</button>
-          <button title="Test all provider connections" disabled={status.state !== "running"} onClick={() => onAction("probe")}><RefreshCw size={15} /> Test providers</button>
-        </div>
-      </section>
-
-      <section className="gateway-section">
-        <h3>Providers</h3>
-        {status.providers.map((provider) => (
-          <div className={`provider-row ${provider.health.state}`} key={provider.id} title={provider.health.lastError || provider.health.checkedAt || "Not checked yet"}>
-            <span className="provider-icon"><Network size={14} /></span>
-            <div>
-              <strong>{provider.id}</strong>
-              <small>
-                {provider.protocol} · {provider.health.state}
-                {provider.health.latencyMs != null ? ` · ${provider.health.latencyMs} ms` : ""}
-                {provider.health.circuitState === "open" ? " · circuit open" : ""}
-              </small>
-              {provider.health.lastError && <small className="provider-error">{provider.health.lastError}</small>}
-            </div>
-            {provider.health.state === "healthy" ? <Check size={14} /> : provider.health.state === "degraded" ? <X size={14} /> : <RefreshCw size={13} />}
-          </div>
-        ))}
-      </section>
-
-      <section className="gateway-section">
-        <h3>Mobile sync</h3>
-        <div className="sync-row"><span className={`connection-dot ${syncStatus.state}`} /><div><strong>{syncStatus.state}</strong><small>{syncStatus.state === "running" ? `External port ${syncStatus.port}` : syncStatus.error || "Not running"}</small></div></div>
-      </section>
-    </div>
   );
 }
 
@@ -2297,52 +3120,34 @@ function SkillsView() {
 }
 
 function SettingsView({
+  themeMode,
   status,
   updateStatus,
   mobileAccessStatus,
   persistenceStatus,
   syncStatus,
-  drafts,
-  savingProviderId,
-  onChange,
-  onSave,
   onConfigure,
   onRemove,
   onUpdateAction,
   onRotateAccessKey,
-  onSyncPortChange,
+  onThemeModeChange,
 }: {
+  themeMode: ThemeMode;
   status: CredentialStatus;
   updateStatus: UpdateStatus;
   mobileAccessStatus: MobileAccessStatus;
   persistenceStatus: PersistenceStatus;
   syncStatus: SyncStatus;
-  drafts: Record<string, string>;
-  savingProviderId: string | null;
-  onChange: (providerId: string, value: string) => void;
-  onSave: (providerId: string, value: string) => Promise<void>;
   onConfigure: (input: LlmProviderConfigurationInput) => Promise<void>;
   onRemove: (providerId: string) => Promise<void>;
   onUpdateAction: (action: "check" | "download" | "install") => Promise<void>;
   onRotateAccessKey: () => Promise<void>;
-  onSyncPortChange: (port: number) => Promise<SyncStatus>;
+  onThemeModeChange: (mode: ThemeMode) => void;
 }) {
   const [copiedField, setCopiedField] = useState<string | null>(null);
-  const [portDraft, setPortDraft] = useState(String(syncStatus.port));
-  const [savingPort, setSavingPort] = useState(false);
-  const [portError, setPortError] = useState<string | null>(null);
   const [providerEditor, setProviderEditor] = useState<LlmProviderConfigurationInput | null>(null);
   const [providerEditorError, setProviderEditorError] = useState<string | null>(null);
   const [savingProviderConfig, setSavingProviderConfig] = useState(false);
-  const parsedPort = Number(portDraft);
-  const portValid = /^\d{1,5}$/.test(portDraft) && Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65_535;
-  const portChanged = portValid && parsedPort !== syncStatus.port;
-
-  useEffect(() => {
-    if (savingPort) return;
-    setPortDraft(String(syncStatus.port));
-  }, [savingPort, syncStatus.port]);
-
   async function copyValue(field: string, value: string) {
     try {
       await window.rhzycode.copyText(value);
@@ -2350,23 +3155,6 @@ function SettingsView({
       window.setTimeout(() => setCopiedField((current) => current === field ? null : current), 1400);
     } catch {
       setCopiedField(null);
-    }
-  }
-
-  async function savePort() {
-    if (!portValid) {
-      setPortError("Port must be an integer between 1 and 65535.");
-      return;
-    }
-    setSavingPort(true);
-    setPortError(null);
-    try {
-      const status = await onSyncPortChange(parsedPort);
-      setPortDraft(String(status.port));
-    } catch (error) {
-      setPortError(getErrorMessage(error));
-    } finally {
-      setSavingPort(false);
     }
   }
 
@@ -2440,6 +3228,19 @@ function SettingsView({
 
   return (
     <div className="settings-view">
+      <section className="settings-section appearance-settings">
+        <div className="settings-heading">
+          {themeMode === "dark" ? <Moon size={18} /> : <Sun size={18} />}
+          <div><strong>Appearance</strong><small>{themeMode === "dark" ? "Night mode" : "Day mode"}</small></div>
+        </div>
+        <div className="appearance-row">
+          <div><strong>Display mode</strong><small>Choose the interface brightness</small></div>
+          <div className="theme-segmented" role="radiogroup" aria-label="Display mode">
+            <button className={themeMode === "light" ? "active" : ""} role="radio" aria-checked={themeMode === "light"} onClick={() => onThemeModeChange("light")}><Sun size={14} /> Day</button>
+            <button className={themeMode === "dark" ? "active" : ""} role="radio" aria-checked={themeMode === "dark"} onClick={() => onThemeModeChange("dark")}><Moon size={14} /> Night</button>
+          </div>
+        </div>
+      </section>
       <section className="settings-section">
         <div className="settings-heading"><KeyRound size={18} /><div><strong>Provider credentials</strong><small>System secure storage</small></div></div>
         {!status.encryptionAvailable && <p className="gateway-error">Secure credential storage is unavailable.</p>}
@@ -2453,7 +3254,11 @@ function SettingsView({
               <button title="Close provider editor" aria-label="Close provider editor" onClick={() => setProviderEditor(null)}><X size={14} /></button>
             </div>
             <div className="provider-editor-fields">
-              <label><span>ID</span><input value={providerEditor.providerId} disabled={status.providers.some((provider) => provider.providerId === providerEditor.providerId)} onChange={(event) => setProviderEditor({ ...providerEditor, providerId: event.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "") })} /></label>
+              {status.providers.some((provider) => provider.providerId === providerEditor.providerId) ? (
+                <div className="provider-editor-readonly"><span>ID</span><code>{providerEditor.providerId}</code></div>
+              ) : (
+                <label><span>ID</span><input value={providerEditor.providerId} onChange={(event) => setProviderEditor({ ...providerEditor, providerId: event.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "") })} /></label>
+              )}
               <label><span>Name</span><input value={providerEditor.name} onChange={(event) => setProviderEditor({ ...providerEditor, name: event.target.value })} /></label>
               <label className="wide"><span>URL</span><input type="url" placeholder="https://api.example.com/v1" value={providerEditor.baseUrl} onChange={(event) => setProviderEditor({ ...providerEditor, baseUrl: event.target.value })} /></label>
               <label className="wide"><span>KEY</span><input type="password" autoComplete="new-password" placeholder={status.providers.some((provider) => provider.providerId === providerEditor.providerId) ? "Leave blank to keep current KEY" : "API key"} value={providerEditor.apiKey} onChange={(event) => setProviderEditor({ ...providerEditor, apiKey: event.target.value })} /></label>
@@ -2470,8 +3275,6 @@ function SettingsView({
         )}
         <div className="credential-list">
           {status.providers.map((provider) => {
-            const draft = drafts[provider.providerId] || "";
-            const saving = savingProviderId === provider.providerId;
             const presentation = providerCredentialPresentation(provider.providerId);
             const label = `${providerDisplayName(provider)} API key`;
             const domain = provider.baseUrl || presentation.domain;
@@ -2482,62 +3285,19 @@ function SettingsView({
                   <span className={`connection-dot ${provider.configured ? "running" : "error"}`} />
                   <div><strong>{label}</strong><small>{domain} | {protocol} | KEY starts with {presentation.prefix} | {credentialSourceLabel(provider.source)}</small></div>
                 </div>
-                <input
-                  type="password"
-                  aria-label={`${label} for ${provider.custom ? domain : presentation.domain}`}
-                  value={draft}
-                  autoComplete="new-password"
-                  spellCheck={false}
-                  placeholder={provider.configured ? `Configured | paste new ${presentation.prefix} KEY` : `Enter the ${presentation.prefix} KEY`}
-                  disabled={!status.encryptionAvailable || saving}
-                  onChange={(event) => onChange(provider.providerId, event.target.value)}
-                  onKeyDown={(event) => { if (event.key === "Enter" && draft.trim()) void onSave(provider.providerId, draft); }}
-                />
                 <div className="credential-actions">
-                  <button className="clear" disabled={saving || savingProviderConfig} onClick={() => editProvider(provider)}><Pencil size={13} /> Edit</button>
-                  <button className="clear danger" disabled={saving || savingProviderConfig} onClick={() => void removeProvider(provider.providerId)}><Trash2 size={13} /> Delete</button>
-                  <button disabled={!draft.trim() || saving || !status.encryptionAvailable} onClick={() => void onSave(provider.providerId, draft)}>{saving ? <RefreshCw size={13} /> : <Save size={13} />} Save KEY</button>
+                  <button className="clear" disabled={savingProviderConfig} onClick={() => editProvider(provider)}><Pencil size={13} /> Edit</button>
+                  <button className="clear danger" disabled={savingProviderConfig} onClick={() => void removeProvider(provider.providerId)}><Trash2 size={13} /> Delete</button>
                 </div>
               </div>
             );
           })}
-          {status.providers.length === 0 && <div className="activity-empty">No credential-backed providers</div>}
+          {status.providers.length === 0 && <div className="activity-empty">No providers configured</div>}
         </div>
       </section>
       <section className="settings-section mobile-access-settings">
-        <div className="settings-heading"><Smartphone size={18} /><div><strong>Mobile connection</strong><small>{syncStatus.state === "running" && mobileAccessStatus.accessKey ? "Ready" : "Unavailable"}</small></div></div>
+        <div className="settings-heading"><Smartphone size={18} /><div><strong>Mobile access</strong><small>{syncStatus.state === "running" && mobileAccessStatus.accessKey ? "Ready" : "Unavailable"}</small></div></div>
         <div className="mobile-connection-fields">
-          <ConnectionField
-            label="IP address"
-            value={syncStatus.host}
-            copied={copiedField === "ip"}
-            onCopy={() => void copyValue("ip", syncStatus.host)}
-          />
-          <label className="connection-field connection-port-field">
-            <span>Port</span>
-            <div>
-              <input
-                aria-label="Mobile connection port"
-                inputMode="numeric"
-                maxLength={5}
-                value={portDraft}
-                disabled={savingPort}
-                onChange={(event) => {
-                  setPortDraft(event.target.value.replace(/\D/g, "").slice(0, 5));
-                  setPortError(null);
-                }}
-                onKeyDown={(event) => { if (event.key === "Enter" && portChanged) void savePort(); }}
-              />
-              <button
-                title="Save mobile connection port"
-                aria-label="Save mobile connection port"
-                disabled={!portChanged || savingPort}
-                onClick={() => void savePort()}
-              >
-                {savingPort ? <RefreshCw className="spinning" size={13} /> : <Save size={13} />}
-              </button>
-            </div>
-          </label>
           <ConnectionField
             label="Access key"
             value={mobileAccessStatus.accessKey?.key || "Not generated"}
@@ -2548,7 +3308,6 @@ function SettingsView({
             secret
           />
         </div>
-        {portError && <p className="gateway-error">{portError}</p>}
         {syncStatus.error && <p className="gateway-error">{syncStatus.error}</p>}
         <div className="update-actions">
           <button
@@ -2560,7 +3319,7 @@ function SettingsView({
         </div>
       </section>
       <section className="settings-section update-settings">
-        <div className="settings-heading"><Download size={18} /><div><strong>Application updates</strong><small>{updateStateLabel(updateStatus)}</small></div></div>
+        <div className="settings-heading"><Download size={18} /><div><strong>Application updates</strong><small>{updateStatus.currentVersion ? `Current version ${updateStatus.currentVersion} | ` : ""}{updateStateLabel(updateStatus)}</small></div></div>
         {updateStatus.error && <p className="gateway-error">{updateStatus.error}</p>}
         {updateStatus.state === "downloading" && (
           <div className="update-progress"><span style={{ width: `${updateStatus.percent || 0}%` }} /></div>

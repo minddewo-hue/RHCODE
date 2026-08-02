@@ -52,9 +52,54 @@ export class ManagedFileStore {
   }
 
   registerUploads(threadId: string, attachments: ComposerAttachment[]): ManagedFileRecord[] {
-    const records = attachments.map((attachment) => this.registerUpload(threadId, attachment));
-    this.records.push(...records);
+    const records = attachments.map((attachment) => {
+      if (attachment.kind === "image") {
+        return this.storeFile(
+          threadId,
+          null,
+          attachment.path,
+          attachment.name,
+          "image",
+          "upload",
+        );
+      }
+      const record = this.registerUpload(threadId, attachment);
+      this.records.push(record);
+      return record;
+    });
     return records;
+  }
+
+  storeUploadedImageData(
+    threadId: string,
+    turnId: string | null,
+    dataUrl: string,
+    requestedName: string,
+  ): ManagedFileRecord | null {
+    const match = /^data:(image\/(?:gif|jpeg|png|webp));base64,([a-z0-9+/]+={0,2})$/i.exec(dataUrl.trim());
+    if (!match) return null;
+    try {
+      const bytes = Buffer.from(match[2]!, "base64");
+      if (bytes.length <= 0 || bytes.length > MAX_MANAGED_FILE_BYTES) return null;
+      const digest = createHash("sha256").update(bytes).digest("hex");
+      const existing = this.records.find((record) =>
+        record.threadId === threadId
+        && record.turnId === turnId
+        && record.source === "upload"
+        && record.kind === "image"
+        && path.basename(record.path).startsWith(`${digest.slice(0, 24)}-`));
+      if (existing) return existing;
+      const extension = new Map([
+        ["image/gif", ".gif"],
+        ["image/jpeg", ".jpg"],
+        ["image/png", ".png"],
+        ["image/webp", ".webp"],
+      ]).get(match[1]!.toLowerCase()) || ".png";
+      const name = path.extname(requestedName) ? requestedName : `${requestedName || "image"}${extension}`;
+      return this.storeBytes(threadId, turnId, bytes, name, "image", "upload", `data:${digest}`);
+    } catch {
+      return null;
+    }
   }
 
   storeGenerated(threadId: string, turnId: string | null, filePath: string): ManagedFileRecord | null {
@@ -81,7 +126,7 @@ export class ManagedFileStore {
     this.records = this.records.map((record) => {
       if (!ids.has(record.id) || record.turnId === turnId) return record;
       changed = true;
-      if (record.source === "generated") persistentChanged = true;
+      if (isPersistentRecord(record)) persistentChanged = true;
       return { ...record, turnId };
     });
     if (changed && persistentChanged) this.saveIndex();
@@ -93,7 +138,7 @@ export class ManagedFileStore {
     const removed = this.records.filter((record) => ids.has(record.id));
     const removedPaths = removed.map((record) => record.path);
     this.records = this.records.filter((record) => !ids.has(record.id));
-    if (removed.some((record) => record.source === "generated")) this.saveIndex();
+    if (removed.some(isPersistentRecord)) this.saveIndex();
     this.removeUnreferencedFiles(removedPaths);
   }
 
@@ -132,8 +177,20 @@ export class ManagedFileStore {
     if (!stats.isFile() || stats.size <= 0) throw new Error(`Attachment is not a readable file: ${sourcePath}`);
     if (stats.size > MAX_MANAGED_FILE_BYTES) throw new Error(`Attachment exceeds 100 MB: ${requestedName}`);
     const bytes = fs.readFileSync(resolved);
+    return this.storeBytes(threadId, turnId, bytes, requestedName, kind, source, resolved);
+  }
+
+  private storeBytes(
+    threadId: string,
+    turnId: string | null,
+    bytes: Buffer,
+    requestedName: string,
+    kind: "file" | "image",
+    source: ManagedFileSource,
+    originalPath: string,
+  ): ManagedFileRecord {
     const digest = createHash("sha256").update(bytes).digest("hex");
-    const name = safeFileName(requestedName || path.basename(resolved));
+    const name = safeFileName(requestedName || path.basename(originalPath));
     const storedName = `${digest.slice(0, 24)}-${name}`;
     const storedPath = path.join(this.filesDirectory, storedName);
     fs.mkdirSync(this.filesDirectory, { recursive: true });
@@ -148,7 +205,7 @@ export class ManagedFileStore {
       kind,
       source,
       path: storedPath,
-      originalPath: resolved,
+      originalPath,
       createdAt: new Date().toISOString(),
     };
     this.records.push(record);
@@ -182,7 +239,7 @@ export class ManagedFileStore {
       const parsed = JSON.parse(fs.readFileSync(this.indexPath, "utf8")) as Partial<ManagedFileIndex>;
       if (parsed.version !== INDEX_VERSION || !Array.isArray(parsed.files)) return [];
       return parsed.files.filter((record): record is ManagedFileRecord =>
-        isRecordShape(record) && record.source === "generated");
+        isRecordShape(record) && isPersistentRecord(record));
     } catch {
       return [];
     }
@@ -192,8 +249,8 @@ export class ManagedFileStore {
     fs.mkdirSync(this.directory, { recursive: true });
     const temporaryPath = path.join(this.directory, `.index.${randomUUID()}.tmp`);
     try {
-      const generatedFiles = this.records.filter((record) => record.source === "generated");
-      fs.writeFileSync(temporaryPath, JSON.stringify({ version: INDEX_VERSION, files: generatedFiles }, null, 2), "utf8");
+      const persistentFiles = this.records.filter(isPersistentRecord);
+      fs.writeFileSync(temporaryPath, JSON.stringify({ version: INDEX_VERSION, files: persistentFiles }, null, 2), "utf8");
       fs.renameSync(temporaryPath, this.indexPath);
     } finally {
       try { fs.unlinkSync(temporaryPath); } catch { /* The rename succeeded. */ }
@@ -261,14 +318,18 @@ function isRecordShape(value: unknown): value is ManagedFileRecord {
 }
 
 function isManagedRecord(directory: string, record: ManagedFileRecord): boolean {
-  if (record.source === "generated" && !isWithin(path.resolve(directory, "files"), path.resolve(record.path))) return false;
-  if (record.source === "upload" && comparablePath(record.path) !== comparablePath(record.originalPath)) return false;
+  if (isPersistentRecord(record) && !isWithin(path.resolve(directory, "files"), path.resolve(record.path))) return false;
+  if (!isPersistentRecord(record) && comparablePath(record.path) !== comparablePath(record.originalPath)) return false;
   try {
     const stats = fs.lstatSync(record.path);
     return stats.isFile() && !stats.isSymbolicLink() && stats.size === record.size;
   } catch {
     return false;
   }
+}
+
+function isPersistentRecord(record: ManagedFileRecord): boolean {
+  return record.source === "generated" || record.kind === "image";
 }
 
 function isWithin(root: string, target: string): boolean {

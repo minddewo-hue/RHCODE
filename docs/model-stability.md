@@ -1,83 +1,60 @@
-# 模型稳定性验证报告
+# 模型稳定性验证
 
-验证时间：2026-07-17 00:50 至 01:20（Asia/Shanghai）
+> 历史快照：下列结果采集于 2026-07-17，不代表当前 Provider 可用性。当前模型和禁用列表以 `desktop/gateway.config.json` 为准。
 
-## 结论
+## 历史结论
 
-桌面端当前列出的 26 个模型并非全部可用。本轮有 18 个模型通过代表性开发任务，8 个模型在初测和独立复测中都无法建立有效响应。
-
-这里的“通过”表示模型完成了以下四项验证：
+当时桌面列出的 26 个模型中，18 个完成了以下验证，8 个在初测和复测中没有建立有效响应：
 
 1. 连续两轮精确短响应。
-2. 通过 shell 工具读取算力助手的 `package.json`。
-3. 在算力助手的独立副本中创建一个 JavaScript 模块和一项 `node:test` 测试。
-4. 模型运行测试后，由本机脚本再次独立运行并确认测试通过。
+2. 使用 shell 读取验证项目的 `package.json`。
+3. 在隔离副本中创建 JavaScript 模块和 `node:test` 测试。
+4. 由本机脚本独立重新运行测试。
 
-代码编辑阶段使用与桌面端“完全访问”一致的 `danger-full-access`。`workspace-write` 在 Windows 下会拒绝补丁写入，不适合作为这次模型能力判断依据。
+代码编辑使用 `danger-full-access`，因此结果只验证模型与工具链能力，不验证较低权限 sandbox。
 
-## 本轮通过
+历史通过范围包括当时配置的 Faker Kimi/MiniMax、VLLM Gemma BF16，以及 Sub2API 5.3 至 5.6 部分模型。历史失败包括已移除的 Faker/VLLM 路由和五个 Sub2API 5.2 路由。
 
-| 模型 | 两轮响应 | 项目读取 | 代码编辑与独立测试 |
-| --- | ---: | ---: | ---: |
-| `faker/kimi-for-coding` | 2.2s / 2.1s | 13.5s | 9.6s |
-| `faker/MiniMax-M2` | 2.2s / 1.9s | 4.4s | 32.8s |
-| `faker/MiniMax-M2.1` | 1.8s / 1.6s | 4.2s | 25.4s |
-| `faker/MiniMax-M2.1-highspeed` | 2.1s / 1.1s | 4.0s | 18.8s |
-| `faker/MiniMax-M2.5` | 1.4s / 1.6s | 4.7s | 24.4s |
-| `faker/MiniMax-M2.5-highspeed` | 1.3s / 1.4s | 3.9s | 24.0s |
-| `faker/MiniMax-M2.7` | 2.7s / 2.3s | 6.1s | 20.5s |
-| `faker/MiniMax-M2.7-highspeed` | 1.8s / 1.2s | 4.1s | 25.8s |
-| `faker/MiniMax-M3` | 1.9s / 2.9s | 4.7s | 15.1s |
-| `vllm/gemma-4-31b-it-uncensored-bf16` | 1.3s / 0.8s | 2.5s | 39.1s |
-| `sub2api/gpt-5.3-codex-spark` | 2.3s / 2.8s | 4.3s | 17.8s |
-| `sub2api/gpt-5.4` | 3.8s / 3.1s | 6.2s | 30.7s |
-| `sub2api/gpt-5.4-2026-03-05` | 3.3s / 2.7s | 7.4s | 22.1s |
-| `sub2api/gpt-5.4-mini` | 2.4s / 2.1s | 11.7s | 32.7s |
-| `sub2api/gpt-5.5` | 2.6s / 3.6s | 7.3s | 16.9s |
-| `sub2api/gpt-5.6-luna` | 1.8s / 2.6s | 8.8s | 22.6s |
-| `sub2api/gpt-5.6-sol` | 3.0s / 6.1s | 9.9s | 34.0s |
-| `sub2api/gpt-5.6-terra` | 12.6s / 4.8s | 6.9s | 22.9s |
+这些结果不能用于当前模型推荐：
 
-## 当前不可用
+- 上游服务状态会变化。
+- 当前 `gateway.config.json` 已不再包含 Faker 和 VLLM Provider。
+- 当前配置仍保留五个带 2026-07-17 原因的 Sub2API 禁用项。
+- 两轮测试不能替代长时间压力测试和生产监控。
 
-| 模型 | 初测 | 独立复测 | 归因 |
-| --- | --- | --- | --- |
-| `faker/TrevorJS/gemma-4-26B-A4B-it-uncensored-GGUF` | 502 | 502 | Faker 上游请求失败 |
-| `faker/fake-gpt-4o-mini` | 404 | 404 | Faker 报告模型不存在 |
-| `vllm/gemma-4-31b-it-uncensored` | 502 | 502 | 非 BF16 路线上游请求失败 |
-| `sub2api/gpt-5.2` | 503 | 503 | Sub2API 服务暂不可用 |
-| `sub2api/gpt-5.2-2025-12-11` | 503 | 503 | Sub2API 服务暂不可用 |
-| `sub2api/gpt-5.2-chat-latest` | 503 | 503 | Sub2API 服务暂不可用 |
-| `sub2api/gpt-5.2-pro` | 503 | 502 | Sub2API 上游不可用 |
-| `sub2api/gpt-5.2-pro-2025-12-11` | 503 | 503 | Sub2API 服务暂不可用 |
+## 当前验证脚本
 
-这些失败都由上游返回，模型选择和桌面端路由已经正确到达相应 Provider，不是桌面端模型切换错误。
-
-上述 8 个模型已经记录在 `desktop/gateway.config.json` 的 `disabled_models` 中。网关会同时过滤静态配置和动态发现结果，因此桌面端、移动端和 `/v1/models` 均不再显示这些模型，直接请求也会被判定为不支持的模型。
-
-## 使用建议
-
-- 日常开发可优先使用 `sub2api/gpt-5.6-terra`、`sub2api/gpt-5.6-sol`、`sub2api/gpt-5.5` 或 `faker/kimi-for-coding`。
-- 本地模型只能选择 `vllm/gemma-4-31b-it-uncensored-bf16`；非 BF16 版本当前不可用。
-- BF16 31B 通过了本轮约 39 秒的代码任务，但此前长编码任务出现过长时间无输出，因此暂时只建议用于短任务，不能认定为长任务稳定。
-- Faker 的 Kimi/MiniMax 和 Sub2API 5.3 至 5.6 在本轮均可完成真实文件修改；两轮测试不能替代数小时压力测试或长期可用性监控。
-
-## 复测命令
-
-基础矩阵：
+脚本位于 `desktop/scripts/model-stability-matrix.ts`，支持：
 
 ```powershell
 npm run smoke:models --workspace @rhzycode/desktop
-```
-
-包含隔离代码编辑：
-
-```powershell
 npm run smoke:models:coding --workspace @rhzycode/desktop
 ```
 
-原始结果位于：
+脚本会把最新结果写入：
 
-- `validation/model-stability/full-matrix.json`
-- `validation/model-stability/coding-matrix.json`
-- `validation/model-stability/workspaces/`
+```text
+validation/model-stability/latest.json
+validation/model-stability/workspaces/
+```
+
+## 当前阻塞
+
+截至 2026-07-30，脚本要求的 `validation/a-share-compute-assistant` fixture 不在仓库中，因此上述命令会在开始测试前失败。重新测试前必须二选一：
+
+1. 恢复该 fixture；或
+2. 将脚本迁移到一个已提交、无敏感数据、可复制的验证项目。
+
+修复后应先运行单个模型，再运行完整矩阵，避免一次并发测试给 Provider 造成不必要负载。
+
+## 新报告要求
+
+重新验证时记录：
+
+- 日期、Codex CLI 版本和网关配置提交。
+- Provider 与模型 ID，不记录 API Key。
+- 首响应、总耗时、工具调用和本机独立验证结果。
+- timeout、HTTP 状态和清洗后的错误类别。
+- sandbox、approval policy 和是否允许网络。
+
+新结果应覆盖或另存为带日期的报告，并明确“当前事实来源仍是网关配置”。

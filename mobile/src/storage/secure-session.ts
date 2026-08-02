@@ -1,11 +1,6 @@
-import { defaultControlHost, defaultControlPort } from "../auth/control-access";
-
 export const secureSessionKeys = {
   connections: "rhzycode.connections.v2",
   activeConnectionId: "rhzycode.activeConnectionId.v2",
-  legacyHost: "rhzycode.controlHost",
-  legacyPort: "rhzycode.controlPort",
-  legacyAccessKey: "rhzycode.accessKey",
 } as const;
 
 const connectionKeyPrefix = "rhzycode.connectionKey.v2.";
@@ -19,8 +14,6 @@ export interface SecureStorageAdapter {
 
 export interface MobileSession {
   id: string;
-  host: string;
-  port: number;
   accessKey: string;
 }
 
@@ -33,19 +26,16 @@ export interface MobileNavigationState {
   projectPath: string | null;
   threadId: string | null;
   newThreadDraft: boolean;
+  collapsedProjectPaths: string[];
 }
 
 export interface SavedConnectionInput {
   id?: string;
-  host: string;
-  port: number;
   accessKey: string;
 }
 
 interface StoredConnection {
   id: string;
-  host: string;
-  port: number;
 }
 
 export function secureConnectionKey(id: string): string {
@@ -59,10 +49,7 @@ export function mobileNavigationKey(id: string): string {
 export class SecureSessionStore {
   constructor(private readonly storage: SecureStorageAdapter) {}
 
-  async load(
-    fallbackHost = defaultControlHost,
-    fallbackPort = defaultControlPort,
-  ): Promise<MobileSessionState> {
+  async load(): Promise<MobileSessionState> {
     const [storedConnections, storedActiveId] = await Promise.all([
       this.storage.getItemAsync(secureSessionKeys.connections),
       this.storage.getItemAsync(secureSessionKeys.activeConnectionId),
@@ -73,7 +60,7 @@ export class SecureSessionStore {
         this.storage.getItemAsync(secureConnectionKey(connection.id))
       )));
       const sessions = connections.map((connection, index) => ({
-        ...connection,
+        id: connection.id,
         accessKey: accessKeys[index] || "",
       }));
       return {
@@ -84,22 +71,16 @@ export class SecureSessionStore {
       };
     }
 
-    if (storedConnections !== null) return { connections: [], activeConnectionId: null };
-    return this.migrateLegacyConnection(fallbackHost, fallbackPort);
+    return { connections: [], activeConnectionId: null };
   }
 
   async saveConnection(input: SavedConnectionInput): Promise<MobileSessionState> {
     const current = await this.load();
     const matching = input.id
       ? current.connections.find((connection) => connection.id === input.id)
-      : current.connections.find((connection) => connection.host === input.host && connection.port === input.port);
+      : current.connections.find((connection) => connection.accessKey === input.accessKey);
     const id = matching?.id || createConnectionId();
-    const connection: MobileSession = {
-      id,
-      host: input.host,
-      port: input.port,
-      accessKey: input.accessKey,
-    };
+    const connection: MobileSession = { id, accessKey: input.accessKey };
     const connections = matching
       ? current.connections.map((item) => item.id === id ? connection : item)
       : [...current.connections, connection];
@@ -139,6 +120,7 @@ export class SecureSessionStore {
         projectPath: typeof parsed.projectPath === "string" ? parsed.projectPath : null,
         threadId: typeof parsed.threadId === "string" ? parsed.threadId : null,
         newThreadDraft: parsed.newThreadDraft === true,
+        collapsedProjectPaths: normalizeStoredPaths(parsed.collapsedProjectPaths),
       };
     } catch {
       return emptyNavigationState();
@@ -166,48 +148,20 @@ export class SecureSessionStore {
     return { connections, activeConnectionId };
   }
 
-  private async migrateLegacyConnection(
-    fallbackHost: string,
-    fallbackPort: number,
-  ): Promise<MobileSessionState> {
-    const [storedHost, storedPort, accessKey] = await Promise.all([
-      this.storage.getItemAsync(secureSessionKeys.legacyHost),
-      this.storage.getItemAsync(secureSessionKeys.legacyPort),
-      this.storage.getItemAsync(secureSessionKeys.legacyAccessKey),
-    ]);
-    if (!storedHost && !storedPort && !accessKey) {
-      return { connections: [], activeConnectionId: null };
-    }
-    const parsedPort = Number(storedPort);
-    const connection: MobileSession = {
-      id: createConnectionId(),
-      host: storedHost || fallbackHost,
-      port: Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65_535
-        ? parsedPort
-        : fallbackPort,
-      accessKey: accessKey || "",
-    };
-    await Promise.all([
-      this.writeConnectionMetadata([connection]),
-      this.storage.setItemAsync(secureSessionKeys.activeConnectionId, connection.id),
-      connection.accessKey
-        ? this.storage.setItemAsync(secureConnectionKey(connection.id), connection.accessKey)
-        : Promise.resolve(),
-      this.storage.deleteItemAsync(secureSessionKeys.legacyHost),
-      this.storage.deleteItemAsync(secureSessionKeys.legacyPort),
-      this.storage.deleteItemAsync(secureSessionKeys.legacyAccessKey),
-    ]);
-    return { connections: [connection], activeConnectionId: connection.id };
-  }
-
   private async writeConnectionMetadata(connections: MobileSession[]): Promise<void> {
-    const metadata: StoredConnection[] = connections.map(({ id, host, port }) => ({ id, host, port }));
+    const metadata: StoredConnection[] = connections.map(({ id }) => ({ id }));
     await this.storage.setItemAsync(secureSessionKeys.connections, JSON.stringify(metadata));
   }
 }
 
 function emptyNavigationState(): MobileNavigationState {
-  return { projectPath: null, threadId: null, newThreadDraft: false };
+  return { projectPath: null, threadId: null, newThreadDraft: false, collapsedProjectPaths: [] };
+}
+
+function normalizeStoredPaths(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0))]
+    .slice(0, 50);
 }
 
 function parseConnections(value: string | null): StoredConnection[] {
@@ -215,17 +169,14 @@ function parseConnections(value: string | null): StoredConnection[] {
   try {
     const parsed: unknown = JSON.parse(value);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is StoredConnection => {
-      if (!item || typeof item !== "object") return false;
-      const candidate = item as Partial<StoredConnection>;
-      return typeof candidate.id === "string"
-        && candidate.id.length > 0
-        && typeof candidate.host === "string"
-        && candidate.host.length > 0
-        && Number.isInteger(candidate.port)
-        && Number(candidate.port) >= 1
-        && Number(candidate.port) <= 65_535;
-    });
+    const ids = new Set<string>();
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") continue;
+      const candidate = item as Record<string, unknown>;
+      if (Object.keys(candidate).length !== 1 || typeof candidate.id !== "string" || !candidate.id) continue;
+      ids.add(candidate.id);
+    }
+    return [...ids].map((id) => ({ id }));
   } catch {
     return [];
   }

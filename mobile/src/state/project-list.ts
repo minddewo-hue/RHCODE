@@ -25,6 +25,19 @@ export function isSameProjectPath(left: string, right: string): boolean {
   return comparableProjectPath(left) === comparableProjectPath(right);
 }
 
+export function resolveNewThreadProjectPath(
+  requestedProjectPath: string | undefined,
+  selectedProjectPath: string | null,
+  selectedThreadProjectPath: string | undefined,
+  recentProjectPaths: string[],
+): string | null {
+  return requestedProjectPath?.trim()
+    || selectedProjectPath?.trim()
+    || selectedThreadProjectPath?.trim()
+    || recentProjectPaths[0]?.trim()
+    || null;
+}
+
 export function filterThreadsInOrder(threads: ThreadSummary[], search: string): ThreadSummary[] {
   const term = search.trim().toLocaleLowerCase();
   return threads.filter((thread) =>
@@ -39,10 +52,11 @@ export function groupThreadsByProject(
   const term = search.trim().toLocaleLowerCase();
   return registeredProjectPaths(projectPaths).flatMap((projectPath) => {
     const key = projectPathKey(projectPath);
+    // Match project name/path and conversation titles only; ignore model ids.
     const projectMatches = !term || `${projectName(projectPath)} ${projectPath}`.toLocaleLowerCase().includes(term);
     const projectThreads = threads
       .filter((thread) => projectPathKey(thread.projectPath) === key)
-      .filter((thread) => projectMatches || `${thread.title} ${thread.model}`.toLocaleLowerCase().includes(term));
+      .filter((thread) => projectMatches || thread.title.toLocaleLowerCase().includes(term));
     if (term && !projectMatches && projectThreads.length === 0) return [];
     return [{ key, path: projectPath, threads: projectThreads }];
   });

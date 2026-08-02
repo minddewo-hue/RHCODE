@@ -19,20 +19,39 @@ test("keeps packaged or external gateway environments inside their root", () => 
   assert.equal(resolveGatewayEnvPath(gatewayRoot), path.join(gatewayRoot, ".env"));
 });
 
-test("prefers the desktop config and falls back to the legacy gateway layout", (context) => {
+test("selects the first current gateway location containing a config", (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-gateway-layout-"));
   const desktopRoot = path.join(root, "desktop");
-  const legacyRoot = path.join(desktopRoot, "model-gateway");
   const packagedRoot = path.join(root, "resources", "gateway");
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  fs.mkdirSync(legacyRoot, { recursive: true });
+  fs.mkdirSync(desktopRoot, { recursive: true });
   fs.mkdirSync(packagedRoot, { recursive: true });
-  fs.writeFileSync(path.join(legacyRoot, "gateway.config.json"), "{}", "utf8");
   fs.writeFileSync(path.join(packagedRoot, "gateway.config.json"), "{}", "utf8");
 
-  assert.equal(selectGatewayRoot([desktopRoot, legacyRoot, packagedRoot]), legacyRoot);
+  assert.equal(selectGatewayRoot([desktopRoot, packagedRoot]), packagedRoot);
   fs.writeFileSync(path.join(desktopRoot, "gateway.config.json"), "{}", "utf8");
-  assert.equal(selectGatewayRoot([desktopRoot, legacyRoot, packagedRoot]), desktopRoot);
+  assert.equal(selectGatewayRoot([desktopRoot, packagedRoot]), desktopRoot);
+});
+
+test("keeps an empty fresh-install gateway stopped without an error", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-empty-gateway-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "gateway.config.json"), JSON.stringify({
+    providers: {},
+    models: {},
+  }));
+
+  const gateway = new GatewayModule(root);
+  assert.deepEqual(await gateway.start(), {
+    state: "stopped",
+    transport: "internal",
+    providerCount: 0,
+    modelCount: 0,
+    configSource: null,
+    providers: [],
+    models: [],
+    error: null,
+  });
 });
 
 test("writes configured runtime and maximum contexts to the Codex catalog", async (context) => {

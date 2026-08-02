@@ -3,7 +3,7 @@ import type { RemoteApprovalPolicy, RemoteReasoningEffort, RemoteSandboxMode } f
 import { Brain } from "lucide-react-native";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { colors } from "../ui/theme";
+import { colors, createThemedStyles } from "../ui/theme";
 
 interface TaskMenuProps {
   visible: boolean;
@@ -127,9 +127,9 @@ function OptionGroup<T extends string>({ icon, label, onSelect, options, selecte
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles((colors) => ({
   scrim: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0, backgroundColor: colors.overlay },
-  menu: { position: "absolute", right: 0, bottom: 0, left: 0, maxHeight: "88%", borderTopLeftRadius: 8, borderTopRightRadius: 8, backgroundColor: colors.surface, shadowColor: "#000000", shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.14, shadowRadius: 12, elevation: 10 },
+  menu: { position: "absolute", right: 0, bottom: 0, left: 0, maxHeight: "88%", borderTopLeftRadius: 8, borderTopRightRadius: 8, backgroundColor: colors.surface, shadowColor: colors.shadow, shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.14, shadowRadius: 12, elevation: 10 },
   handle: { width: 36, height: 4, alignSelf: "center", marginTop: 8, borderRadius: 2, backgroundColor: colors.borderStrong },
   header: { height: 52, paddingLeft: 18, paddingRight: 8, flexDirection: "row", alignItems: "center", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   title: { flex: 1, color: colors.ink, fontSize: 15, lineHeight: 20, fontWeight: "600", letterSpacing: 0 },
@@ -151,4 +151,4 @@ const styles = StyleSheet.create({
   segmentTextActive: { color: colors.ink, fontWeight: "600" },
   disabled: { opacity: 0.35 },
   pressed: { opacity: 0.68 },
-});
+}));

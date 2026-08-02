@@ -8,6 +8,7 @@ export async function startEmbeddedGateway(options) {
   const host = options.host || "127.0.0.1";
   const requestedPort = options.port ?? 0;
   const envPath = options.envPath || path.join(rootDir, ".env");
+  const fetchImpl = options.fetchImpl || fetch;
 
   loadDotEnv(envPath);
   const configuredPath = options.configPath || process.env.GATEWAY_CONFIG || "gateway.config.json";
@@ -16,14 +17,14 @@ export async function startEmbeddedGateway(options) {
     : path.join(rootDir, configuredPath);
   const config = loadGatewayConfig({ configPath });
   const contextConfig = loadModelContextConfig(rootDir, options.contextConfigPath);
-  await discoverProviderModels(config, options.discoveryTimeoutMs ?? 5000);
+  await discoverProviderModels(config, options.discoveryTimeoutMs ?? 5000, fetchImpl);
   addAutomaticModelProtocolRoutes(config, contextConfig);
   if (config.models.size === 0) {
     throw new Error(
       "Gateway config has no models. Add model IDs to the provider or use an upstream that supports GET /models.",
     );
   }
-  const server = createGatewayServer(config);
+  const server = createGatewayServer(config, { fetchImpl, onLog: options.onLog });
   const providers = [...config.providers.values()].map((provider) => ({
     id: provider.id,
     protocol: provider.protocol,
@@ -82,7 +83,7 @@ export async function startEmbeddedGateway(options) {
     async probeProviders(options = {}) {
       const timeoutMs = options.timeoutMs ?? 5000;
       const results = await Promise.all(
-        [...config.providers.values()].map((provider) => probeProvider(provider, timeoutMs)),
+        [...config.providers.values()].map((provider) => probeProvider(provider, timeoutMs, fetchImpl)),
       );
       const circuitHealth = server.gatewayHealth?.().providers || {};
       for (const result of results) {
@@ -99,6 +100,12 @@ export async function startEmbeddedGateway(options) {
       }
       return providers;
     },
+    interruptTurn(turnId) {
+      return server.gatewayInterruptTurn?.(turnId) || 0;
+    },
+    setThreadModel(threadId, modelId) {
+      return server.gatewaySetThreadModel?.(threadId, modelId) || false;
+    },
     async stop() {
       if (stopped) return;
       stopped = true;
@@ -110,14 +117,14 @@ export async function startEmbeddedGateway(options) {
   };
 }
 
-async function discoverProviderModels(config, timeoutMs) {
+async function discoverProviderModels(config, timeoutMs, fetchImpl) {
   await Promise.all([...config.providers.values()].map(async (provider) => {
     if (!provider.modelDiscovery) return;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     timeout.unref?.();
     try {
-      const response = await fetch(`${provider.baseUrl}/models`, {
+      const response = await fetchImpl(`${provider.baseUrl}/models`, {
         headers: providerRequestHeaders(provider),
         signal: controller.signal,
       });
@@ -220,13 +227,13 @@ function hasProviderRoute(config, providerId, upstreamModel) {
     model.routes.some((route) => route.provider.id === providerId && route.upstreamModel === upstreamModel));
 }
 
-async function probeProvider(provider, timeoutMs) {
+async function probeProvider(provider, timeoutMs, fetchImpl) {
   const startedAt = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   timeout.unref?.();
   try {
-    const response = await fetch(`${provider.baseUrl}/models`, {
+    const response = await fetchImpl(`${provider.baseUrl}/models`, {
       method: "GET",
       headers: providerRequestHeaders(provider),
       signal: controller.signal,

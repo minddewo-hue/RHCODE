@@ -11,7 +11,11 @@ test-results/
 
 # Local credentials and generated gateway state
 *.env
-appupdate/.minio-credentials.json
+transferserver/certs/
+transferserver/*.key
+transferserver/*.pem
+transferserver/*.pfx
+transferserver/*.p12
 
 # Desktop release output
 desktop/release/
@@ -21,6 +25,7 @@ appupdate/artifacts/
 appupdate/rhzycode/windows/
 appupdate/rhzycode/android/
 appupdate/rhzycode/macos/
+transferserver/updates/
 mobile/releases/
 mobile/release-ios/
 mobile/dist-*/

@@ -103,6 +103,33 @@ test("multi-model gateway integration", async (t) => {
       return;
     }
 
+    if (req.url === "/idle/v1/responses") {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.write(
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_idle","object":"response"}}\n\n',
+      );
+      return;
+    }
+
+    if (req.url === "/budget-primary/v1/responses") {
+      await delay(300);
+      if (!res.destroyed) writeJson(res, 503, { error: { message: "try the backup" } });
+      return;
+    }
+
+    if (req.url === "/budget-backup/v1/responses") {
+      await delay(300);
+      if (!res.destroyed) {
+        writeJson(res, 200, {
+          id: "resp_budget_backup",
+          object: "response",
+          status: "completed",
+          output: [],
+        });
+      }
+      return;
+    }
+
     if (req.url === "/chat/v1/chat/completions") {
       const toolName = body.tools?.[0]?.function?.name || "weather";
       const toolArguments = toolName === "apply_patch"
@@ -303,6 +330,19 @@ test("multi-model gateway integration", async (t) => {
           base_url: `http://127.0.0.1:${upstreamPort}/broken/v1`,
           protocol: "responses",
         },
+        idle: {
+          base_url: `http://127.0.0.1:${upstreamPort}/idle/v1`,
+          protocol: "responses",
+          stream_idle_timeout_ms: 60,
+        },
+        budget_primary: {
+          base_url: `http://127.0.0.1:${upstreamPort}/budget-primary/v1`,
+          protocol: "responses",
+        },
+        budget_backup: {
+          base_url: `http://127.0.0.1:${upstreamPort}/budget-backup/v1`,
+          protocol: "responses",
+        },
       },
       models: {
         "native/model": {
@@ -424,6 +464,16 @@ test("multi-model gateway integration", async (t) => {
           upstream_model: "same-model",
           fallbacks: [{ provider: "backup", upstream_model: "same-model" }],
         },
+        "idle/model": {
+          provider: "idle",
+          upstream_model: "same-model",
+          capabilities: { streaming: true },
+        },
+        "budget/model": {
+          provider: "budget_primary",
+          upstream_model: "same-model",
+          fallbacks: [{ provider: "budget_backup", upstream_model: "same-model" }],
+        },
       },
       access: [
         {
@@ -435,11 +485,15 @@ test("multi-model gateway integration", async (t) => {
             "chat/*",
             "limited/*",
             "timeout/*",
-            "broken/*"
+            "broken/*",
+            "idle/*",
+            "budget/*"
           ],
         },
         { api_key_env: "TEST_LIMITED_KEY", models: ["native/model"] },
       ],
+      upstream_timeout_ms: 450,
+      upstream_stream_idle_timeout_ms: 1000,
       circuit_breaker: { failure_threshold: 2, cooldown_ms: 10000 },
     }),
   );
@@ -455,6 +509,8 @@ test("multi-model gateway integration", async (t) => {
       TEST_GATEWAY_KEY: "gateway-secret",
       TEST_LIMITED_KEY: "limited-secret",
       TEST_UPSTREAM_KEY: "upstream-secret",
+      UPSTREAM_TIMEOUT_MS: "",
+      UPSTREAM_STREAM_IDLE_TIMEOUT_MS: "",
       PROXY_API_KEY: "",
       LOG_LEVEL: "error",
     },
@@ -951,6 +1007,24 @@ test("multi-model gateway integration", async (t) => {
     await assert.rejects(response.text());
     const backupCallsAfter = calls.filter((entry) => entry.path === "/backup/v1/responses").length;
     assert.equal(backupCallsAfter, backupCallsBefore);
+  });
+
+  await t.test("ends a stream that stops producing data after its first event", async () => {
+    const response = await gatewayFetch(baseUrl, "/v1/responses", {
+      body: { model: "idle/model", input: "stall", stream: true },
+    });
+    assert.equal(response.status, 200);
+    await assert.rejects(response.text());
+  });
+
+  await t.test("shares one timeout budget across route failover", async () => {
+    const response = await gatewayFetch(baseUrl, "/v1/responses", {
+      body: { model: "budget/model", input: "bounded failover" },
+    });
+    assert.equal(response.status, 504);
+    assert.equal((await response.json()).error.code, "upstream_timeout");
+    assert.ok(calls.some((entry) => entry.path === "/budget-primary/v1/responses"));
+    assert.ok(calls.some((entry) => entry.path === "/budget-backup/v1/responses"));
   });
 
   await t.test("keeps previous_response_id on its original route", async () => {

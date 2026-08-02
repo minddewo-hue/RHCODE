@@ -9,7 +9,7 @@ const result = spawnSync(process.execPath, [npmCli, "run", "dist:desktop"], {
   stdio: "inherit",
   env: {
     ...process.env,
-    RHZYCODE_UPDATE_URL: "https://minio.gshbzw.com/wxfile/rhzycode/windows",
+    RHZYCODE_UPDATE_URL: "http://218.201.210.211:8000/updates/windows",
   },
 });
 if (result.error) console.error(result.error);

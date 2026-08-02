@@ -54,6 +54,11 @@ import type { ManagedFileStore } from "../managed-file-store.js";
 import { ControlStore, type AgentEventInput } from "./store.js";
 import { MobileAccessManager, type MobileClientIdentity } from "./mobile-access.js";
 
+const controlHeartbeatPingSchema = z.object({
+  type: z.literal("control.ping"),
+  id: z.string().min(1).max(100),
+}).strict();
+
 export interface ControlPlaneOptions {
   store?: ControlStore;
   logLevel?: string;
@@ -119,6 +124,10 @@ export interface ControlCommandHandlers {
     request: RemoteThreadRenameRequest,
     context: RemoteCommandContext,
   ): Promise<RemoteThreadMutationResult>;
+  compactThread?(
+    threadId: string,
+    context: RemoteCommandContext,
+  ): Promise<RemoteThreadMutationResult>;
   archiveThread(
     threadId: string,
     context: RemoteCommandContext,
@@ -182,7 +191,7 @@ class CommandReplayCache {
     const promise = operation();
     this.entries.set(cacheKey, {
       fingerprint,
-      expiresAt: Date.now() + 10 * 60_000,
+      expiresAt: Date.now() + 24 * 60 * 60_000,
       promise,
     });
     try {
@@ -508,13 +517,20 @@ export async function createControlPlane(options: ControlPlaneOptions = {}): Pro
     }
     const idempotencyKey = parseIdempotencyKey(request.headers["idempotency-key"]);
     if (!idempotencyKey) return reply.code(400).send({ error: "A valid Idempotency-Key is required." });
+    const inferredClientMessageId = turnClientMessageId(idempotencyKey);
+    const commandRequest: RemoteTurnStartRequest = {
+      ...body.data,
+      ...(!body.data.clientMessageId && inferredClientMessageId
+        ? { clientMessageId: inferredClientMessageId }
+        : {}),
+    };
     try {
       const result = await commandReplay.execute(
         client.id,
         idempotencyKey,
-        commandFingerprint("turn.start", { threadId: params.data.threadId, ...body.data }),
+        commandFingerprint("turn.start", { threadId: params.data.threadId, ...commandRequest }),
         async () => {
-          const rawResult = await commands.startTurn(params.data.threadId, body.data, { client });
+          const rawResult = await commands.startTurn(params.data.threadId, commandRequest, { client });
           const parsed = remoteTurnStartResultSchema.parse(rawResult);
           mobileAccess.recordTaskCommand(
             client.id,
@@ -651,6 +667,33 @@ export async function createControlPlane(options: ControlPlaneOptions = {}): Pro
     }
   });
 
+  app.post("/v1/commands/threads/:threadId/compact", async (request, reply) => {
+    if (!mobileAccess) return reply.code(404).send({ error: "Remote task control is not enabled." });
+    const client = mobileCommandClient(request, mobileAccess);
+    if (!client) return reply.code(401).send({ error: "Missing mobile access identity." });
+    if (!commands?.compactThread) return reply.code(503).send({ error: "Desktop conversation compaction is unavailable." });
+    const params = z.object({ threadId: z.string().min(1).max(500) }).safeParse(request.params);
+    const body = z.object({}).strict().safeParse(request.body ?? {});
+    if (!params.success || !body.success) {
+      return reply.code(400).send({ error: "Invalid remote thread compaction request." });
+    }
+    const idempotencyKey = parseIdempotencyKey(request.headers["idempotency-key"]);
+    if (!idempotencyKey) return reply.code(400).send({ error: "A valid Idempotency-Key is required." });
+    try {
+      const result = await commandReplay.execute(
+        client.id,
+        idempotencyKey,
+        commandFingerprint("thread.compact", { threadId: params.data.threadId }),
+        async () => remoteThreadMutationResultSchema.parse(
+          await commands.compactThread!(params.data.threadId, { client }),
+        ),
+      );
+      return reply.send(result);
+    } catch (error) {
+      return sendCommandError(reply, error);
+    }
+  });
+
   app.post("/v1/commands/threads/:threadId/unarchive", async (request, reply) => {
     if (!mobileAccess) return reply.code(404).send({ error: "Remote task control is not enabled." });
     const client = mobileCommandClient(request, mobileAccess);
@@ -719,6 +762,16 @@ export async function createControlPlane(options: ControlPlaneOptions = {}): Pro
       .safeParse(request.query);
     const after = query.success ? query.data.after : 0;
     for (const event of store.listEvents(after)) socket.send(JSON.stringify(event));
+    socket.on("message", (raw: { toString(): string }) => {
+      try {
+        const ping = controlHeartbeatPingSchema.safeParse(JSON.parse(raw.toString()));
+        if (ping.success && socket.readyState === 1) {
+          socket.send(JSON.stringify({ type: "control.pong", id: ping.data.id }));
+        }
+      } catch {
+        return;
+      }
+    });
     socket.on("close", () => sockets.delete(socket));
     socket.on("error", () => sockets.delete(socket));
   });
@@ -748,7 +801,7 @@ export async function createControlPlane(options: ControlPlaneOptions = {}): Pro
     store,
     async start(startOptions = {}) {
       const host = startOptions.host || "127.0.0.1";
-      const port = startOptions.port ?? 8790;
+      const port = startOptions.port ?? 0;
       await app.listen({ host, port });
       const address = app.server.address();
       if (!address || typeof address === "string") {
@@ -819,6 +872,12 @@ function parseIdempotencyKey(value: string | string[] | undefined): string | nul
   if (typeof value !== "string") return null;
   const normalized = value.trim();
   return /^[A-Za-z0-9._:-]{8,200}$/.test(normalized) ? normalized : null;
+}
+
+function turnClientMessageId(idempotencyKey: string): string | undefined {
+  if (!idempotencyKey.endsWith(":turn")) return undefined;
+  const candidate = idempotencyKey.slice(0, -":turn".length);
+  return candidate.length >= 8 && candidate.length <= 200 ? candidate : undefined;
 }
 
 function commandFingerprint(command: string, value: unknown): string {

@@ -96,6 +96,7 @@ test("restores durable state without reviving pending requests", () => {
       content: "Durable output",
       files: [
         { id: "upload-transient", name: "input.txt", size: 5, source: "upload" },
+        { id: "upload-image", name: "screen.png", size: 8, mimeType: "image/png", source: "upload" },
         { id: "generated-durable", name: "report.pdf", size: 9, source: "generated" },
       ],
       createdAt: now,
@@ -114,9 +115,10 @@ test("restores durable state without reviving pending requests", () => {
   });
 
   const restored = new ControlStore(store.exportState());
+  assert.equal(store.exportState().events.some((event) => event.type === "timeline.upserted"), false);
   assert.equal(restored.snapshot().threads[0]?.id, "thread-persisted");
   assert.equal(restored.snapshot().timeline[0]?.content, "Durable output");
-  assert.deepEqual(restored.snapshot().timeline[0]?.files?.map((file) => file.id), ["generated-durable"]);
+  assert.deepEqual(restored.snapshot().timeline[0]?.files?.map((file) => file.id), ["upload-image", "generated-durable"]);
   assert.deepEqual(restored.snapshot().approvals, []);
   assert.equal(restored.listEvents(0).some((event) => event.type === "approval.requested"), false);
   const next = restored.upsertThread({ ...restored.snapshot().threads[0]!, updatedAt: now });

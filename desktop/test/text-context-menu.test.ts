@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildTextContextMenu } from "../src/main/text-context-menu";
+import { buildImageContextMenu, buildTextContextMenu } from "../src/main/text-context-menu";
 
 test("offers cut, copy, paste, and select all for editable text", () => {
   const items = buildTextContextMenu({
@@ -45,4 +45,15 @@ test("keeps copy disabled when document text is not selected", () => {
   assert.equal(items[0].enabled, false);
   assert.equal(items[2].role, "selectAll");
   assert.equal(items[2].enabled, true);
+});
+
+test("offers image download through the context menu", () => {
+  let downloads = 0;
+  const items = buildImageContextMenu(() => { downloads += 1; });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].label, "Download image");
+  assert.equal(typeof items[0].click, "function");
+  items[0].click?.({} as never, {} as never, {} as never);
+  assert.equal(downloads, 1);
 });

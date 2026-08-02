@@ -1,153 +1,132 @@
-# RHZYCODE MinIO 升级系统
+# RHZYCODE 更新系统
 
-Windows、macOS、Android 和 iOS 共用 MinIO 版本清单，不再依赖开发电脑长期运行 HTTP 服务。iOS 安装包由 App Store 分发，清单只保存商店元数据。新版本客户端直接读取：
-
-```text
-https://minio.gshbzw.com/wxfile/rhzycode/version.json
-```
-
-## 目录结构
+Windows 和 Android 使用中转服务提供的统一更新清单：
 
 ```text
-wxfile/
-  rhzycode/
-    version.json
-    windows/
-      latest.yml
-      RHZYCODE-Setup-<version>-x64.exe
-      RHZYCODE-Setup-<version>-x64.exe.blockmap
-    android/
-      RHZYCODE-Android-<version>.apk
-    macos/
-      latest-mac.yml
-      RHZYCODE-<version>-<arch>.dmg
-      RHZYCODE-<version>-<arch>-mac.zip
+http://218.201.210.211:8000/v1/updates/manifest
 ```
 
-本地 `appupdate/rhzycode/` 是同一结构的发布暂存目录。平台安装包目录被 Git 忽略，`version.json` 保留在仓库中作为清单示例和当前版本记录。
+当前 publisher 只发布 `windows` 和 `android`。清单 schema 以 `packages/update-contract` 为准。
 
-## 版本清单
+## 文件布局
 
-清单使用平台映射。`platforms.windows`、`platforms.macos`、`platforms.android`、`platforms.ios` 由 `packages/update-contract` 统一校验；平台可以渐进发布，不要求四个平台同时存在。
+本地暂存目录：
 
-```json
-{
-  "schemaVersion": 2,
-  "publishedAt": "2026-07-23T00:00:00.000Z",
-  "platforms": {
-    "windows": {
-      "version": "0.2.0",
-      "architecture": "x64",
-      "file": "windows/RHZYCODE-Setup-0.2.0-x64.exe",
-      "downloadUrl": "https://minio.gshbzw.com/wxfile/rhzycode/windows/RHZYCODE-Setup-0.2.0-x64.exe",
-      "feedUrl": "https://minio.gshbzw.com/wxfile/rhzycode/windows",
-      "metadataUrl": "https://minio.gshbzw.com/wxfile/rhzycode/windows/latest.yml",
-      "bytes": 123,
-      "sha256": "<64位SHA-256>",
-      "releaseNotes": "RHZYCODE Windows release"
-    },
-    "android": {
-      "version": "0.2.0",
-      "versionCode": 20,
-      "file": "android/RHZYCODE-Android-0.2.0.apk",
-      "downloadUrl": "https://minio.gshbzw.com/wxfile/rhzycode/android/RHZYCODE-Android-0.2.0.apk",
-      "bytes": 123,
-      "sha256": "<64位SHA-256>",
-      "releaseNotes": "RHZYCODE Android release"
-    }
-  }
-}
+```text
+transferserver/updates/
+  version.json
+  windows/
+    latest.yml
+    RHZYCODE-Setup-<version>-x64.exe
+    RHZYCODE-Setup-<version>-x64.exe.blockmap
+  android/
+    RHZYCODE-Android-<version>.apk
 ```
 
-客户端请求清单时禁用缓存。Android 下载后校验字节数和 SHA-256；Windows/macOS 先比较统一清单中的版本，再通过各自 feed 的 electron-builder 元数据交给 `electron-updater`；iOS 比较版本和 build number 后打开 App Store URL。
+远程目录和 SSH 目标由 `appupdate/config.json` 定义，不在多份文档中重复维护。
 
-## 发布配置
+## 客户端行为
 
-`appupdate/config.json` 只保存非敏感配置：MinIO endpoint、bucket、region、对象前缀以及密钥环境变量名称。Access Key 和 Secret Key 不得写入仓库。
+### Windows
 
-当前 bucket 策略只为 `arn:aws:s3:::wxfile/rhzycode/*` 增加匿名 `s3:GetObject`，不开放 bucket 列表权限，也不影响其他前缀。发布脚本在上传完成后会以匿名请求复核清单和安装包；若公网策略失效，发布命令会明确失败。
+1. 读取统一清单。
+2. 比较桌面版本。
+3. 将 electron-updater feed 设置为清单中的 Windows feed。
+4. 下载、校验并在用户确认后安装重启。
 
-发布前在当前 PowerShell 会话设置：
+### Android
+
+1. 冷启动或设置页手动读取统一清单。
+2. 同时比较可见版本和 `versionCode`。
+3. 下载 APK，校验字节数和 SHA-256。
+4. 调用系统安装器；返回应用后可再次尝试。
+
+当前版本不低于清单版本时不提示更新。
+
+## 完整发布
+
+### 1. 递增版本
+
+按 [发布流程](release.md) 同步桌面版本、移动版本和 Android `versionCode`。
+
+### 2. 验证
 
 ```powershell
-$env:RHZYCODE_MINIO_ACCESS_KEY = "<access-key>"
-$env:RHZYCODE_MINIO_SECRET_KEY = "<secret-key>"
+npm run check
+npm run build
 ```
 
-## 发布流程
-
-发布前递增以下版本：
-
-1. `desktop/package.json` 的 `version`。
-2. `mobile/package.json` 和 `mobile/app.json` 的版本。
-3. `mobile/app.json` 的 `expo.android.versionCode`，该整数必须递增。
-4. iOS 发布时递增 `mobile/app.json` 的 `expo.ios.buildNumber`。
-
-完成两端构建并直接发布：
+### 3. 构建并本地暂存
 
 ```powershell
-Set-Location D:\work_space\RHZYCODE
 npm run update:release
 ```
 
-也可以分步执行：
+等价于：
 
 ```powershell
 npm run update:build:desktop
 npm run update:build:mobile
-# 以下命令在 macOS 构建机执行
-npm run update:build:mac
-npm run update:build:ios
-npm run update:stage
 npm run update:publish
 ```
 
-`update:stage` 只生成本地发布目录和清单，适合发布前检查。`update:publish` 先上传全部已配置平台的安装包、blockmap 和桌面更新元数据，最后才覆盖 `version.json`。因此客户端不会读到引用尚未上传文件的新清单。
+`update:publish` 只复制本地产物并原子写入本地 `version.json`，不执行网络上传。
 
-原始构建产物位置：
-
-```text
-desktop/release/
-mobile/android/app/build/outputs/apk/release/app-release.apk
-mobile/release-ios/RHZYCODE-iOS-<version>.ipa
-```
-
-## 客户端检测
-
-桌面端在启动约 10 秒后检查一次，运行期间每两小时在本地时间 10:00 至 20:00 之间检查。它按当前系统读取 `platforms.windows` 或 `platforms.macos`；版本更高时才访问对应 feed。
-
-Android 冷启动约 3 秒后检查一次，设置页仍可手动检查。它读取 `platforms.android`，下载 `downloadUrl` 对应 APK，校验文件大小和 SHA-256 后调用系统安装器。
-
-iOS 使用相同检查时机读取 `platforms.ios`。发现新版本后打开 `storeUrl`，不下载或侧载 IPA。
-
-默认地址可在构建或调试时覆盖：
+只更新一个平台时，可在产物已经存在的前提下运行：
 
 ```powershell
-$env:RHZYCODE_UPDATE_MANIFEST_URL = "https://example.test/version.json"
-$env:EXPO_PUBLIC_UPDATE_URL = "https://example.test/version.json"
+node appupdate/scripts/publish.mjs --platform=windows
+node appupdate/scripts/publish.mjs --platform=android
 ```
 
-## 旧版本迁移
+单平台暂存会保留清单中另一个平台的现有项。
 
-已经安装的旧桌面端和 Android 端仍访问 `http://192.168.11.103:8791`。在这些客户端完成一次过渡升级前，可临时运行：
+### 4. 检查本地清单
 
 ```powershell
-npm run update:serve
+Get-Content transferserver/updates/version.json
+Get-Content desktop/release/release-manifest.json
 ```
 
-该兼容服务不保存安装包：它把旧版 `/manifest.json` 转换为旧结构，并把 `/desktop/*`、`/mobile/*` 重定向到 MinIO。所有活跃客户端升级到新检测逻辑后即可停止该服务。
+确认版本、文件名、字节数和 SHA-256 与新产物一致。
 
-## 发布验证
+### 5. 远程部署
 
 ```powershell
-npm test --workspace @rhzycode/appupdate
-npm run typecheck --workspace @rhzycode/desktop
-npm run typecheck --workspace @rhzycode/mobile
-Invoke-RestMethod https://minio.gshbzw.com/wxfile/rhzycode/version.json
-curl.exe -I https://minio.gshbzw.com/wxfile/rhzycode/windows/latest.yml
-curl.exe -I https://minio.gshbzw.com/wxfile/rhzycode/android/RHZYCODE-Android-<version>.apk
+npm run update:deploy
 ```
 
-至少确认清单版本、URL、文件大小和 SHA-256 与构建产物一致，安装包支持公网下载，Android 可覆盖安装，Windows/macOS 可完成下载和重启安装，iOS 商店链接可打开正确应用。
+部署脚本使用 SSH key：
 
-Windows 公网发布建议配置 Authenticode 证书，并使用 `RHZYCODE_REQUIRE_SIGNING=1` 强制缺少证书时构建失败。Android 必须持续使用同一 release keystore，否则无法覆盖安装且会丢失本机应用数据。
+1. 创建远程平台目录。
+2. 上传安装包、blockmap 和 `latest.yml`。
+3. 最后上传临时清单并原子替换 `version.json`。
+
+清单最后切换可防止客户端读取到尚未完成上传的版本。
+
+## 公网验证
+
+```powershell
+$manifest = Invoke-RestMethod http://218.201.210.211:8000/v1/updates/manifest
+$manifest | ConvertTo-Json -Depth 6
+
+curl.exe -fsSI http://218.201.210.211:8000/updates/windows/RHZYCODE-Setup-<version>-x64.exe
+curl.exe -fsSI http://218.201.210.211:8000/updates/android/RHZYCODE-Android-<version>.apk
+```
+
+还要在远程主机运行 `sha256sum`，与清单比较。HTTP 必须返回 `200`，`Content-Length` 必须与清单 `bytes` 一致。
+
+## 失败处理
+
+- 构建失败：不执行 publish/deploy，保留旧远程清单。
+- 本地暂存失败：修复缺失产物后重新执行 `update:publish`。
+- 文件上传失败：重新执行 deploy；旧清单仍指向旧版本。
+- 清单切换后发现问题：构建更高版本修复包。不要覆盖 immutable URL 下的同名文件。
+- 客户端校验失败：核对远程文件长度、SHA-256、代理缓存和清单。
+
+## 安全要求
+
+- 正式 Windows/Android 包使用生产签名。
+- SSH 只使用密钥认证，不在脚本或文档保存密码。
+- 安装包 URL 不包含凭据。
+- 当前公网 origin 使用 HTTP，无法防止更新包被链路篡改；客户端哈希校验不能替代 HTTPS 和代码签名。

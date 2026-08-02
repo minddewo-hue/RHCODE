@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
 import test from "node:test";
 import {
   DESKTOP_UPDATE_INTERVAL_MS,
@@ -21,6 +22,13 @@ class FakeUpdater extends EventEmitter {
   quitAndInstall() { this.installed = true; }
 }
 
+test("ships the electron-updater development configuration", () => {
+  const config = fs.readFileSync(new URL("../dev-app-update.yml", import.meta.url), "utf8");
+  assert.match(config, /^provider: generic$/m);
+  assert.match(config, /^url: http:\/\/218\.201\.210\.211:8000\/updates\/windows$/m);
+  assert.match(config, /^updaterCacheDirName: rhzycode-updater$/m);
+});
+
 test("tracks a configured update through check, download, and install", async () => {
   const updater = new FakeUpdater();
   const manager = new UpdateManager(updater, true, {
@@ -36,6 +44,7 @@ test("tracks a configured update through check, download, and install", async ()
   assert.equal(updater.forceDevUpdateConfig, true);
   assert.deepEqual(manager.getStatus(), {
     enabled: true,
+    currentVersion: "0.1.0",
     state: "available",
     version: "0.2.0",
     percent: null,
@@ -49,8 +58,9 @@ test("tracks a configured update through check, download, and install", async ()
 });
 
 test("keeps updates disabled when no signed channel is configured", async () => {
-  const manager = new UpdateManager(new FakeUpdater(), false);
+  const manager = new UpdateManager(new FakeUpdater(), false, { currentVersion: "0.1.0" });
   assert.equal(manager.getStatus().state, "disabled");
+  assert.equal(manager.getStatus().currentVersion, "0.1.0");
   await assert.rejects(manager.check(), /not configured/);
 });
 

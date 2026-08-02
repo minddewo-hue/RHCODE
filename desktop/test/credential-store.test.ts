@@ -25,6 +25,12 @@ test("stores encrypted provider credentials without exposing plaintext status", 
     decrypt: (value: Buffer) => value.toString("utf8").replace(/^encrypted:/, ""),
   };
   const store = new ProviderCredentialStore(root, storagePath, encryption);
+  assert.deepEqual(store.status(), {
+    encryptionAvailable: true,
+    providers: [],
+  });
+  const emptyRuntime = JSON.parse(fs.readFileSync(store.writeRuntimeConfig(), "utf8"));
+  assert.equal(emptyRuntime.providers.sub2api, undefined);
   store.set("sub2api", "provider-secret-value");
 
   assert.deepEqual(store.status(), {
@@ -48,7 +54,7 @@ test("stores encrypted provider credentials without exposing plaintext status", 
 
   store.set("sub2api", "");
   assert.equal(process.env.TEST_SUB2API_KEY, undefined);
-  assert.equal(store.status().providers[0]?.configured, false);
+  assert.deepEqual(store.status().providers, []);
 });
 
 test("deletes a built-in provider configuration and keeps it removed after restart", (context) => {
@@ -136,38 +142,4 @@ test("merges custom providers into a runtime config and preserves encrypted keys
   assert.equal(process.env.RHZYCODE_LLM_CLAUDE_API_KEY, "claude-secret");
   store.remove("claude");
   assert.equal(store.status().providers.some((provider) => provider.providerId === "claude"), false);
-});
-
-test("migrates an auto-configured Faker gateway from Responses to Chat Completions", (context) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-faker-protocol-"));
-  const storagePath = path.join(root, "state", "credentials.json");
-  fs.writeFileSync(path.join(root, "gateway.config.json"), JSON.stringify({
-    providers: {},
-    models: {},
-  }));
-  context.after(() => {
-    delete process.env.RHZYCODE_LLM_FAKER_API_KEY;
-    fs.rmSync(root, { recursive: true, force: true });
-  });
-  const encryption = {
-    isAvailable: () => true,
-    encrypt: (value: string) => Buffer.from(`encrypted:${value}`, "utf8"),
-    decrypt: (value: Buffer) => value.toString("utf8").replace(/^encrypted:/, ""),
-  };
-  const store = new ProviderCredentialStore(root, storagePath, encryption);
-  store.upsert({
-    providerId: "faker",
-    name: "Faker Model",
-    baseUrl: "https://faker-model.rhzy.ai/v1",
-    protocol: "auto",
-    detectedProtocol: "responses",
-    models: [],
-  }, "fm-test-key");
-
-  assert.equal(
-    store.status().providers.find((provider) => provider.providerId === "faker")?.detectedProtocol,
-    "chat_completions",
-  );
-  const runtime = JSON.parse(fs.readFileSync(store.getRuntimeConfigPath(), "utf8"));
-  assert.equal(runtime.providers.faker.protocol, "chat_completions");
 });

@@ -31,9 +31,6 @@ server.listen(PORT, HOST, () => {
   console.log(
     `Loaded ${config.providers.size} provider(s) and ${config.models.size} model(s) from ${config.source}.`,
   );
-  if (config.legacy) {
-    console.log("Running in legacy single-provider mode; set GATEWAY_CONFIG to enable model routing.");
-  }
 });
 
 function parsePort(value) {

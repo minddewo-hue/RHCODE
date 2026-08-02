@@ -76,7 +76,9 @@ export class ProviderCredentialStore {
     const file = this.readFile();
     const removedProviders = new Set(file.removedProviders);
     const providerIds = new Set([
-      ...this.staticProviders.map((provider) => provider.providerId),
+      ...this.staticProviders
+        .filter((provider) => file.credentials[provider.apiKeyEnv] || process.env[provider.apiKeyEnv]?.trim())
+        .map((provider) => provider.providerId),
       ...Object.keys(file.providers),
     ].filter((providerId) => !removedProviders.has(providerId)));
     return {
@@ -149,9 +151,12 @@ export class ProviderCredentialStore {
   }
 
   set(providerId: string, apiKey: string): void {
-    const status = this.status().providers.find((provider) => provider.providerId === providerId);
-    if (!status) throw new Error("Unknown gateway provider.");
     const file = this.readFile();
+    const knownProvider = file.providers[providerId]
+      || this.staticProviders.find((provider) => provider.providerId === providerId);
+    if (!knownProvider || file.removedProviders.includes(providerId)) {
+      throw new Error("Unknown gateway provider.");
+    }
     const environmentName = file.providers[providerId]?.apiKeyEnv
       || this.staticProviders.find((provider) => provider.providerId === providerId)?.apiKeyEnv
       || environmentNameFor(providerId);
@@ -174,7 +179,7 @@ export class ProviderCredentialStore {
       name: configuration.name,
       baseUrl: configuration.baseUrl,
       protocol: configuration.protocol,
-      detectedProtocol: effectiveDetectedProtocol(configuration),
+      detectedProtocol: configuration.detectedProtocol,
       models: [...configuration.models],
       apiKeyEnv: environmentName,
     };
@@ -200,8 +205,17 @@ export class ProviderCredentialStore {
     const runtime = structuredClone(this.staticConfig);
     runtime.providers ||= {};
     runtime.models ||= {};
+    const configuredProviderIds = new Set(this.status().providers
+      .filter((provider) => provider.configured)
+      .map((provider) => provider.providerId));
 
-    for (const providerId of file.removedProviders) {
+    const unavailableProviderIds = new Set([
+      ...file.removedProviders,
+      ...this.staticProviders
+        .map((provider) => provider.providerId)
+        .filter((providerId) => !configuredProviderIds.has(providerId)),
+    ]);
+    for (const providerId of unavailableProviderIds) {
       delete runtime.providers[providerId];
       for (const [modelId, model] of Object.entries(runtime.models)) {
         if (model.provider === providerId) delete runtime.models[modelId];
@@ -209,11 +223,12 @@ export class ProviderCredentialStore {
     }
 
     for (const [providerId, provider] of Object.entries(file.providers)) {
+      if (!configuredProviderIds.has(providerId)) continue;
       const previous = runtime.providers[providerId] || {};
       runtime.providers[providerId] = {
         ...previous,
         base_url: provider.baseUrl,
-        protocol: effectiveDetectedProtocol(provider),
+        protocol: provider.detectedProtocol,
         api_key_env: provider.apiKeyEnv,
         model_discovery: {
           prefix: `${providerId}/`,
@@ -327,11 +342,7 @@ function normalizeProviderRecords(value: Record<string, unknown>): Record<string
       name: raw.name,
       baseUrl: raw.baseUrl,
       protocol: raw.protocol,
-      detectedProtocol: effectiveDetectedProtocol({
-        baseUrl: raw.baseUrl,
-        protocol: raw.protocol,
-        detectedProtocol: raw.detectedProtocol,
-      }),
+      detectedProtocol: raw.detectedProtocol,
       apiKeyEnv: raw.apiKeyEnv,
       models: raw.models.filter((model): model is string => typeof model === "string"),
     };
@@ -341,22 +352,6 @@ function normalizeProviderRecords(value: Record<string, unknown>): Record<string
 
 function environmentNameFor(providerId: string): string {
   return `RHZYCODE_LLM_${providerId.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}_API_KEY`;
-}
-
-function effectiveDetectedProtocol(provider: {
-  baseUrl: string;
-  protocol: LlmProtocolMode;
-  detectedProtocol: LlmProtocol;
-}): LlmProtocol {
-  if (provider.protocol !== "auto") return provider.detectedProtocol;
-  try {
-    if (new URL(provider.baseUrl).hostname.toLowerCase() === "faker-model.rhzy.ai") {
-      return "chat_completions";
-    }
-  } catch {
-    // Provider URL validation happens before storage; retain the detected protocol for legacy data.
-  }
-  return provider.detectedProtocol;
 }
 
 function emptyCredentialFile(): CredentialFile {

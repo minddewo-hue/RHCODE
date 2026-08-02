@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { agentEventSchema, controlSnapshotSchema } from "@rhzycode/protocol";
+import { agentEventSchema, controlSnapshotSchema, type AgentEvent } from "@rhzycode/protocol";
 import type { ControlStore, ControlStoreState } from "./control-plane/app";
 import type { CredentialEncryption } from "./credential-store";
 
@@ -69,7 +69,9 @@ export class EncryptedControlPersistence {
   attach(store: ControlStore): void {
     this.detach();
     this.store = store;
-    this.unsubscribe = store.onEvent(() => this.scheduleWrite());
+    this.unsubscribe = store.onEvent((event) => {
+      if (shouldScheduleWrite(event)) this.scheduleWrite();
+    });
   }
 
   flush(): void {
@@ -96,6 +98,11 @@ export class EncryptedControlPersistence {
     this.pendingWrite = setTimeout(() => this.flush(), 150);
     this.pendingWrite.unref();
   }
+}
+
+function shouldScheduleWrite(event: AgentEvent): boolean {
+  return event.type !== "timeline.upserted"
+    || (event.item.status !== "running" && event.item.status !== "pending");
 }
 
 export class EncryptedStateFile<T> {

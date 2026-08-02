@@ -14,16 +14,23 @@ import {
 import { applyGemma31bChatRequestPolicy } from "./gemma-31b-policy.js";
 import { sanitizeResponsesRequestBody } from "./sanitize-responses-input.js";
 
-export function createGatewayServer(config) {
+const RUNTIME_LOG_SINK = Symbol("runtimeLogSink");
+
+export function createGatewayServer(config, options = {}) {
+  config[RUNTIME_LOG_SINK] = typeof options.onLog === "function" ? options.onLog : null;
   const state = {
     circuits: new Map(),
     stickyResponses: new Map(),
     gammaTurns: new Map(),
+    activeRequests: new Map(),
+    threadModels: new Map(),
+    fetchImpl: options.fetchImpl || fetch,
   };
 
   const server = http.createServer(async (req, res) => {
     const requestId = randomUUID();
     const startedAt = Date.now();
+    let requestTurnId = null;
     res.setHeader("x-request-id", requestId);
     setCorsHeaders(res);
 
@@ -53,7 +60,19 @@ export function createGatewayServer(config) {
         const access = authorize(req, config);
         if (!access.authorized) throw unauthorizedError();
         const body = await readJsonBody(req, config.bodyLimit);
-        await handleResponses({ req, res, body, requestId, startedAt, config, state, access });
+        requestTurnId = responseRequestTurnId(body);
+        log(config, "debug", {
+          event: "request_started",
+          request_id: requestId,
+          turn_id: requestTurnId,
+          thread_id: responseRequestThreadId(body),
+          public_model: body?.model,
+        });
+        try {
+          await handleResponses({ req, res, body, requestId, startedAt, config, state, access });
+        } finally {
+          state.activeRequests.delete(requestId);
+        }
         return;
       }
 
@@ -67,6 +86,7 @@ export function createGatewayServer(config) {
         path: req.url,
         status: normalized.status,
         code: normalized.code,
+        turn_id: requestTurnId,
         latency_ms: Date.now() - startedAt,
         message: normalized.status >= 500 ? normalized.message : undefined,
       });
@@ -87,6 +107,14 @@ export function createGatewayServer(config) {
 
   Object.defineProperty(server, "gatewayHealth", {
     value: () => makeHealth(config, state),
+    enumerable: false,
+  });
+  Object.defineProperty(server, "gatewayInterruptTurn", {
+    value: (turnId) => interruptTurnUpstreams(state, turnId),
+    enumerable: false,
+  });
+  Object.defineProperty(server, "gatewaySetThreadModel", {
+    value: (threadId, modelId) => setThreadModel(config, state, threadId, modelId),
     enumerable: false,
   });
 
@@ -122,15 +150,22 @@ async function handleResponses({
     });
   }
 
-  const model = resolveRequestedModel(config.models, body.model);
-  if (!model) throw new HttpError(404, `Model ${body.model} was not found.`, "model_not_found");
-  if (model.id !== body.model) {
+  const requestedModel = resolveRequestedModel(config.models, body.model);
+  const reroutedModel = compactionRerouteModel(body, requestedModel, config, state);
+  if (reroutedModel) {
+    const threadId = responseRequestThreadId(body);
     log(config, "info", {
-      event: "legacy_model_resolved",
-      requested_model: body.model,
-      public_model: model.id,
+      event: "compaction_model_rerouted",
+      request_id: requestId,
+      turn_id: responseRequestTurnId(body),
+      thread_id: threadId,
+      from_model: requestedModel?.id,
+      to_model: reroutedModel.id,
     });
+    body = { ...body, model: reroutedModel.id };
   }
+  const model = reroutedModel || requestedModel;
+  if (!model) throw new HttpError(404, `Model ${body.model} was not found.`, "model_not_found");
   if (!canUseModel(access, model.id)) {
     throw new HttpError(403, `Access to model ${model.id} is not allowed.`, "model_not_allowed");
   }
@@ -143,6 +178,8 @@ async function handleResponses({
   }
 
   const routes = routesForRequest(model, body.previous_response_id, state, config);
+  const turnId = responseRequestTurnId(body);
+  state.activeRequests.set(requestId, { turnId, abort: null, interrupted: false });
   const selected = await selectUpstream({
     routes,
     model,
@@ -152,6 +189,7 @@ async function handleResponses({
     requestId,
     config,
     state,
+    deadlineAt: startedAt + config.timeoutMs,
   });
 
   if (selected.error) {
@@ -169,6 +207,7 @@ async function handleResponses({
     });
     logRequest(config, {
       requestId,
+      turnId,
       model,
       route: selected.route,
       status: selected.error.status,
@@ -187,6 +226,7 @@ async function handleResponses({
         config,
         model,
         requestId,
+        turnId,
         startedAt,
       });
       return;
@@ -199,6 +239,7 @@ async function handleResponses({
     selected.cleanup();
     logRequest(config, {
       requestId,
+      turnId,
       model,
       route: selected.route,
       status: selected.response.status,
@@ -226,6 +267,7 @@ async function handleResponses({
         onComplete: () =>
           logRequest(config, {
             requestId,
+            turnId,
             model,
             route: selected.route,
             status: 200,
@@ -236,6 +278,7 @@ async function handleResponses({
           log(config, "error", {
             event: "stream_interrupted",
             request_id: requestId,
+            turn_id: turnId,
             provider: selected.route.provider.id,
             public_model: model.id,
             message: sanitizeMessage(error?.message || String(error)),
@@ -260,6 +303,7 @@ async function handleResponses({
     writeJson(res, 200, response);
     logRequest(config, {
       requestId,
+      turnId,
       model,
       route: selected.route,
       status: 200,
@@ -285,22 +329,20 @@ async function handleResponses({
 }
 
 export function resolveRequestedModel(models, requestedId) {
-  const exact = models.get(requestedId);
-  if (exact) return exact;
-
-  const legacyName = requestedId.split("/").at(-1)?.trim();
-  if (!legacyName) return null;
-  const candidates = new Map();
-  for (const model of models.values()) {
-    const matchesPublicSuffix = model.id === legacyName || model.id.endsWith(`/${legacyName}`);
-    const matchesUpstream = model.routes.some((route) =>
-      route.upstreamModel === requestedId || route.upstreamModel === legacyName);
-    if (matchesPublicSuffix || matchesUpstream) candidates.set(model.id, model);
-  }
-  return candidates.size === 1 ? candidates.values().next().value : null;
+  return models.get(requestedId) || null;
 }
 
-async function selectUpstream({ routes, model, body, req, res, requestId, config, state }) {
+async function selectUpstream({
+  routes,
+  model,
+  body,
+  req,
+  res,
+  requestId,
+  config,
+  state,
+  deadlineAt,
+}) {
   const compatibleRoutes = routes.filter((route) => routeCanRepresentRequest(route, body));
   if (compatibleRoutes.length === 0) {
     const unsupported = routes
@@ -359,8 +401,28 @@ async function selectUpstream({ routes, model, body, req, res, requestId, config
     let preOutputAttempt = 0;
     let emptyResponseAttempt = 0;
     while (true) {
+      if (state.activeRequests.get(requestId)?.interrupted) {
+        throw requestInterruptedError();
+      }
+      if (Date.now() >= deadlineAt) {
+        lastFailure = {
+          status: 504,
+          message: `Provider ${provider.id} exceeded the request timeout.`,
+        };
+        break routeLoop;
+      }
       try {
-        upstream = await fetchRoute({ route, requestBody, req, res, requestId, config });
+        upstream = await fetchRoute({
+          route,
+          requestBody,
+          req,
+          res,
+          requestId,
+          config,
+          fetchImpl: state.fetchImpl,
+          state,
+          deadlineAt,
+        });
         if (!upstream.response.ok) {
           const errorBody = await readResponseBuffer(upstream.response);
           const status = upstream.response.status;
@@ -387,8 +449,13 @@ async function selectUpstream({ routes, model, body, req, res, requestId, config
         }
 
         if (body.stream) {
-          const reader = upstream.response.body?.getReader();
-          if (!reader) throw new Error("Upstream streaming response has no body.");
+          const nativeReader = upstream.response.body?.getReader();
+          if (!nativeReader) throw new Error("Upstream streaming response has no body.");
+          const reader = withStreamIdleTimeout(
+            nativeReader,
+            upstream.streamIdleTimeoutMs,
+            upstream.abort,
+          );
           const first = await reader.read();
           if (first.done || !first.value?.length) {
             await reader.cancel().catch(() => {});
@@ -438,6 +505,9 @@ async function selectUpstream({ routes, model, body, req, res, requestId, config
       } catch (error) {
         upstream?.cleanup();
         upstream = null;
+        if (state.activeRequests.get(requestId)?.interrupted) {
+          throw requestInterruptedError();
+        }
         if (
           route.protocol === "chat_completions" &&
           model.bufferChatStream &&
@@ -447,8 +517,15 @@ async function selectUpstream({ routes, model, body, req, res, requestId, config
           recordSuccess(route, state, 200);
           return makeGammaGuardSelection(route, responseRequest, gammaState);
         }
-        const timedOut = error?.name === "AbortError" || error?.cause?.code === "UND_ERR_CONNECT_TIMEOUT";
+        const timedOut = isUpstreamTimeout(error);
         const status = timedOut ? 504 : 502;
+        if (Date.now() >= deadlineAt) {
+          lastFailure = {
+            status: 504,
+            message: `Provider ${provider.id} exceeded the request timeout.`,
+          };
+          break routeLoop;
+        }
         if (preOutputAttempt < model.preOutputRetries) {
           preOutputAttempt += 1;
           if (!timedOut && route.protocol === "chat_completions") {
@@ -770,13 +847,28 @@ function unsupportedRouteFeatures(route, body) {
   return unsupported;
 }
 
-async function fetchRoute({ route, requestBody, req, res, requestId, config }) {
+async function fetchRoute({
+  route,
+  requestBody,
+  req,
+  res,
+  requestId,
+  config,
+  fetchImpl,
+  state,
+  deadlineAt,
+}) {
   const provider = route.provider;
+  const activeRequest = state.activeRequests.get(requestId);
+  if (activeRequest?.interrupted) throw requestInterruptedError();
   const controller = new AbortController();
-  const timeoutMs = provider.timeoutMs || config.timeoutMs;
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) throw upstreamTimeoutError("The upstream request deadline expired.");
+  const timeoutMs = Math.min(provider.timeoutMs || config.timeoutMs, remainingMs);
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   timeout.unref?.();
   const abort = () => controller.abort();
+  if (activeRequest) activeRequest.abort = abort;
   req.once("aborted", abort);
   res.once("close", abort);
 
@@ -798,20 +890,155 @@ async function fetchRoute({ route, requestBody, req, res, requestId, config }) {
     clearTimeout(timeout);
     req.off("aborted", abort);
     res.off("close", abort);
+    if (activeRequest?.abort === abort) activeRequest.abort = null;
   };
 
   try {
-    const response = await fetch(`${provider.baseUrl}${route.path}`, {
+    const response = await fetchImpl(`${provider.baseUrl}${route.path}`, {
       method: "POST",
       headers,
       body: JSON.stringify(requestBody),
       signal: controller.signal,
     });
-    return { response, cleanup };
+    return {
+      response,
+      cleanup,
+      abort,
+      streamIdleTimeoutMs: provider.streamIdleTimeoutMs || config.streamIdleTimeoutMs,
+    };
   } catch (error) {
     cleanup();
     throw error;
   }
+}
+
+function withStreamIdleTimeout(reader, timeoutMs, abort) {
+  return {
+    async read() {
+      let timeout;
+      try {
+        return await Promise.race([
+          reader.read(),
+          new Promise((_, reject) => {
+            timeout = setTimeout(() => {
+              abort();
+              reject(upstreamTimeoutError(`Upstream stream was idle for ${timeoutMs} ms.`));
+            }, timeoutMs);
+            timeout.unref?.();
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+    releaseLock() {
+      return reader.releaseLock();
+    },
+  };
+}
+
+function upstreamTimeoutError(message) {
+  const error = new Error(message);
+  error.name = "UpstreamTimeoutError";
+  return error;
+}
+
+function requestInterruptedError() {
+  return new HttpError(499, "The request was interrupted.", "request_interrupted");
+}
+
+function isUpstreamTimeout(error) {
+  return error?.name === "AbortError"
+    || error?.name === "UpstreamTimeoutError"
+    || error?.cause?.code === "UND_ERR_CONNECT_TIMEOUT";
+}
+
+function responseInputTurnId(input) {
+  if (!Array.isArray(input)) return null;
+  for (let index = input.length - 1; index >= 0; index -= 1) {
+    const turnId = input[index]?.internal_chat_message_metadata_passthrough?.turn_id;
+    if (typeof turnId === "string" && turnId) return turnId;
+  }
+  return null;
+}
+
+function responseRequestTurnId(body) {
+  const metadata = body?.client_metadata;
+  if (typeof metadata?.turn_id === "string" && metadata.turn_id) return metadata.turn_id;
+  const turnMetadata = responseTurnMetadata(body);
+  if (typeof turnMetadata?.turn_id === "string" && turnMetadata.turn_id) return turnMetadata.turn_id;
+  return responseInputTurnId(body?.input);
+}
+
+function responseRequestThreadId(body) {
+  const metadata = body?.client_metadata;
+  if (typeof metadata?.thread_id === "string" && metadata.thread_id) return metadata.thread_id;
+  const turnMetadata = responseTurnMetadata(body);
+  if (typeof turnMetadata?.thread_id === "string" && turnMetadata.thread_id) return turnMetadata.thread_id;
+  return typeof body?.prompt_cache_key === "string" && body.prompt_cache_key
+    ? body.prompt_cache_key
+    : null;
+}
+
+function responseTurnMetadata(body) {
+  const value = body?.client_metadata?.["x-codex-turn-metadata"];
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isCompactionRequest(body) {
+  if (responseTurnMetadata(body)?.request_kind === "compaction") return true;
+  const lastInput = Array.isArray(body?.input) ? body.input.at(-1) : null;
+  const text = Array.isArray(lastInput?.content)
+    ? lastInput.content.map((item) => item?.text || "").join("\n")
+    : "";
+  return text.startsWith("You are performing a CONTEXT CHECKPOINT COMPACTION.");
+}
+
+function isImageGenerationModel(model) {
+  if (!model) return false;
+  if (model.capabilities?.image_generation === true) return true;
+  const identifiers = [model.id, ...(model.routes || []).map((route) => route.upstreamModel)];
+  return identifiers.some((value) => /(?:^|[/_-])(?:gpt-)?image(?:[-_/]|$)/i.test(String(value || "")));
+}
+
+function compactionRerouteModel(body, requestedModel, config, state) {
+  if (!requestedModel || !isImageGenerationModel(requestedModel) || !isCompactionRequest(body)) return null;
+  const threadId = responseRequestThreadId(body);
+  const preferredModelId = threadId ? state.threadModels.get(threadId) : null;
+  const preferredModel = preferredModelId
+    ? resolveRequestedModel(config.models, preferredModelId)
+    : null;
+  if (!preferredModel || preferredModel.id === requestedModel.id || isImageGenerationModel(preferredModel)) return null;
+  return preferredModel;
+}
+
+function setThreadModel(config, state, threadId, modelId) {
+  if (typeof threadId !== "string" || !threadId || !resolveRequestedModel(config.models, modelId)) return false;
+  state.threadModels.delete(threadId);
+  state.threadModels.set(threadId, modelId);
+  while (state.threadModels.size > 1000) state.threadModels.delete(state.threadModels.keys().next().value);
+  return true;
+}
+
+function interruptTurnUpstreams(state, turnId) {
+  if (typeof turnId !== "string" || !turnId) return 0;
+  let interrupted = 0;
+  for (const active of state.activeRequests.values()) {
+    if (active.turnId !== turnId || active.interrupted) continue;
+    active.interrupted = true;
+    active.abort?.();
+    interrupted += 1;
+  }
+  return interrupted;
 }
 
 async function pipeNativeResponsesStream({
@@ -821,6 +1048,7 @@ async function pipeNativeResponsesStream({
   config,
   model,
   requestId,
+  turnId,
   startedAt,
 }) {
   const tracker = new ResponseIdTracker((responseId) => {
@@ -842,6 +1070,7 @@ async function pipeNativeResponsesStream({
     res.end();
     logRequest(config, {
       requestId,
+      turnId,
       model,
       route: selected.route,
       status: selected.response.status,
@@ -852,6 +1081,7 @@ async function pipeNativeResponsesStream({
     log(config, "error", {
       event: "stream_interrupted",
       request_id: requestId,
+      turn_id: turnId,
       provider: selected.route.provider.id,
       public_model: model.id,
       message: sanitizeMessage(error?.message || String(error)),
@@ -1068,7 +1298,7 @@ function makeHealth(config, state) {
   }
   return {
     ok: true,
-    mode: config.legacy ? "legacy" : "multi_provider",
+    mode: "multi_provider",
     models: config.models.size,
     providers,
   };
@@ -1199,10 +1429,11 @@ function logPreOutputRetry(config, requestId, model, route, status, attempt, err
   });
 }
 
-function logRequest(config, { requestId, model, route, status, startedAt, streamed, usage }) {
+function logRequest(config, { requestId, turnId, model, route, status, startedAt, streamed, usage }) {
   log(config, "info", {
     event: "request_completed",
     request_id: requestId,
+    turn_id: turnId,
     provider: route.provider.id,
     public_model: model.id,
     upstream_model: route.upstreamModel,
@@ -1216,9 +1447,15 @@ function logRequest(config, { requestId, model, route, status, startedAt, stream
 
 function log(config, level, fields) {
   const order = { debug: 10, info: 20, warn: 30, error: 40 };
-  if ((order[level] || 20) < (order[config.logLevel] || 20)) return;
   const clean = Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
-  console.error(JSON.stringify({ time: new Date().toISOString(), level, ...clean }));
+  const entry = { time: new Date().toISOString(), level, ...clean };
+  try {
+    config[RUNTIME_LOG_SINK]?.(entry);
+  } catch {
+    // Runtime telemetry must never affect gateway request handling.
+  }
+  if ((order[level] || 20) < (order[config.logLevel] || 20)) return;
+  console.error(JSON.stringify(entry));
 }
 
 async function readJsonBody(req, limit) {

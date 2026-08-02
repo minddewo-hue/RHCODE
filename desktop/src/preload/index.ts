@@ -36,6 +36,8 @@ const api: RhzycodeDesktopApi = {
   revealLocalFile: (path: string) => ipcRenderer.invoke("project:reveal-local-file", path),
   saveLocalFile: (path: string, suggestedName: string) =>
     ipcRenderer.invoke("project:save-local-file", path, suggestedName),
+  showImageContextMenu: (path: string, suggestedName: string) =>
+    ipcRenderer.invoke("project:show-image-context-menu", path, suggestedName),
   startThread: (params: { cwd: string; model?: string; approvalPolicy?: "on-request" | "untrusted" | "never"; sandboxMode?: "read-only" | "workspace-write" | "danger-full-access" }) =>
     ipcRenderer.invoke("agent:thread:start", params),
   archiveThread: (threadId: string) => ipcRenderer.invoke("agent:thread:archive", threadId),
@@ -43,8 +45,11 @@ const api: RhzycodeDesktopApi = {
   setThreadModel: (threadId: string, model: string) => ipcRenderer.invoke("agent:thread:model", threadId, model),
   renameThread: (threadId: string, name: string) => ipcRenderer.invoke("agent:thread:rename", threadId, name),
   deleteThread: (threadId: string) => ipcRenderer.invoke("agent:thread:delete", threadId),
+  compactThread: (threadId: string) => ipcRenderer.invoke("agent:thread:compact", threadId),
   backupProjectConversations: (projectPath: string) =>
     ipcRenderer.invoke("conversation:backup", projectPath),
+  listExportConversations: () => ipcRenderer.invoke("conversation:export-list"),
+  exportConversations: (threadIds: string[]) => ipcRenderer.invoke("conversation:export", threadIds),
   restoreProjectConversations: () => ipcRenderer.invoke("conversation:restore"),
   startTurn: (params: { threadId: string; text: string; model?: string; approvalPolicy?: "on-request" | "untrusted" | "never"; sandboxMode?: "read-only" | "workspace-write" | "danger-full-access"; reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"; attachments?: Array<{ path: string; name: string; kind: "file" | "image"; size: number }> }) =>
     ipcRenderer.invoke("agent:turn:start", params),
@@ -74,7 +79,6 @@ const api: RhzycodeDesktopApi = {
   copyText: (value: string) => ipcRenderer.invoke("clipboard:write", value),
   getPersistenceStatus: () => ipcRenderer.invoke("storage:status"),
   getSyncStatus: () => ipcRenderer.invoke("sync:status"),
-  setSyncPort: (port: number) => ipcRenderer.invoke("sync:port:set", port),
   getSyncSnapshot: () => ipcRenderer.invoke("sync:snapshot"),
   resolveApproval: (id: string, decision: "approved" | "declined") =>
     ipcRenderer.invoke("sync:approval:resolve", id, decision),
@@ -88,6 +92,11 @@ const api: RhzycodeDesktopApi = {
   resizeTerminal: (processId: string, cols: number, rows: number) =>
     ipcRenderer.invoke("terminal:resize", processId, cols, rows),
   stopTerminal: (processId: string) => ipcRenderer.invoke("terminal:stop", processId),
+  onWindowFocus: (listener) => {
+    const handler = () => listener();
+    ipcRenderer.on("window:focused", handler);
+    return () => ipcRenderer.removeListener("window:focused", handler);
+  },
   onAgentStatus: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, status: AgentStatus) => listener(status);
     ipcRenderer.on("agent:status", handler);

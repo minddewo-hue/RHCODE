@@ -9,7 +9,9 @@ import {
 export { compareVersions } from "@rhzycode/update-contract";
 
 export const DESKTOP_UPDATE_INTERVAL_MS = 2 * 60 * 60 * 1_000;
-export const DEFAULT_UPDATE_MANIFEST_URL = "https://minio.gshbzw.com/wxfile/rhzycode/version.json";
+export const DEFAULT_UPDATE_MANIFEST_URL = `${(
+  process.env.RHZYCODE_TRANSFER_SERVER_URL?.trim() || "http://218.201.210.211:8000"
+).replace(/\/+$/, "")}/v1/updates/manifest`;
 
 export function isDesktopUpdateWindow(date: Date): boolean {
   const hour = date.getHours();
@@ -28,6 +30,7 @@ export type UpdateState =
 
 export interface UpdateStatus {
   enabled: boolean;
+  currentVersion: string | null;
   state: UpdateState;
   version: string | null;
   percent: number | null;
@@ -66,6 +69,7 @@ export class UpdateManager extends EventEmitter {
     super();
     this.status = {
       enabled,
+      currentVersion: options.currentVersion || null,
       state: enabled ? "idle" : "disabled",
       version: null,
       percent: null,

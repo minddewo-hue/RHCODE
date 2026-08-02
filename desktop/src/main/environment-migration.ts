@@ -39,6 +39,13 @@ export interface SessionProviderNormalizationResult {
   failedCount: number;
 }
 
+const SESSION_PROVIDER_NORMALIZATION_VERSION = 1;
+
+interface SessionProviderNormalizationState {
+  version: typeof SESSION_PROVIDER_NORMALIZATION_VERSION;
+  completedAt: string;
+}
+
 export interface MigrationRunResult {
   source: EnvironmentMigrationSource;
   status: EnvironmentMigrationStatus | "failed";
@@ -201,6 +208,19 @@ export function normalizeCodexSessionProviders(
   }
 
   return { examinedCount, normalizedCount, failedCount };
+}
+
+export function normalizeCodexSessionProvidersOnce(
+  codexHome: string,
+  statePath: string,
+): SessionProviderNormalizationResult {
+  if (hasCompletedSessionProviderNormalization(statePath)) {
+    return { examinedCount: 0, normalizedCount: 0, failedCount: 0 };
+  }
+
+  const result = normalizeCodexSessionProviders(codexHome);
+  if (result.failedCount === 0) writeSessionProviderNormalizationState(statePath);
+  return result;
 }
 
 export async function runFirstLaunchEnvironmentMigrations(
@@ -403,6 +423,36 @@ function readMigrationState(filePath: string): StoredMigrationState {
     // Missing or invalid state means this installation has not completed the migration check.
   }
   return { version: 1, sources: {} };
+}
+
+function hasCompletedSessionProviderNormalization(statePath: string): boolean {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statePath, "utf8")) as Partial<SessionProviderNormalizationState>;
+    return parsed.version === SESSION_PROVIDER_NORMALIZATION_VERSION
+      && typeof parsed.completedAt === "string"
+      && Number.isFinite(Date.parse(parsed.completedAt));
+  } catch {
+    return false;
+  }
+}
+
+function writeSessionProviderNormalizationState(statePath: string): void {
+  const state: SessionProviderNormalizationState = {
+    version: SESSION_PROVIDER_NORMALIZATION_VERSION,
+    completedAt: new Date().toISOString(),
+  };
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  const temporaryPath = `${statePath}.tmp`;
+  try {
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    fs.renameSync(temporaryPath, statePath);
+  } catch (error) {
+    fs.rmSync(temporaryPath, { force: true });
+    throw error;
+  }
 }
 
 function listJsonlFiles(root: string): string[] {

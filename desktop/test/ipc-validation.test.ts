@@ -12,7 +12,6 @@ import {
   validateSkillPath,
   validateStartThread,
   validateStartTurn,
-  validateSyncPort,
   validateTerminalResize,
   validateTerminalStart,
   validateTerminalWrite,
@@ -123,10 +122,6 @@ test("validates turn content, policies, and attachment metadata", () => {
 
 test("validates credentials, clipboard, approvals, and user answers", () => {
   assert.equal(validateClipboardText("192.168.1.25"), "192.168.1.25");
-  assert.equal(validateSyncPort(8790), 8790);
-  assert.equal(validateSyncPort(65_535), 65_535);
-  assert.throws(() => validateSyncPort(0), /between 1 and 65535/);
-  assert.throws(() => validateSyncPort("8790"), /between 1 and 65535/);
   assert.deepEqual(validateCredentialUpdate("faker", "secret-value"), {
     providerId: "faker",
     apiKey: "secret-value",

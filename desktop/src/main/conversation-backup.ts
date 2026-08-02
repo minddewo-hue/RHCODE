@@ -65,19 +65,46 @@ export interface ConversationSessionRecord {
   modifiedAt: string;
 }
 
+export interface ConversationSessionListing {
+  sessions: ConversationSessionRecord[];
+  duplicateThreadIds: string[];
+}
+
+interface ScannedConversationSessionRecord extends ConversationSessionRecord {
+  lineageId: string;
+}
+
 export async function listConversationSessions(
   codexHome: string,
 ): Promise<ConversationSessionRecord[]> {
-  const sessions = new Map<string, ConversationSessionRecord>();
+  return (await listConversationSessionsWithDuplicates(codexHome)).sessions;
+}
+
+export async function listConversationSessionsWithDuplicates(
+  codexHome: string,
+): Promise<ConversationSessionListing> {
+  const scanned: ScannedConversationSessionRecord[] = [];
   for (const directoryName of ["sessions", "archived_sessions"] as const) {
     for (const filePath of await listJsonlFiles(path.join(codexHome, directoryName))) {
       const session = await readSessionRecord(filePath, directoryName === "archived_sessions");
       if (!session) continue;
-      const current = sessions.get(session.threadId);
-      if (!current || current.archived && !session.archived) sessions.set(session.threadId, session);
+      scanned.push(session);
     }
   }
-  return [...sessions.values()];
+
+  const preferredByLineage = new Map<string, ScannedConversationSessionRecord>();
+  for (const session of scanned) {
+    const current = preferredByLineage.get(session.lineageId);
+    if (!current || preferConversationSession(session, current)) {
+      preferredByLineage.set(session.lineageId, session);
+    }
+  }
+  const preferredIds = new Set([...preferredByLineage.values()].map((session) => session.threadId));
+  const duplicateThreadIds = [...new Set(
+    scanned.map((session) => session.threadId).filter((threadId) => !preferredIds.has(threadId)),
+  )];
+  const sessions = [...preferredByLineage.values()].map(({ lineageId: _lineageId, ...session }) => session);
+  return { sessions, duplicateThreadIds };
 }
 
 export async function listProjectConversationThreadIds(
@@ -127,7 +154,40 @@ export async function backupProjectConversations(
   projectPath: string,
   destinationPath: string,
 ): Promise<ConversationBackupResult> {
+  return createConversationBackup(
+    codexHome,
+    destinationPath,
+    (metadata) => samePath(metadata.cwd, projectPath),
+    projectPath,
+    "No conversations were found for this project.",
+  );
+}
+
+export async function backupSelectedConversations(
+  codexHome: string,
+  requestedThreadIds: Iterable<string>,
+  destinationPath: string,
+): Promise<ConversationBackupResult> {
+  const threadIds = new Set([...requestedThreadIds].filter((threadId) => THREAD_ID_PATTERN.test(threadId)));
+  if (threadIds.size === 0) throw new Error("Select at least one conversation to export.");
+  return createConversationBackup(
+    codexHome,
+    destinationPath,
+    (metadata) => threadIds.has(metadata.id),
+    "",
+    "None of the selected conversations have data available to export.",
+  );
+}
+
+async function createConversationBackup(
+  codexHome: string,
+  destinationPath: string,
+  include: (metadata: SessionMetadata) => boolean,
+  projectPath: string,
+  emptyMessage: string,
+): Promise<ConversationBackupResult> {
   const sessions: BackupSession[] = [];
+  const includedThreadIds = new Set<string>();
   let totalBytes = 0;
 
   for (const directoryName of ["sessions", "archived_sessions"] as const) {
@@ -137,14 +197,14 @@ export async function backupProjectConversations(
       if (!snapshot) continue;
       const { contents, stats } = snapshot;
       const metadata = readSessionMetadata(contents);
-      if (!metadata || !samePath(metadata.cwd, projectPath)) continue;
+      if (!metadata || !include(metadata) || includedThreadIds.has(metadata.id)) continue;
 
       totalBytes += contents.length;
       if (totalBytes > MAX_TOTAL_SESSION_BYTES) {
-        throw new Error("Project conversations are too large for a single backup.");
+        throw new Error("Selected conversations are too large for a single export.");
       }
       if (sessions.length >= MAX_SESSION_COUNT) {
-        throw new Error("Project has too many conversations for a single backup.");
+        throw new Error("Too many conversations were selected for a single export.");
       }
 
       sessions.push({
@@ -157,11 +217,12 @@ export async function backupProjectConversations(
         encoding: "base64",
         content: contents.toString("base64"),
       });
+      includedThreadIds.add(metadata.id);
     }
   }
 
   if (sessions.length === 0) {
-    throw new Error("No conversations were found for this project.");
+    throw new Error(emptyMessage);
   }
 
   const manifest: ConversationBackupManifest = {
@@ -319,7 +380,7 @@ async function readSessionMetadataFile(filePath: string): Promise<SessionMetadat
 async function readSessionRecord(
   filePath: string,
   archived: boolean,
-): Promise<ConversationSessionRecord | null> {
+): Promise<ScannedConversationSessionRecord | null> {
   try {
     const stats = await fs.stat(filePath);
     const handle = await fs.open(filePath, "r");
@@ -384,12 +445,13 @@ function readSessionRecordContents(
   contents: Buffer,
   archived: boolean,
   fileModifiedAt: Date,
-): ConversationSessionRecord | null {
+): ScannedConversationSessionRecord | null {
   const metadata = readSessionMetadata(contents);
   if (!metadata) return null;
 
   let title = "Restored conversation";
   let model = "previous";
+  let lineageId = metadata.id;
   const modifiedAt = fileModifiedAt.toISOString();
   for (const line of contents.toString("utf8").split(/\r?\n/)) {
     if (!line) continue;
@@ -400,6 +462,12 @@ function readSessionRecordContents(
       continue;
     }
     const payload = asRecord(record.payload);
+    if (record.type === "session_meta") {
+      const embeddedId = typeof payload.id === "string"
+        ? payload.id
+        : typeof payload.session_id === "string" ? payload.session_id : "";
+      if (THREAD_ID_PATTERN.test(embeddedId)) lineageId = embeddedId;
+    }
     if (record.type === "turn_context" && typeof payload.model === "string" && payload.model.trim()) {
       model = payload.model.trim();
     }
@@ -409,12 +477,23 @@ function readSessionRecordContents(
   }
   return {
     threadId: metadata.id,
+    lineageId,
     projectPath: metadata.cwd,
     archived,
     title,
     model,
     modifiedAt,
   };
+}
+
+function preferConversationSession(
+  candidate: ScannedConversationSessionRecord,
+  current: ScannedConversationSessionRecord,
+): boolean {
+  if (candidate.archived !== current.archived) return !candidate.archived;
+  const modifiedDifference = candidate.modifiedAt.localeCompare(current.modifiedAt);
+  if (modifiedDifference !== 0) return modifiedDifference > 0;
+  return candidate.threadId === candidate.lineageId && current.threadId !== current.lineageId;
 }
 
 function extractUserText(recordType: unknown, payload: Record<string, unknown>): string | null {

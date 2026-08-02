@@ -17,8 +17,11 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
           id: "model-test",
           model: "sub2api/gpt-test",
           displayName: "GPT Test",
+          source: "Sub2API",
+          sourceModelName: "gpt-test",
           description: "Test model",
           defaultReasoningEffort: "medium",
+          reasoningEfforts: ["medium"],
           isDefault: true,
         }],
       };
@@ -106,6 +109,10 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
     },
     async renameThread(threadId, request, context) {
       calls.push({ command: "thread.rename", clientId: context.client.id, value: { threadId, request } });
+      return { threadId, acceptedAt: new Date().toISOString() };
+    },
+    async compactThread(threadId, context) {
+      calls.push({ command: "thread.compact", clientId: context.client.id, value: { threadId } });
       return { threadId, acceptedAt: new Date().toISOString() };
     },
     async archiveThread(threadId, context) {
@@ -273,6 +280,24 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
     "sub2api/gpt-test",
   );
 
+  const replayedTurn = await controlPlane.app.inject({
+    method: "POST",
+    url: "/v1/commands/threads/thread-remote/turns/start",
+    headers: {
+      authorization: `Bearer ${taskToken}`,
+      "idempotency-key": "turn-start-0001",
+    },
+    payload: {
+      text: "Run the remote task",
+      model: "sub2api/gpt-test",
+      sandboxMode: "read-only",
+      approvalPolicy: "on-request",
+    },
+  });
+  assert.equal(replayedTurn.statusCode, 202);
+  assert.deepEqual(replayedTurn.json(), startedTurn.json());
+  assert.equal(calls.filter((call) => call.command === "turn.start").length, 1);
+
   const interrupted = await controlPlane.app.inject({
     method: "POST",
     url: "/v1/commands/threads/thread-remote/turns/interrupt",
@@ -330,6 +355,7 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
   assert.equal(renamed.statusCode, 200);
 
   for (const [operation, key] of [
+    ["compact", "thread-compact-0001"],
     ["archive", "thread-archive-0001"],
     ["unarchive", "thread-unarchive-0001"],
   ] as const) {
@@ -370,6 +396,7 @@ test("delegates authenticated mobile task commands to desktop handlers", async (
     "user-input.submit",
     "thread.model",
     "thread.rename",
+    "thread.compact",
     "thread.archive",
     "thread.unarchive",
     "thread.delete",

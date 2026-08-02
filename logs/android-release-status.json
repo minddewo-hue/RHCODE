@@ -1,0 +1,10 @@
+{
+  "pid": 49004,
+  "alive": false,
+  "apkExists": true,
+  "apkSize": 81099674,
+  "elapsedSec": 105,
+  "done": true,
+  "logTail": "\nBUILD SUCCESSFUL in 3m 50s\n393 actionable tasks: 365 executed, 28 up-to-date\nThe Daemon will expire after the build after running out of JVM Metaspace.\nThe project memory settings are likely not configured or are configured to an insufficient value.\nThe daemon will restart for the next build, which may increase subsequent build times.\nThese settings can be adjusted by setting 'org.gradle.jvmargs' in 'gradle.properties'.\nThe currently configured max heap space is '2 GiB' and the configured max metaspace is '512 MiB'.\nFor more information on how to set these values, please refer to https://docs.gradle.org/9.3.1/userguide/build_environment.html#sec:configuring_jvm_memory in the Gradle documentation.\nTo disable this warning, set 'org.gradle.daemon.performance.disable-logging=true'.\nDaemon will be stopped at the end of the build after running out of JVM Metaspace\n",
+  "ts": "2026-07-31T12:11:13.336Z"
+}

@@ -1,60 +1,39 @@
-# RHZYCODE MinIO updates
+# Update Tooling
 
-Release files are published under the public MinIO prefix `wxfile/rhzycode/`.
-Windows, macOS, Android, and iOS read the same version manifest:
+`appupdate` 保存 RHZYCODE 的平台构建、本地暂存和远程部署脚本。
 
-`https://minio.gshbzw.com/wxfile/rhzycode/version.json`
+## 命令
 
-## Commands
+从仓库根目录运行：
 
 ```powershell
-npm run update:build:desktop
-npm run update:build:mobile
-# Run these on macOS when producing Apple artifacts:
+npm run update:build:desktop  # Windows installer
+npm run update:build:mobile   # Android APK
+npm run update:publish        # stage local windows/android files
+npm run update:deploy         # upload staged files and switch manifest
+npm run update:release        # build Windows + Android, then stage locally
+```
+
+macOS/iOS 构建入口：
+
+```bash
 npm run update:build:mac
 npm run update:build:ios
-npm run update:stage
-npm run update:publish
 ```
 
-`update:stage` creates the local mirror in `appupdate/rhzycode/` without making
-network changes. `update:publish` uploads configured platform packages and desktop
-updater metadata, then replaces `version.json` last. Apple entries are optional until
-their artifacts and App Store URL are supplied; see the platform guide.
+当前 `publish.mjs` 只支持 Windows 和 Android。`update:release` 不包含远程部署。
 
-On Windows, save credentials once in the local DPAPI-protected credential store:
+## 配置
 
-```powershell
-npm run update:credentials
-```
+`config.json` 定义：
 
-Existing Python MinIO settings can be imported without printing either key:
+- 公网 origin。
+- 本地 updates 目录。
+- SSH 目标和远程项目目录。
 
-```powershell
-npm run update:credentials -- -ImportPythonFile "D:\path\to\test_minio_file.py"
-```
+配置不得包含 SSH 密码、私钥、签名密码或 Provider Key。部署使用操作系统已有的 SSH key 认证。
 
-The encrypted record is stored in `appupdate/.minio-credentials.json`, is ignored
-by Git, and can only be decrypted by the same Windows user. `update:publish`
-loads it automatically. Run the configuration command again after changing user
-accounts or machines.
+完整版本提升、签名、暂存、上传和公网校验流程见：
 
-Environment variables remain available as a temporary override and take priority
-over the saved record:
-
-```powershell
-$env:RHZYCODE_MINIO_ACCESS_KEY = "<access-key>"
-$env:RHZYCODE_MINIO_SECRET_KEY = "<secret-key>"
-npm run update:publish
-```
-
-Do not commit credentials or the source file containing plaintext keys. Endpoint,
-bucket, region, prefix, and credential settings are configured in
-`appupdate/config.json`. On macOS and Linux, use environment variables because
-the persistent store currently relies on Windows DPAPI.
-
-`npm run update:serve` is only a migration bridge for already-installed builds
-that still use `http://192.168.11.103:8791`. New builds access MinIO directly.
-
-See [`docs/update-system.md`](../docs/update-system.md) for the full release flow.
-Apple build and signing details are in [`docs/apple-platforms.md`](../docs/apple-platforms.md).
+- [发布流程](../docs/release.md)
+- [更新系统](../docs/update-system.md)

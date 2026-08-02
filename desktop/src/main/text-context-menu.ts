@@ -36,3 +36,7 @@ export function buildTextContextMenu(
   );
   return items;
 }
+
+export function buildImageContextMenu(onDownload: () => void): MenuItemConstructorOptions[] {
+  return [{ label: "Download image", click: onDownload }];
+}

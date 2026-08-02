@@ -11,7 +11,7 @@ const result = spawnSync(process.execPath, [npmCli, "run", "dist:mac"], {
   stdio: "inherit",
   env: {
     ...process.env,
-    RHZYCODE_UPDATE_URL: "https://minio.gshbzw.com/wxfile/rhzycode/macos",
+    RHZYCODE_UPDATE_URL: "http://218.201.210.211:8000/updates/macos",
   },
 });
 if (result.error) throw result.error;

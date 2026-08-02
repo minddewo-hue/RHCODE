@@ -16,26 +16,21 @@ const reasoningEffortValues = new Set<RemoteReasoningEffort>([
 ]);
 
 export function remoteModelReasoningEfforts(model: RemoteModelOption | null): RemoteReasoningEffort[] {
-  if (model?.reasoningEfforts) {
-    return [...new Set(model.reasoningEfforts)].filter((value) => reasoningEffortValues.has(value));
-  }
-  return reasoningEffortValues.has(model?.defaultReasoningEffort as RemoteReasoningEffort)
-    ? [model?.defaultReasoningEffort as RemoteReasoningEffort]
-    : ["high"];
+  return [...new Set(model?.reasoningEfforts || [])].filter((value) => reasoningEffortValues.has(value));
 }
 
 export function groupRemoteModels(models: RemoteModelOption[]): RemoteModelGroup[] {
   const groups = new Map<string, RemoteModelGroup & { sourceOrder: number }>();
   for (const [index, model] of models.entries()) {
-    const presentation = modelSourcePresentation(model, index);
-    const group = groups.get(presentation.key) || {
-      key: presentation.key,
-      source: presentation.source,
+    const key = model.source.toLocaleLowerCase();
+    const group = groups.get(key) || {
+      key,
+      source: model.source,
       models: [],
-      sourceOrder: presentation.sourceOrder,
+      sourceOrder: index,
     };
-    group.models.push({ ...model, sourceModelName: presentation.modelName });
-    groups.set(presentation.key, group);
+    group.models.push(model);
+    groups.set(key, group);
   }
 
   return [...groups.values()]
@@ -48,51 +43,4 @@ export function groupRemoteModels(models: RemoteModelOption[]): RemoteModelGroup
         modelNameCollator.compare(left.sourceModelName, right.sourceModelName)
         || modelNameCollator.compare(left.model, right.model)),
     }));
-}
-
-function modelSourcePresentation(model: RemoteModelOption, index: number): {
-  key: string;
-  source: string;
-  modelName: string;
-  sourceOrder: number;
-} {
-  const explicitSource = model.source?.trim();
-  const explicitModelName = model.sourceModelName?.trim();
-  if (explicitSource) {
-    return {
-      key: `source:${explicitSource.toLocaleLowerCase()}`,
-      source: explicitSource,
-      modelName: explicitModelName || model.displayName || model.model,
-      sourceOrder: index,
-    };
-  }
-
-  const separatorIndex = model.displayName.indexOf(" - ");
-  if (separatorIndex > 0) {
-    const source = model.displayName.slice(0, separatorIndex).trim();
-    return {
-      key: `display:${source}`,
-      source,
-      modelName: model.displayName.slice(separatorIndex + 3).trim() || model.model,
-      sourceOrder: Number.MAX_SAFE_INTEGER,
-    };
-  }
-
-  const slashIndex = model.model.indexOf("/");
-  if (slashIndex > 0) {
-    const source = model.model.slice(0, slashIndex);
-    return {
-      key: `model:${source}`,
-      source,
-      modelName: model.displayName || model.model.slice(slashIndex + 1),
-      sourceOrder: Number.MAX_SAFE_INTEGER,
-    };
-  }
-
-  return {
-    key: "other",
-    source: "Other",
-    modelName: model.displayName || model.model,
-    sourceOrder: Number.MAX_SAFE_INTEGER,
-  };
 }

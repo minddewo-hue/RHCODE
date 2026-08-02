@@ -1,0 +1,43 @@
+[Unit]
+Description=RHZYCODE stateless transfer server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rhzy-transfer
+Group=rhzy-transfer
+WorkingDirectory=/home/analyzer/work_space/rhzycode-transfer
+EnvironmentFile=/home/analyzer/work_space/rhzycode-transfer/.env
+ExecStart=/usr/local/bin/node transferserver/server.mjs
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=15s
+UMask=0077
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+TasksMax=256
+LimitNOFILE=65536
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

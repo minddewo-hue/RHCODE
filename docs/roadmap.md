@@ -1,83 +1,89 @@
-# RHZYCODE Delivery Roadmap
+# RHZYCODE 交付路线图
 
-Updated: 2026-07-23
+更新日期：2026-07-30
 
-## Verified baseline
+本文档记录当前交付状态和外部门禁，不定义接口。接口与行为以代码、测试和对应规范文档为准。
 
-| Capability | Status | Verification |
+## 已完成
+
+### 桌面工作区
+
+- 应用私有 Codex Home 和固定 Codex CLI 打包。
+- 项目目录、对话搜索、恢复、重命名、归档、删除和上下文压缩。
+- 多线程并发 Turn、后台状态隔离和启动恢复。
+- 流式回复、Activity、命令、文件变更、审批、结构化输入和中断。
+- 图片/文件附件、生成文件、对话导入导出和内置终端。
+- Provider 凭据安全存储、模型目录、健康检查和动态配置。
+- 浅色/夜间主题、窄窗口布局和 Electron UI 自动化。
+
+### 移动控制
+
+- 桌面生成长期 KEY，多电脑 SecureStore 隔离。
+- 桌面出站中转注册，手机 relay-only 连接。
+- snapshot、事件回放、前后台恢复和弱网重连。
+- 对话、项目、模型、Turn、审批和结构化输入控制。
+- 历史回复保留、丢失响应重放和幂等写命令。
+- 图片/文件附件、生成文件查看与下载。
+- Android/iOS 浅色和夜间主题。
+
+### 中转与更新
+
+- 无状态在线路由，不保存原始 KEY、任务或离线队列。
+- 请求/事件转发、认证失败限流和资源上限。
+- Windows/Android 统一更新清单与静态文件服务。
+- 本地暂存、SSH 上传和原子切换远程清单。
+- Windows release 审计、敏感文件扫描和哈希清单。
+
+## 当前交付状态
+
+| 平台 | 代码状态 | 正式分发门禁 |
 | --- | --- | --- |
-| Isolated desktop Agent Host | Complete | Application-owned `CODEX_HOME`; default Codex config hashes unchanged |
-| Embedded multi-model gateway | Complete | 23 models across Faker and Sub2API; gateway integration suite |
-| Model discovery and per-turn switching | Complete | All 23 models are selectable; `turn/start.model` changes the model on an existing thread |
-| Streaming text turns | Complete | Live vLLM turn returned `RHZYCODE_SMOKE_OK` |
-| Turn interruption | Complete | Live turn reached `interrupted` through `threadId + turnId` |
-| Command execution activity | Complete | Safe PowerShell command and output persisted to the timeline |
-| Command and file approvals | Complete | App Server response mapping, desktop controls, and control-plane test |
-| Thread history and resume | Complete | `thread/list` and `thread/resume` restored cwd, model, and messages |
-| Workspace selection persistence | Complete | Desktop restores the last project and last selected thread per project on startup |
-| Concurrent desktop turns | Complete | Different threads run concurrently while project, thread, terminal, and model navigation remain available |
-| Failure retry control | Complete | Deterministic 401, 429, timeout, interrupted SSE, retrying, and terminal-failure coverage |
-| Structured user input | Complete | Typed option/secret controls; answers excluded from event history |
-| Additional permission requests | Complete | Requested grants are turn-scoped; decline grants an empty profile |
-| Interactive terminal | Complete | App Server PTY, stdin, resize, ANSI rendering, buffered restore, and terminate smoke |
-| Approval policy control | Complete | Persisted `on-request`, `untrusted`, or `never` override on threads and turns |
-| Sandbox policy control | Complete, upstream limitation | Policies map correctly; Codex 0.145.0 Windows Code Mode may reject valid workspace writes |
-| File and image attachments | Complete | Native App Server local-image input plus absolute-path file references; 20-item limit |
-| Thread search and archive | Complete | Server-side title search, archived listing, archive, restore, and cross-client removal events |
-| Provider active health | Complete | Startup, 60-second, and manual probes with latency, circuit state, HTTP status, and sanitized errors |
-| Windows desktop distribution | Complete | NSIS and unpacked builds; Electron 43.1.1 and bundled Codex CLI 0.145.0 pinned |
-| Provider credential storage | Complete | Electron `safeStorage` uses the OS secure-storage backend; stored plaintext is never returned to the renderer |
-| Thread lifecycle management | Complete | Search, rename, archive, restore, permanent delete, and recent-project persistence |
-| Encrypted control persistence | Complete | `safeStorage`-encrypted snapshots and 2,000-event replay; pending requests are not revived |
-| Persistent mobile access | Complete | Desktop-generated KEY, encrypted persistence, audit, and immediate rotation |
-| Authenticated control API | Complete | Bearer HTTP and WebSocket subprotocol authentication |
-| Desktop-authoritative mobile commands | Complete | Safe thread/Turn control, structured answers, lifecycle operations, idempotency, and non-secret audit |
-| LAN control transport | Complete | Private-LAN HTTP/WS plus optional certificate-driven HTTPS/WSS |
-| Automatic update client | Complete, channel pending | Check/download/install states; signed update URL is required during packaging |
-| Cross-platform update contract | Complete | Shared Windows/macOS/Android/iOS manifest parser and client tests |
-| macOS code preparation | Complete, release pending | Platform host mapping, Keychain-compatible safeStorage, DMG/ZIP build and update feed entry |
-| iOS code preparation | Complete, release pending | Expo configuration, safe native-module loading, App Store update flow and Xcode archive entry |
+| Windows | 可构建、安装、自动更新 | 生产 Authenticode 证书 |
+| Android | 可构建、安装、应用内更新 | 生产 Android keystore、HTTPS |
+| macOS | 平台适配和 DMG/ZIP 构建入口已实现 | macOS 构建机、Developer ID、公证、更新 feed |
+| iOS | Expo/Xcode archive 入口已实现 | App Store 配置、签名、TestFlight、清单接入 |
 
-## Accepted risks
+版本号不在路线图重复维护；事实来源见 [文档索引](README.md#事实来源)。
 
-- The 11 moderate `npm audit` findings currently come from the Expo 57 build toolchain and its Xcode parser dependency. There are no high or critical findings after applying the compatible `fast-uri` patches. Forced automated remediation proposes incompatible Expo/Expo Sharing downgrades, so the project accepts the remaining findings temporarily and will update when Expo publishes compatible dependency fixes.
-- Codex CLI 0.145.0 on Windows may reject valid `workspace-write` Code Mode file operations as outside the project even when the desktop sends the correct cwd and writable root. RHZYCODE does not silently escalate permissions; explicit Full access is the temporary local-only workaround. Re-run `validation/workspace-write-smoke` after upgrading Codex.
+## 最高优先级
 
-## Phase 1 remaining
+1. 将公网中转和更新地址迁移到可信 HTTPS/WSS。
+2. 配置 Windows Authenticode 和 Android 生产 keystore，强制正式发布签名。
+3. 增加签名安装包的全新安装、覆盖升级和回滚验收。
+4. 关闭迁移 HTTPS 后不再需要的 Android/iOS cleartext 例外。
 
-1. Obtain a trusted Windows code-signing certificate and run the implemented required-signing release path.
-2. Provision a signed update endpoint and publish generated release-channel metadata.
-3. Provision a trusted control-plane certificate, reachable host, and firewall policy for physical mobile devices, or deploy an outbound relay.
+## Apple 平台
 
-## Apple platform release gates
+1. 准备 macOS x64/arm64 构建主机和对应 Codex 二进制。
+2. 完成 Developer ID、notarization、Gatekeeper 与 macOS 自动更新。
+3. 完成 App Store Connect、TestFlight 和 iOS 真机升级验证。
+4. 扩展 update contract、publisher 和中转路由以支持 macOS/iOS。
 
-1. Provision a macOS CI/build host with x64 and arm64 Codex binaries as required.
-2. Configure Developer ID signing, notarization, Gatekeeper verification, and a public macOS update feed.
-3. Configure the Apple Developer team, provisioning profiles, App Store Connect record, TestFlight, and public App Store URL.
-4. Run macOS and iOS device-level smoke tests listed in `docs/apple-platforms.md`.
+## 工程维护
 
-## Phase 2 gate
+- 恢复或迁移 `model-stability-matrix.ts` 依赖的验证 fixture；当前脚本引用的 `validation/a-share-compute-assistant` 已不存在。
+- 重新运行模型矩阵后生成新的带日期报告，避免沿用 2026-07-17 的上游状态。
+- 为 Markdown 增加链接、路径、脚本名和过期版本引用检查。
+- 持续扩大历史恢复、弱网、附件和深浅主题的端到端覆盖。
 
-Remote-control software gates are complete; deployment still requires trusted transport infrastructure:
+## 未来范围
 
-1. Persistent desktop-generated mobile KEY. Complete.
-2. Authenticated HTTPS/WSS transport. Complete; trusted certificate deployment remains.
-3. Durable event storage and reconnect replay. Complete.
-4. Mobile approval and command audit records. Complete.
-5. Secret rotation. KEY replacement and active WebSocket closure are complete.
+以下能力不属于当前桌面在线中转版本：
 
-## Verification commands
+- 离线任务队列和桌面离线执行。
+- 云端隔离 worker、仓库镜像和持久任务。
+- 团队角色、组织策略、配额、计费和集中审计。
+- 端到端加密中转或零知识文件服务。
+
+引入这些能力需要独立架构设计，不能通过给当前无状态中转增加少量字段实现。
+
+## 验证基线
 
 ```powershell
 npm run check
 npm run build
-npm run smoke:agent --workspace @rhzycode/desktop
-npm run smoke:agent --workspace @rhzycode/desktop -- --live
-npm run smoke:agent --workspace @rhzycode/desktop -- --history
-npm run smoke:agent --workspace @rhzycode/desktop -- --command
-npm run smoke:agent --workspace @rhzycode/desktop -- --interrupt
-npm run smoke:agent --workspace @rhzycode/desktop -- --terminal
-npm run pack:desktop
-npm run smoke:mobile-access --workspace @rhzycode/desktop
-npm run dist:desktop
+npm run test:ui --workspace @rhzycode/desktop
+npm test --workspace @rhzycode/transferserver
 ```
+
+真实 Agent、平台签名和发布验证按 [桌面开发](desktop-development.md)、[移动开发](mobile-development.md) 和 [发布流程](release.md) 执行。

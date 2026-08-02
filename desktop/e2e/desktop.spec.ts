@@ -71,8 +71,6 @@ test.beforeAll(async () => {
       RHZYCODE_USER_DATA_DIR: dataDir,
       RHZYCODE_CODEX_HOME: path.join(dataDir, "codex-home"),
       RHZYCODE_GATEWAY_HOME: path.join(workspaceDir, "desktop"),
-      RHZYCODE_SYNC_HOST: "127.0.0.1",
-      RHZYCODE_SYNC_PORT: "0",
       RHZYCODE_SKIP_ENVIRONMENT_MIGRATION: "1",
       SUB2API_API_KEY: "",
     },
@@ -84,6 +82,8 @@ test.beforeAll(async () => {
     if (message.type() === "error") rendererErrors.push(message.text());
   });
   await page.locator(".app-shell").waitFor();
+  await expect.poll(() => page.evaluate(() => window.rhzycode.getMobileAccessStatus()
+    .then((status) => status.accessKey))).toBeNull();
   await installDeterministicIpc(electronApp);
   await page.reload();
   await page.locator(".app-shell").waitFor();
@@ -110,30 +110,126 @@ test.afterAll(async () => {
   }
 });
 
+test("shows a complete empty state on a fresh install", async () => {
+  await expect(page.getByText("Select a project", { exact: true })).toBeVisible();
+  await expect(page.locator(".project-group")).toHaveCount(0);
+  await expect(page.locator(".thread-row")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.getByText("No providers configured", { exact: true })).toBeVisible();
+  await expect(page.locator(".credential-row")).toHaveCount(0);
+  await expect(page.locator(".settings-view input, .settings-view select, .settings-view textarea")).toHaveCount(0);
+  await expect(page.getByText("Not generated", { exact: true })).toBeVisible();
+  await expect(page.locator(".connection-field > div")).toHaveCSS("border-top-style", "none");
+  await expect(page.locator(".connection-field > div")).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(page.getByRole("button", { name: "Generate key", exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Add provider" }).click();
+  await expect(page.getByText("New provider", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("ID", { exact: true })).toBeEditable();
+  await expect(page.getByLabel("Name", { exact: true })).toBeEditable();
+  await expect(page.getByLabel("URL", { exact: true })).toBeEditable();
+  await expect(page.getByLabel("KEY", { exact: true })).toBeEditable();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.locator(".settings-view input, .settings-view select, .settings-view textarea")).toHaveCount(0);
+  await expect(page.locator(".model-select option").first()).toHaveCSS("background-color", "rgb(21, 28, 43)");
+  await page.getByRole("radio", { name: "Day", exact: true }).click();
+  await page.getByRole("button", { name: "Close Settings" }).click();
+});
+
+test("keeps the composer focused and editable when starting blank tasks", async () => {
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
+  for (let index = 0; index < 12; index += 1) {
+    await clickSelectedProjectNewTask(page);
+    await expect(taskPrompt).toBeFocused();
+    await page.keyboard.type(`responsive-${index}`);
+    await expect(taskPrompt).toHaveValue(`responsive-${index}`);
+  }
+
+  await taskPrompt.fill("");
+  expect(rendererErrors.filter((message) => /same key|maximum update depth/i.test(message))).toEqual([]);
+});
+
+test("keeps the composer keyboard-editable across focus transitions", async () => {
+  const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
+
+  await test.step("after closing a modal with Escape", async () => {
+    await clickSelectedProjectNewTask(page);
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog", { name: "Settings" })).toHaveCount(0);
+    await typeAndClearFocusedComposer(page, taskPrompt, "Typed after closing settings");
+  });
+
+  await test.step("after returning from the terminal", async () => {
+    await page.getByRole("button", { name: "Terminal", exact: true }).click();
+    await expect(taskPrompt).toHaveCount(0);
+    await page.getByRole("button", { name: "Workspace", exact: true }).click();
+    await typeAndClearFocusedComposer(page, taskPrompt, "Typed after returning from terminal");
+  });
+
+  await test.step("after sidebar search held focus", async () => {
+    const search = page.getByPlaceholder("Search projects and tasks");
+    await search.focus();
+    await expect(search).toBeFocused();
+    await clickSelectedProjectNewTask(page);
+    await typeAndClearFocusedComposer(page, taskPrompt, "Typed after sidebar search");
+  });
+
+  await test.step("after the Electron window is reactivated", async () => {
+    await taskPrompt.evaluate((element) => element.blur());
+    await expect(taskPrompt).not.toBeFocused();
+    await electronApp.evaluate(async ({ BrowserWindow }) => {
+      const mainWindow = BrowserWindow.getAllWindows()[0];
+      const focusWindow = new BrowserWindow({
+        width: 100,
+        height: 100,
+        x: -10_000,
+        y: -10_000,
+        show: true,
+        skipTaskbar: true,
+      });
+      await focusWindow.loadURL("data:text/html,<title>Focus handoff</title>");
+      focusWindow.focus();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      mainWindow?.focus();
+      mainWindow?.webContents.focus();
+      focusWindow.close();
+    });
+    await typeAndClearFocusedComposer(page, taskPrompt, "Typed after window reactivation");
+  });
+
+  await test.step("with Chinese and multiline input", async () => {
+    await clickSelectedProjectNewTask(page);
+    await expect(taskPrompt).toBeFocused();
+    await page.keyboard.insertText("中文输入测试");
+    await page.keyboard.press("Shift+Enter");
+    await page.keyboard.insertText("第二行");
+    await expect(taskPrompt).toHaveValue("中文输入测试\n第二行");
+    await page.keyboard.press("Control+A");
+    await page.keyboard.press("Backspace");
+    await expect(taskPrompt).toHaveValue("");
+  });
+});
+
 test("supports core desktop workflows at the minimum window size", async () => {
   await assertVisibleControlsHaveNames(page);
   await assertMinimumWindowLayout(page);
-  await expect(page.getByRole("navigation", { name: "Primary navigation" })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Primary navigation" })).toBeVisible();
   const modelSelect = page.getByRole("combobox", { name: "Model for next turn" });
   await modelSelect.selectOption("ui/second");
   await expect(modelSelect).toHaveValue("ui/second");
   await modelSelect.selectOption("ui/model");
 
-  const closePanel = page.getByRole("button", { name: "Close side panel" });
-  await expect(closePanel).toBeVisible();
-  await closePanel.focus();
+  const activityToggle = page.getByRole("button", { name: "Activity", exact: true });
+  await expect(activityToggle).toHaveAttribute("aria-pressed", "true");
+  await activityToggle.focus();
   await page.keyboard.press("Enter");
-  await expect(closePanel).toBeHidden();
-  const panelToggle = page.getByRole("button", { name: "Side panel", exact: true });
-  await panelToggle.click();
-  await expect(page.getByRole("tab", { name: "Gateway" })).toHaveCount(0);
-  await page.getByRole("tab", { name: "Settings" }).click();
-  await page.getByRole("tab", { name: "Skills" }).click();
-  await page.getByRole("tab", { name: "Activity" }).click();
-  await panelToggle.click();
-  await expect(closePanel).toBeHidden();
-
-  await panelToggle.click();
+  await expect(activityToggle).toHaveAttribute("aria-pressed", "false");
+  await activityToggle.click();
+  await expect(activityToggle).toHaveAttribute("aria-pressed", "true");
   await assertSidePanelDoesNotCoverWorkspace(page);
   await expectScreenshot(page, "desktop-minimum-panel-open.png", {
     animations: "disabled",
@@ -141,7 +237,8 @@ test("supports core desktop workflows at the minimum window size", async () => {
     maskColor: "#d8dcd6",
     mask: [page.locator(".model-select")],
   });
-  await page.getByRole("button", { name: "Close side panel" }).click();
+  await activityToggle.click();
+  await expect(activityToggle).toHaveAttribute("aria-pressed", "false");
   await assertClosedPanelReleasesWorkspace(page);
 
   await expect(page.getByRole("button", { name: "Show archived tasks" })).toHaveCount(0);
@@ -291,8 +388,25 @@ test("supports core desktop workflows at the minimum window size", async () => {
     width: image.naturalWidth,
     height: image.naturalHeight,
   }))).toEqual({ width: 320, height: 240 });
-  await page.getByRole("button", { name: "Save generated-image.png" }).click();
-  await expect.poll(() => ipcCalls(electronApp, "project:save-local-file").then((calls) => calls.at(-1)?.args)).toEqual([
+  const generatedImageLayout = await generatedImage.evaluate((element) => {
+    const wrapper = element.parentElement!.getBoundingClientRect();
+    const button = element.getBoundingClientRect();
+    const image = element.querySelector("img")!.getBoundingClientRect();
+    return {
+      wrapper: { width: wrapper.width, height: wrapper.height },
+      button: { width: button.width, height: button.height },
+      image: { width: image.width, height: image.height },
+    };
+  });
+  expect(generatedImageLayout.wrapper.width / generatedImageLayout.wrapper.height).toBeCloseTo(4 / 3, 2);
+  expect(generatedImageLayout.button).toEqual(generatedImageLayout.wrapper);
+  expect(generatedImageLayout.wrapper.width - generatedImageLayout.image.width).toBeGreaterThanOrEqual(1);
+  expect(generatedImageLayout.wrapper.width - generatedImageLayout.image.width).toBeLessThanOrEqual(2);
+  expect(generatedImageLayout.wrapper.height - generatedImageLayout.image.height).toBeGreaterThanOrEqual(1);
+  expect(generatedImageLayout.wrapper.height - generatedImageLayout.image.height).toBeLessThanOrEqual(2);
+  await expect(page.getByRole("button", { name: "Save generated-image.png" })).toHaveCount(0);
+  await generatedImage.click({ button: "right" });
+  await expect.poll(() => ipcCalls(electronApp, "project:show-image-context-menu").then((calls) => calls.at(-1)?.args)).toEqual([
     generatedImagePath,
     "generated-image.png",
   ]);
@@ -307,8 +421,41 @@ test("supports core desktop workflows at the minimum window size", async () => {
     mask: [page.locator(".model-select"), page.locator(".project-group-main small")],
   });
   await generatedImage.click();
-  await expect(page.getByRole("button", { name: "Close image preview" })).toBeVisible();
-  await page.getByRole("button", { name: "Close image preview" }).click();
+  const closeImagePreview = page.getByRole("button", { name: "Close image preview" });
+  await expect(closeImagePreview).toBeVisible();
+  await closeImagePreview.click({ position: { x: 5, y: 5 } });
+  await expect(closeImagePreview).toBeHidden();
+
+  await sendAgentMessage(electronApp, {
+    method: "item/completed",
+    params: {
+      threadId,
+      item: {
+        id: "ui-sent-image",
+        type: "userMessage",
+        content: [{ type: "text", text: "Sent image" }],
+        files: [{
+          id: "ui-sent-image-file",
+          path: generatedImagePath,
+          name: "sent-image.png",
+          size: 68,
+          mimeType: "image/png",
+          source: "upload",
+        }],
+      },
+    },
+  });
+  const sentImage = page.locator(".message.user .message-image").last();
+  await expect(sentImage).toBeVisible();
+  await expect.poll(() => sentImage.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    return Math.round((bounds.width / bounds.height) * 100) / 100;
+  })).toBe(1.33);
+  await sentImage.click({ button: "right" });
+  await expect.poll(() => ipcCalls(electronApp, "project:show-image-context-menu").then((calls) => calls.at(-1)?.args)).toEqual([
+    generatedImagePath,
+    "sent-image.png",
+  ]);
 
   await modelSelect.selectOption("provider-2/gemma-4-31b-it-uncensored-bf16");
   await sendAgentMessage(electronApp, {
@@ -334,8 +481,8 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(page.locator(".model-select")).toHaveValue("ui/model");
   await expect.poll(() => ipcCalls(electronApp, "agent:thread:open").then((calls) => calls.length))
     .toBeGreaterThan(openCallsBeforeReload);
-  if (await page.getByRole("button", { name: "Close side panel" }).isVisible()) {
-    await page.getByRole("button", { name: "Close side panel" }).click();
+  if (await page.getByRole("button", { name: "Activity", exact: true }).getAttribute("aria-pressed") === "true") {
+    await page.getByRole("button", { name: "Activity", exact: true }).click();
   }
 
   await openThreadActions(page, "UI automation thread");
@@ -366,8 +513,8 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await page.reload();
   await page.locator(".app-shell").waitFor();
   await expect(getThreadRow(page, "UI automation thread")).toBeVisible();
-  if (await page.getByRole("button", { name: "Close side panel" }).isVisible()) {
-    await page.getByRole("button", { name: "Close side panel" }).click();
+  if (await page.getByRole("button", { name: "Activity", exact: true }).getAttribute("aria-pressed") === "true") {
+    await page.getByRole("button", { name: "Activity", exact: true }).click();
   }
 
   await openThreadActions(page, "UI automation thread");
@@ -412,6 +559,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
     page.getByRole("menuitem", { name: "Delete task permanently" }).click(),
   ]);
   await expect(getThreadRow(page, "Renamed UI thread")).toBeVisible();
+  await openThreadActions(page, "Renamed UI thread");
   page.once("dialog", async (dialog) => {
     expect(dialog.message()).toContain("Renamed UI thread");
     await dialog.accept();
@@ -512,23 +660,34 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await skipCard.getByRole("button", { name: "Skip" }).click();
   await expect(skipCard).toBeHidden();
 
-  await page.getByRole("tab", { name: "Settings" }).focus();
+  await page.getByRole("button", { name: "Settings", exact: true }).focus();
   await page.keyboard.press("Enter");
-  await expect(page.getByText("Mobile connection", { exact: true })).toBeVisible();
+  await expect(page.getByText("Mobile access", { exact: true })).toBeVisible();
   await expect(page.getByText("Local state protection", { exact: true })).toHaveCount(0);
   await assertVisibleControlsHaveNames(page);
+  await expect(page.locator(".credential-row")).toHaveCount(0);
+  await page.getByRole("button", { name: "Add provider" }).click();
+  await page.getByLabel("ID", { exact: true }).fill("sub2api");
+  await page.getByLabel("Name", { exact: true }).fill("Sub2API");
+  await page.getByLabel("URL", { exact: true }).fill("https://model.rhzy.ai/v1");
+  await page.getByLabel("KEY", { exact: true }).fill("ui-test-key");
+  await page.locator(".provider-editor select").selectOption("responses");
+  await page.getByLabel("Models (optional)", { exact: true }).fill("gpt-5.5");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   const sub2apiCredential = page.locator(".credential-row").filter({ hasText: "Sub2API API key" });
   await expect(page.locator(".credential-row")).toHaveCount(1);
   await expect(sub2apiCredential).toContainText("model.rhzy.ai");
   await expect(sub2apiCredential).toContainText("KEY starts with sk-");
-  await expect(page.getByLabel("Sub2API API key for model.rhzy.ai")).toHaveAttribute("placeholder", "Configured | paste new sk- KEY");
-  const credentialInput = page.getByLabel("Sub2API API key for model.rhzy.ai");
-  await credentialInput.fill("ui-test-key");
-  await sub2apiCredential.getByRole("button", { name: "Save KEY", exact: true }).click();
-  await expect.poll(() => ipcCalls(electronApp, "credentials:set").then((calls) => calls.at(-1)?.args)).toEqual([
-    "sub2api",
-    "ui-test-key",
-  ]);
+  await expect(sub2apiCredential.locator("input, select, textarea")).toHaveCount(0);
+  await sub2apiCredential.getByRole("button", { name: "Edit", exact: true }).click();
+  await expect(page.locator(".provider-editor-readonly")).toContainText("sub2api");
+  await expect(page.locator(".provider-editor input:disabled")).toHaveCount(0);
+  await page.getByLabel("KEY", { exact: true }).fill("ui-test-key-updated");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect.poll(() => ipcCalls(electronApp, "providers:configure").then((calls) => calls.at(-1)?.args[0])).toMatchObject({
+    providerId: "sub2api",
+    apiKey: "ui-test-key-updated",
+  });
   await page.locator(".settings-view").evaluate((element) => { element.scrollTop = 0; });
   await expectScreenshot(page, "desktop-provider-credentials.png", {
     animations: "disabled",
@@ -572,17 +731,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(claudeProvider).toHaveCount(0);
   await expect.poll(() => ipcCalls(electronApp, "providers:remove").then((calls) => calls.at(-1)?.args)).toEqual(["provider-1"]);
 
-  await expect(page.getByText("192.168.1.25", { exact: true })).toBeVisible();
-  const mobilePort = page.getByRole("textbox", { name: "Mobile connection port", exact: true });
-  await expect(mobilePort).toHaveValue("8790");
-  await mobilePort.fill("8912");
-  await page.getByRole("button", { name: "Save mobile connection port" }).click();
-  await expect(mobilePort).toHaveValue("8912");
-  await expect.poll(() => ipcCalls(electronApp, "sync:port:set").then((calls) => calls.at(-1)?.args)).toEqual([8912]);
-  await expectScreenshot(page.locator(".settings-view"), "desktop-settings-mobile-port.png", {
-    animations: "disabled",
-    caret: "hide",
-  });
+  await page.getByRole("button", { name: "Generate key", exact: true }).click();
   await expect(page.getByText(/^rhzy_A{43}$/)).toBeVisible();
   const regenerateKey = page.getByRole("button", { name: "Regenerate key" });
   const rotationCallsBefore = (await ipcCalls(electronApp, "mobile-access:key:rotate")).length;
@@ -600,9 +749,6 @@ test("supports core desktop workflows at the minimum window size", async () => {
     () => page.evaluate(() => window.rhzycode.getMobileAccessStatus()
       .then((status) => status.accessKey?.key || null)),
   ).toBe(`rhzy_${"B".repeat(43)}`);
-  await expectScreenshot(page, "desktop-mobile-connection.png", {
-    animations: "disabled",
-  });
   await page.getByRole("button", { name: "Copy access key" }).click();
   await expect.poll(() => ipcCalls(electronApp, "clipboard:write").then((calls) => calls.at(-1)?.args[0]))
     .toBe(`rhzy_${"B".repeat(43)}`);
@@ -610,7 +756,8 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect.poll(() => ipcCalls(electronApp, "updates:check").then((calls) => calls.length)).toBeGreaterThan(0);
   await expect.poll(() => ipcCalls(electronApp, "updates:download").then((calls) => calls.length)).toBeGreaterThan(0);
   await expect.poll(() => ipcCalls(electronApp, "updates:install").then((calls) => calls.length)).toBeGreaterThan(0);
-  await page.getByRole("tab", { name: "Skills" }).click();
+  await page.getByRole("button", { name: "Close Settings" }).click();
+  await page.getByRole("button", { name: "Skills", exact: true }).click();
   await expect(page.locator(".skill-row")).toHaveCount(2);
   await expect(page.getByText("Review Helper", { exact: true })).toBeVisible();
   await expect(page.getByText("System Writer", { exact: true })).toBeVisible();
@@ -631,7 +778,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
     caret: "hide",
   });
   await assertVisibleControlsHaveNames(page);
-  await page.getByRole("button", { name: "Close side panel" }).click();
+  await page.getByRole("button", { name: "Close Skills" }).click();
 
   const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
   await pasteImage(taskPrompt, "clipboard-turn.png");
@@ -645,12 +792,13 @@ test("supports core desktop workflows at the minimum window size", async () => {
     { name: "clipboard-turn.png", kind: "image" },
   ]);
   await expect(page.locator(".send-button.stop")).toBeVisible();
-  await expect(page.getByRole("button", { name: "New task" })).toBeEnabled();
+  await expect(getSelectedProjectNewTask(page)).toBeEnabled();
   await expect(page.getByRole("button", { name: "Open project folder" })).toBeEnabled();
   await expect(modelSelect).toBeEnabled();
 
   await modelSelect.selectOption("ui/second");
-  await page.getByRole("button", { name: "New task" }).click();
+  await clickSelectedProjectNewTask(page);
+  await expect(taskPrompt).toBeFocused();
   await taskPrompt.fill("Run concurrent second task");
   await page.getByRole("button", { name: "Send" }).click();
   await expect.poll(() => ipcCalls(electronApp, "agent:turn:start").then((calls) => calls.length)).toBe(2);
@@ -658,7 +806,13 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(getThreadRow(page, "Run deterministic verification")).toBeVisible();
   await expect(getThreadRow(page, "Run concurrent second task")).toBeVisible();
 
+  await setThreadOpenDelay(electronApp, 600);
   await getThreadRow(page, "Run deterministic verification").click();
+  await expect(page.getByRole("article").getByText("Run deterministic verification", { exact: true })).toBeVisible({ timeout: 200 });
+  await expect(page.getByText("Start a new task", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".conversation-refresh")).toBeVisible();
+  await expect(page.locator(".conversation-refresh")).toHaveCount(0, { timeout: 2_000 });
+  await setThreadOpenDelay(electronApp, 0);
   await expect(page.locator(".send-button.stop")).toBeVisible();
   await expect(modelSelect).toBeEnabled();
   await taskPrompt.fill("Draft for the first task");
@@ -699,7 +853,8 @@ test("supports core desktop workflows at the minimum window size", async () => {
     calls.at(-1)?.args[0] as { model?: string } | undefined
   )?.model)).toBe("ui/model");
   await page.locator(".send-button.stop").click();
-  await page.getByRole("button", { name: "New task" }).click();
+  await clickSelectedProjectNewTask(page);
+  await expect(taskPrompt).toBeFocused();
   await expect(taskPrompt).toHaveValue("");
   await expect(page.locator(".attachment-list")).toHaveCount(0);
   await expect(page.locator(".message-list")).toHaveCount(0);
@@ -746,7 +901,8 @@ test("supports core desktop workflows at the minimum window size", async () => {
   }, emptyProjectDir);
   await page.getByRole("button", { name: "Open project folder" }).click();
   await expect(page.locator(".project-group.selected")).toContainText("empty-project");
-  await expect(page.locator(".project-group").filter({ hasText: "empty-project" }).getByText("No tasks", { exact: true })).toBeVisible();
+  const emptyProjectGroup = page.locator(".project-group").filter({ hasText: "empty-project" });
+  await expect(emptyProjectGroup.getByRole("button", { name: "New task in project empty-project" })).toBeVisible();
   await expect(getThreadRow(page, "Run deterministic verification")).toBeVisible();
   await expect(page.getByText("Start a new task", { exact: true })).toBeVisible();
   await expect(page.locator(".message-list")).toHaveCount(0);
@@ -776,7 +932,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
     caret: "hide",
     maxDiffPixels: 0,
     maskColor: "#d8dcd6",
-    mask: [page.locator(".model-select")],
+    mask: [page.locator(".model-select"), page.locator(".project-thread-list")],
   });
   await expect(page.locator(".project-group-main strong")).toHaveText(projectOrderBeforeSelection);
   const projectTreeOverflow = await page.locator(".project-thread-list").evaluate((element) => ({
@@ -787,16 +943,14 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await page.locator(".project-thread-list").evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await expect.poll(() => page.locator(".project-thread-list").evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
 
-  const projectBackup = page.getByRole("button", { name: "Back up conversations for project", exact: true });
-  await projectBackup.scrollIntoViewIfNeeded();
-  await projectBackup.locator("xpath=..").hover();
-  await projectBackup.click();
-  await expect.poll(() => ipcCalls(electronApp, "conversation:backup").then((calls) => calls.at(-1)?.args)).toEqual([projectDir]);
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "Restore project conversations" }).click();
+  await page.getByRole("button", { name: "Import or export conversations" }).click();
+  const transferDialog = page.getByRole("dialog", { name: "Import / Export" });
+  await expect(transferDialog).toBeVisible();
+  await transferDialog.getByRole("button", { name: /^Import/ }).click();
   await expect.poll(() => ipcCalls(electronApp, "conversation:restore").then((calls) => calls.length)).toBe(1);
+  await expect(transferDialog.getByText("1 restored, 0 already present", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Close Import / Export" }).click();
 
-  const emptyProjectGroup = page.locator(".project-group").filter({ hasText: "empty-project" });
   await emptyProjectGroup.hover();
   page.once("dialog", (dialog) => dialog.accept());
   await emptyProjectGroup.getByRole("button", { name: "Permanently delete project empty-project" }).click();
@@ -808,6 +962,459 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(page.locator(".project-group").filter({ hasText: "empty-project" })).toHaveCount(0);
 
   expect(rendererErrors).toEqual([]);
+});
+
+test("renders sent and received images at their natural aspect ratio with context-menu download", async ({}, testInfo) => {
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  const threadId = await page.evaluate((cwd) => window.rhzycode.startThread({ cwd })
+    .then((result) => result.thread.id), projectDir);
+  await sendSyncEvent(electronApp, {
+    type: "thread.updated",
+    sequence: 20_000,
+    thread: {
+      id: threadId,
+      hostId: "local-desktop",
+      title: "Image aspect test",
+      projectPath: projectDir,
+      model: "ui/model",
+      status: "idle",
+      updatedAt: new Date().toISOString(),
+    },
+  });
+  await expect(getThreadRow(page, "Image aspect test")).toBeVisible();
+  await getThreadRow(page, "Image aspect test").click();
+  await expect(getThreadRow(page, "Image aspect test").locator("..")).toHaveClass(/active/);
+  await expect(page.getByText(
+    "I will inspect the project structure, trace the main workflows, and report concrete findings.",
+    { exact: true },
+  )).toBeVisible();
+
+  await sendAgentMessage(electronApp, {
+    method: "item/completed",
+    params: {
+      threadId,
+      item: {
+        id: "aspect-received-image",
+        type: "imageGeneration",
+        status: "completed",
+        savedPath: generatedImagePath,
+        name: "received-image.png",
+      },
+    },
+  });
+  await sendAgentMessage(electronApp, {
+    method: "item/completed",
+    params: {
+      threadId,
+      item: {
+        id: "aspect-sent-image",
+        type: "userMessage",
+        content: [{ type: "text", text: "Sent image aspect check" }],
+        files: [{
+          id: "aspect-sent-image-file",
+          path: generatedImagePath,
+          name: "sent-image.png",
+          size: 68,
+          mimeType: "image/png",
+          source: "upload",
+        }],
+      },
+    },
+  });
+
+  for (const name of ["received-image.png", "sent-image.png"]) {
+    const image = page.locator(".message-image").filter({ has: page.getByRole("img", { name }) });
+    await expect(image).toBeVisible();
+    await expect.poll(() => image.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      return Math.round((bounds.width / bounds.height) * 100) / 100;
+    })).toBe(1.33);
+    await image.click({ button: "right" });
+    await expect.poll(() => ipcCalls(electronApp, "project:show-image-context-menu").then((calls) => calls.at(-1)?.args))
+      .toEqual([generatedImagePath, name]);
+  }
+  await expect(page.getByRole("button", { name: /^Save (received|sent)-image\.png$/ })).toHaveCount(0);
+  await page.locator(".conversation").screenshot({ path: testInfo.outputPath("image-aspect-layout.png") });
+});
+
+test("keeps a new task focused while the agent is still starting", async () => {
+  const threadCallsBeforeReload = await ipcCalls(electronApp, "agent:threads").then((calls) => calls.length);
+  const openCallsBeforeReload = await ipcCalls(electronApp, "agent:thread:open").then((calls) => calls.length);
+  await page.evaluate(async (selectedProject) => {
+    await window.rhzycode.rememberProject(selectedProject);
+    const { thread } = await window.rhzycode.startThread({ cwd: selectedProject });
+    localStorage.setItem("rhzycode.lastProject", selectedProject);
+    localStorage.setItem("rhzycode.recentProjects", JSON.stringify([selectedProject]));
+    localStorage.setItem("rhzycode.lastThreads", JSON.stringify({ [selectedProject]: thread.id }));
+  }, projectDir);
+
+  await setAgentConnectDelay(electronApp, 5_000);
+  try {
+    await page.reload();
+    await page.locator(".app-shell").waitFor();
+    const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
+    await clickSelectedProjectNewTask(page);
+    await expect(taskPrompt).toBeFocused();
+    await page.keyboard.type("Typed before the agent finished starting");
+    await expect(page.locator(".send-button")).toHaveAttribute("title", "Starting agent");
+    await expect(page.locator(".send-button")).toBeDisabled();
+
+    await expect.poll(() => ipcCalls(electronApp, "agent:threads").then((calls) => (
+      calls.length - threadCallsBeforeReload
+    ))).toBe(1);
+    expect(await ipcCalls(electronApp, "agent:thread:open").then((calls) => calls.length))
+      .toBe(openCallsBeforeReload);
+    await expect(taskPrompt).toHaveValue("Typed before the agent finished starting");
+    await expect(taskPrompt).toBeFocused();
+  } finally {
+    await setAgentConnectDelay(electronApp, 0);
+  }
+});
+
+test("keeps the composer responsive during dense streaming updates", async () => {
+  const openCallsBeforeReload = await ipcCalls(electronApp, "agent:thread:open").then((calls) => calls.length);
+  const selectedThreadId = await page.evaluate(async (selectedProject) => {
+    await window.rhzycode.rememberProject(selectedProject);
+    const { thread } = await window.rhzycode.startThread({ cwd: selectedProject });
+    localStorage.setItem("rhzycode.lastProject", selectedProject);
+    localStorage.setItem("rhzycode.recentProjects", JSON.stringify([selectedProject]));
+    localStorage.setItem("rhzycode.lastThreads", JSON.stringify({ [selectedProject]: thread.id }));
+    return thread.id;
+  }, projectDir);
+  await page.reload();
+  await page.locator(".app-shell").waitFor();
+  await expect.poll(() => ipcCalls(electronApp, "agent:thread:open").then((calls) => calls.length))
+    .toBeGreaterThan(openCallsBeforeReload);
+  await expect(page.getByText(
+    "I will inspect the project structure, trace the main workflows, and report concrete findings.",
+    { exact: true },
+  )).toBeVisible();
+
+  await sendStreamingBurst(electronApp, selectedThreadId, 400, 0);
+  await expect(page.locator(".message-list .message")).toHaveCount(402);
+
+  const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
+  await sendStreamingBurst(electronApp, selectedThreadId, 0, 2_000);
+  const inputStartedAt = Date.now();
+  await taskPrompt.fill("Composer stays responsive while output is streaming");
+  expect(Date.now() - inputStartedAt).toBeLessThan(5_000);
+  await expect(taskPrompt).toHaveValue("Composer stays responsive while output is streaming");
+  await expect(page.locator(".message-list .message")).toHaveCount(403);
+
+  await sendAgentMessage(electronApp, {
+    method: "turn/completed",
+    params: { threadId: selectedThreadId, turnId: "streaming-burst", turn: { status: "completed" } },
+  });
+});
+
+test("shows a cached conversation immediately while a slow resume refreshes it", async () => {
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
+  await clickSelectedProjectNewTask(page);
+  await taskPrompt.fill("Cached conversation first message");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(getThreadRow(page, "Cached conversation first message")).toBeVisible();
+
+  await clickSelectedProjectNewTask(page);
+  await taskPrompt.fill("Cached conversation second message");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(getThreadRow(page, "Cached conversation second message")).toBeVisible();
+
+  await setThreadOpenDelay(electronApp, 2_000);
+  await getThreadRow(page, "Cached conversation first message").click();
+  await expect(page.getByRole("article").getByText("Cached conversation first message", { exact: true }))
+    .toBeVisible({ timeout: 200 });
+  await expect(page.getByText("Start a new task", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".conversation-refresh")).toBeVisible();
+  await expect(taskPrompt).toBeFocused();
+  await page.keyboard.type("Draft typed while conversation refreshes");
+  await expect(taskPrompt).toHaveValue("Draft typed while conversation refreshes");
+  await expect(page.locator(".conversation-refresh")).toHaveCount(0, { timeout: 4_000 });
+  await expect(taskPrompt).toHaveValue("Draft typed while conversation refreshes");
+  await expect(taskPrompt).toBeFocused();
+  await taskPrompt.fill("");
+  await setThreadOpenDelay(electronApp, 0);
+});
+
+test("keeps a new task editable when a stale conversation open finishes", async () => {
+  const title = "Stale slow conversation open";
+  const selectedThreadId = await page.evaluate(async ({ cwd, selectedTitle }) => {
+    const result = await window.rhzycode.startThread({ cwd });
+    await window.rhzycode.renameThread(result.thread.id, selectedTitle);
+    return result.thread.id;
+  }, { cwd: projectDir, selectedTitle: title });
+
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  await expect(getThreadRow(page, title)).toBeVisible();
+  const completedBefore = await ipcCalls(electronApp, "agent:thread:open:completed").then((calls) => calls.length);
+  await setThreadOpenDelay(electronApp, 1_500);
+  try {
+    await getThreadRow(page, title).click();
+    await expect.poll(() => ipcCalls(electronApp, "agent:thread:open").then((calls) => calls.at(-1)?.args))
+      .toEqual([selectedThreadId]);
+    await clickSelectedProjectNewTask(page);
+
+    const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
+    await expect(taskPrompt).toBeFocused();
+    await page.keyboard.type("Immediate input in the replacement task");
+    await expect(taskPrompt).toHaveValue("Immediate input in the replacement task");
+
+    await expect.poll(() => ipcCalls(electronApp, "agent:thread:open:completed").then((calls) => calls.length))
+      .toBe(completedBefore + 1);
+    await expect(taskPrompt).toHaveValue("Immediate input in the replacement task");
+    await expect(taskPrompt).toBeFocused();
+    await expect(page.getByText("Start a new task", { exact: true })).toBeVisible();
+    await taskPrompt.fill("");
+  } finally {
+    await setThreadOpenDelay(electronApp, 0);
+  }
+});
+
+test("keeps the selected conversation and draft when deletion finishes late", async () => {
+  const sourceTitle = "Delete race source";
+  const targetTitle = "Delete race target";
+  const sourceThreadId = await page.evaluate(async ({ cwd, sourceTitle, targetTitle }) => {
+    const source = await window.rhzycode.startThread({ cwd });
+    const target = await window.rhzycode.startThread({ cwd });
+    await window.rhzycode.renameThread(source.thread.id, sourceTitle);
+    await window.rhzycode.renameThread(target.thread.id, targetTitle);
+    return source.thread.id;
+  }, { cwd: projectDir, sourceTitle, targetTitle });
+
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  await expect(getThreadRow(page, sourceTitle)).toBeVisible();
+  await expect(getThreadRow(page, targetTitle)).toBeVisible();
+  await getThreadRow(page, sourceTitle).click();
+  await expect(getThreadRow(page, sourceTitle).locator("..")).toHaveClass(/active/);
+
+  await setThreadDeleteDelay(electronApp, 750);
+  try {
+    await openThreadActions(page, sourceTitle);
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+    await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete").then((calls) => calls.at(-1)?.args))
+      .toEqual([sourceThreadId]);
+
+    await sendSyncEvent(electronApp, {
+      type: "thread.removed",
+      sequence: 10_000,
+      threadId: sourceThreadId,
+    });
+    await expect(getThreadRow(page, sourceTitle)).toHaveCount(0);
+
+    await getThreadRow(page, targetTitle).click();
+    const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
+    await expect(getThreadRow(page, targetTitle).locator("..")).toHaveClass(/active/);
+    await expect(taskPrompt).toBeFocused();
+    await taskPrompt.fill("Draft entered while the previous deletion is finishing");
+
+    await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete:completed")
+      .then((calls) => calls.at(-1)?.args)).toEqual([sourceThreadId]);
+    await expect(getThreadRow(page, targetTitle).locator("..")).toHaveClass(/active/);
+    await expect(taskPrompt).toHaveValue("Draft entered while the previous deletion is finishing");
+    await expect(taskPrompt).toBeFocused();
+  } finally {
+    await setThreadDeleteDelay(electronApp, 0);
+  }
+});
+
+test("keeps the composer editable when deleting the current conversation slowly", async () => {
+  const sourceTitle = "Slow current deletion";
+  const sourceThreadId = await page.evaluate(async ({ cwd, title }) => {
+    const source = await window.rhzycode.startThread({ cwd });
+    await window.rhzycode.renameThread(source.thread.id, title);
+    return source.thread.id;
+  }, { cwd: projectDir, title: sourceTitle });
+
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  await expect(getThreadRow(page, sourceTitle)).toBeVisible();
+  await getThreadRow(page, sourceTitle).click();
+  await expect(getThreadRow(page, sourceTitle).locator("..")).toHaveClass(/active/);
+
+  await setThreadDeleteDelay(electronApp, 750);
+  try {
+    await openThreadActions(page, sourceTitle);
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+    await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete").then((calls) => calls.at(-1)?.args))
+      .toEqual([sourceThreadId]);
+
+    const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
+    await expect(taskPrompt).toBeFocused();
+    await taskPrompt.fill("Draft entered while deleting the current conversation");
+    await expect(taskPrompt).toHaveValue("Draft entered while deleting the current conversation");
+
+    await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete:completed")
+      .then((calls) => calls.at(-1)?.args)).toEqual([sourceThreadId]);
+    await expect(getThreadRow(page, sourceTitle)).toHaveCount(0);
+    await expect(taskPrompt).toHaveValue("Draft entered while deleting the current conversation");
+    await expect(taskPrompt).toBeFocused();
+  } finally {
+    await setThreadDeleteDelay(electronApp, 0);
+  }
+});
+
+test("restores composer focus after deleting another conversation", async () => {
+  const sourceTitle = "Delete other conversation";
+  const targetTitle = "Keep selected conversation";
+  const sourceThreadId = await page.evaluate(async ({ cwd, sourceTitle, targetTitle }) => {
+    const source = await window.rhzycode.startThread({ cwd });
+    const target = await window.rhzycode.startThread({ cwd });
+    await window.rhzycode.renameThread(source.thread.id, sourceTitle);
+    await window.rhzycode.renameThread(target.thread.id, targetTitle);
+    return source.thread.id;
+  }, { cwd: projectDir, sourceTitle, targetTitle });
+
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  await expect(getThreadRow(page, sourceTitle)).toBeVisible();
+  await expect(getThreadRow(page, targetTitle)).toBeVisible();
+  await getThreadRow(page, targetTitle).click();
+  await expect(getThreadRow(page, targetTitle).locator("..")).toHaveClass(/active/);
+  const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
+  await taskPrompt.focus();
+
+  await setThreadDeleteDelay(electronApp, 750);
+  try {
+    await openThreadActions(page, sourceTitle);
+    await expect(taskPrompt).toBeFocused();
+    page.once("dialog", (dialog) => dialog.dismiss());
+    await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+    await expect(taskPrompt).toBeFocused();
+    await expect(getThreadRow(page, sourceTitle)).toBeVisible();
+
+    await openThreadActions(page, sourceTitle);
+    await expect(taskPrompt).toBeFocused();
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+    await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete").then((calls) => calls.at(-1)?.args))
+      .toEqual([sourceThreadId]);
+
+    await expect(getThreadRow(page, targetTitle).locator("..")).toHaveClass(/active/);
+    await expect(taskPrompt).toBeFocused();
+    await page.keyboard.type("Immediate draft after deleting another conversation");
+    await expect(taskPrompt).toHaveValue("Immediate draft after deleting another conversation");
+
+    await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete:completed")
+      .then((calls) => calls.at(-1)?.args)).toEqual([sourceThreadId]);
+    await expect(getThreadRow(page, sourceTitle)).toHaveCount(0);
+    await expect(taskPrompt).toBeFocused();
+  } finally {
+    await setThreadDeleteDelay(electronApp, 0);
+  }
+});
+
+test("restores composer focus after consecutive conversation deletions settle", async () => {
+  const titles = ["Consecutive delete one", "Consecutive delete two", "Consecutive delete three"];
+  const threadIds = await page.evaluate(async ({ cwd, titles: selectedTitles }) => {
+    const ids: string[] = [];
+    for (const title of selectedTitles) {
+      const result = await window.rhzycode.startThread({ cwd });
+      await window.rhzycode.renameThread(result.thread.id, title);
+      ids.push(result.thread.id);
+    }
+    return ids;
+  }, { cwd: projectDir, titles });
+
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  for (const title of titles) await expect(getThreadRow(page, title)).toBeVisible();
+  await getThreadRow(page, titles[0]).click();
+
+  const completedBefore = await ipcCalls(electronApp, "agent:thread:delete:completed").then((calls) => calls.length);
+  await setThreadDeleteDelay(electronApp, 500);
+  try {
+    for (let index = 0; index < titles.length; index += 1) {
+      await openThreadActions(page, titles[index]);
+      page.once("dialog", (dialog) => dialog.accept());
+      await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+      await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete").then((calls) => calls.at(-1)?.args))
+        .toEqual([threadIds[index]]);
+    }
+
+    await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete:completed").then((calls) => calls.length))
+      .toBe(completedBefore + titles.length);
+    for (const title of titles) await expect(getThreadRow(page, title)).toHaveCount(0);
+
+    const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
+    await expect(taskPrompt).toBeFocused();
+    await page.keyboard.type("Composer works after consecutive deletions");
+    await expect(taskPrompt).toHaveValue("Composer works after consecutive deletions");
+  } finally {
+    await setThreadDeleteDelay(electronApp, 0);
+  }
+});
+
+test("creates the first conversation after returning to an empty project", async () => {
+  for (const selectedDirectory of [projectDir, emptyProjectDir, projectDir]) {
+    await electronApp.evaluate(({ dialog }, directory) => {
+      dialog.showOpenDialog = (async () => ({
+        canceled: false,
+        filePaths: [directory],
+      })) as typeof dialog.showOpenDialog;
+    }, selectedDirectory);
+    await page.getByRole("button", { name: "Open project folder" }).click();
+    await expect(page.locator(".project-group.selected .project-group-main strong"))
+      .toHaveText(path.basename(selectedDirectory));
+  }
+
+  const emptyProjectGroup = page.locator(".project-group").filter({ hasText: "empty-project" });
+  await emptyProjectGroup.locator(".project-group-header").hover();
+  await emptyProjectGroup.getByRole("button", { name: "New task in project empty-project" }).click();
+
+  const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
+  await expect(page.locator(".project-group.selected .project-group-main strong")).toHaveText("empty-project");
+  await expect(page.getByText("Start a new task", { exact: true })).toBeVisible();
+  await expect(taskPrompt).toBeFocused();
+  await taskPrompt.fill("First task in the empty project");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await expect.poll(() => ipcCalls(electronApp, "agent:thread:start").then((calls) => {
+    const params = calls.at(-1)?.args[0] as { cwd?: string } | undefined;
+    return params?.cwd;
+  })).toBe(emptyProjectDir);
+  await expect(getThreadRow(page, "First task in the empty project")).toBeVisible();
+
+  await emptyProjectGroup.locator(".project-group-header").hover();
+  await emptyProjectGroup.getByRole("button", { name: "New task in project empty-project" }).click();
+  await expect(page.getByText("Start a new task", { exact: true })).toBeVisible();
+  await expect(taskPrompt).toHaveValue("");
+  await expect(getThreadRow(page, "First task in the empty project").locator("..")).not.toHaveClass(/active/);
+});
+
+test("shows an assistant reply delivered only as a completed item", async () => {
+  const threadId = await page.evaluate((cwd) => window.rhzycode.startThread({ cwd })
+    .then((result) => result.thread.id), emptyProjectDir);
+  await sendSyncEvent(electronApp, {
+    type: "thread.updated",
+    sequence: 30_000,
+    thread: {
+      id: threadId,
+      hostId: "local-desktop",
+      title: "Completion-only reply",
+      projectPath: emptyProjectDir,
+      model: "ui/model",
+      status: "running",
+      updatedAt: new Date().toISOString(),
+    },
+  });
+  const threadRow = getThreadRow(page, "Completion-only reply");
+  await expect(threadRow).toBeVisible();
+  await threadRow.click();
+  await expect(threadRow.locator("..")).toHaveClass(/active/);
+
+  await sendAgentMessage(electronApp, {
+    method: "item/completed",
+    params: {
+      threadId,
+      turnId: "completion-only-turn",
+      item: {
+        id: "completion-only-message",
+        type: "agentMessage",
+        text: "This reply arrived without streaming deltas.",
+      },
+    },
+  });
+
+  await expect(page.getByText("This reply arrived without streaming deltas.", { exact: true })).toBeVisible();
 });
 
 async function pasteImage(prompt: ReturnType<Page["getByRole"]>, name: string): Promise<void> {
@@ -976,6 +1583,25 @@ function getThreadRow(activePage: Page, title: string) {
   return activePage.locator(".thread-row").filter({ hasText: title });
 }
 
+function getSelectedProjectNewTask(activePage: Page) {
+  return activePage.locator(".project-group.selected")
+    .getByRole("button", { name: /^New task in project / });
+}
+
+async function clickSelectedProjectNewTask(activePage: Page): Promise<void> {
+  await activePage.locator(".project-group.selected .project-group-header").hover();
+  await getSelectedProjectNewTask(activePage).click();
+}
+
+async function typeAndClearFocusedComposer(activePage: Page, composer: Locator, text: string): Promise<void> {
+  await expect(composer).toBeFocused();
+  await activePage.keyboard.type(text);
+  await expect(composer).toHaveValue(text);
+  await activePage.keyboard.press("Control+A");
+  await activePage.keyboard.press("Backspace");
+  await expect(composer).toHaveValue("");
+}
+
 async function sendSyncEvent(app: ElectronApplication, event: Record<string, unknown>): Promise<void> {
   await app.evaluate(({ BrowserWindow }, value) => {
     BrowserWindow.getAllWindows()[0]?.webContents.send("sync:event", value);
@@ -986,6 +1612,39 @@ async function sendAgentMessage(app: ElectronApplication, message: Record<string
   await app.evaluate(({ BrowserWindow }, value) => {
     BrowserWindow.getAllWindows()[0]?.webContents.send("agent:message", value);
   }, message);
+}
+
+async function sendStreamingBurst(
+  app: ElectronApplication,
+  threadId: string,
+  uniqueItemCount: number,
+  repeatedDeltaCount: number,
+): Promise<void> {
+  await app.evaluate(({ BrowserWindow }, input) => {
+    const contents = BrowserWindow.getAllWindows()[0]?.webContents;
+    for (let index = 0; index < input.uniqueItemCount; index += 1) {
+      contents?.send("agent:message", {
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: input.threadId,
+          turnId: "streaming-burst",
+          itemId: `history-${index}`,
+          delta: "x",
+        },
+      });
+    }
+    for (let index = 0; index < input.repeatedDeltaCount; index += 1) {
+      contents?.send("agent:message", {
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: input.threadId,
+          turnId: "streaming-burst",
+          itemId: "live-output",
+          delta: "x",
+        },
+      });
+    }
+  }, { threadId, uniqueItemCount, repeatedDeltaCount });
 }
 
 async function ipcCalls(app: ElectronApplication, channel: string): Promise<Array<{ channel: string; args: unknown[] }>> {
@@ -1002,6 +1661,27 @@ async function failNextTurn(app: ElectronApplication): Promise<void> {
     const state = (globalThis as any).__rhzycodeUiTest as { failNextTurn?: boolean } | undefined;
     if (state) state.failNextTurn = true;
   });
+}
+
+async function setThreadOpenDelay(app: ElectronApplication, milliseconds: number): Promise<void> {
+  await app.evaluate((_electron, value) => {
+    const state = (globalThis as any).__rhzycodeUiTest as { threadOpenDelayMs?: number } | undefined;
+    if (state) state.threadOpenDelayMs = value;
+  }, milliseconds);
+}
+
+async function setThreadDeleteDelay(app: ElectronApplication, milliseconds: number): Promise<void> {
+  await app.evaluate((_electron, value) => {
+    const state = (globalThis as any).__rhzycodeUiTest as { threadDeleteDelayMs?: number } | undefined;
+    if (state) state.threadDeleteDelayMs = value;
+  }, milliseconds);
+}
+
+async function setAgentConnectDelay(app: ElectronApplication, milliseconds: number): Promise<void> {
+  await app.evaluate((_electron, value) => {
+    const state = (globalThis as any).__rhzycodeUiTest as { agentConnectDelayMs?: number } | undefined;
+    if (state) state.agentConnectDelayMs = value;
+  }, milliseconds);
 }
 
 function writeGeneratedImageFixture(filePath: string): void {
@@ -1058,31 +1738,15 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
     let threadSequence = 0;
     let terminal: Record<string, unknown> | null = null;
     let gatewayState = "running";
-    let syncPort = 8790;
     let credentialStatus = {
       encryptionAvailable: true,
-      providers: [
-        {
-          providerId: "sub2api",
-          name: "sub2api",
-          baseUrl: "https://model.rhzy.ai/v1",
-          protocol: "responses",
-          detectedProtocol: "responses",
-          models: ["gpt-5.5"],
-          custom: false,
-          configured: true,
-          source: "secure_store",
-        },
-      ],
+      providers: [] as Array<Record<string, any>>,
     };
     let mobileAccessStatus = {
-      accessKey: {
-        key: `rhzy_${"A".repeat(43)}`,
-        createdAt: new Date().toISOString(),
-        lastUsedAt: null,
-      } as Record<string, unknown> | null,
+      accessKey: null as Record<string, unknown> | null,
       audit: [],
     };
+    let mobileAccessKeySequence = 0;
     let skillsStatus = {
       skills: [
         {
@@ -1115,6 +1779,9 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
     const testState = {
       calls: [] as Array<{ channel: string; args: unknown[] }>,
       failNextTurn: false,
+      agentConnectDelayMs: 0,
+      threadDeleteDelayMs: 0,
+      threadOpenDelayMs: 0,
     };
     (globalThis as any).__rhzycodeUiTest = testState;
     const record = (channel: string, ...args: unknown[]) => {
@@ -1132,9 +1799,9 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
     });
     const syncStatus = () => ({
       state: "running",
-      host: "192.168.1.25",
-      port: syncPort,
-      url: `http://192.168.1.25:${syncPort}`,
+      host: "127.0.0.1",
+      port: 45123,
+      url: "http://127.0.0.1:45123",
       error: null,
     });
     const replace = (channel: string, handler: (...args: any[]) => unknown) => {
@@ -1143,8 +1810,11 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
     };
 
     replace("agent:status", () => ({ state: "connected", error: null }));
-    replace("agent:connect", () => {
+    replace("agent:connect", async () => {
       record("agent:connect");
+      if (testState.agentConnectDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, testState.agentConnectDelayMs));
+      }
       return { state: "connected", error: null };
     });
     replace("agent:models", () => ({
@@ -1209,13 +1879,17 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
         return [];
       });
     });
-    replace("agent:threads", (_event, options = {}) => [...threads.values()]
-      .filter((thread) => Boolean(thread.archived) === Boolean(options.archived))
-      .filter((thread) => !options.cwd || thread.projectPath === options.cwd)
-      .filter((thread) => !options.searchTerm
-        || String(thread.title).toLowerCase().includes(String(options.searchTerm).toLowerCase()))
-      .map(({ archived: _archived, ...thread }) => thread));
+    replace("agent:threads", (_event, options = {}) => {
+      record("agent:threads", options);
+      return [...threads.values()]
+        .filter((thread) => Boolean(thread.archived) === Boolean(options.archived))
+        .filter((thread) => !options.cwd || thread.projectPath === options.cwd)
+        .filter((thread) => !options.searchTerm
+          || String(thread.title).toLowerCase().includes(String(options.searchTerm).toLowerCase()))
+        .map(({ archived: _archived, ...thread }) => thread);
+    });
     replace("agent:thread:start", (_event, params) => {
+      record("agent:thread:start", params);
       threadSequence += 1;
       const id = threadSequence === 1 ? "ui-thread" : `ui-thread-${threadSequence}`;
       threads.set(id, {
@@ -1230,11 +1904,15 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
       });
       return { thread: { id } };
     });
-    replace("agent:thread:open", (_event, threadId) => {
+    replace("agent:thread:open", async (_event, threadId) => {
       record("agent:thread:open", threadId);
+      if (testState.threadOpenDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, testState.threadOpenDelayMs));
+      }
       const thread = threads.get(threadId);
       if (!thread) throw new Error("Thread not found");
       const { archived: _archived, ...summary } = thread;
+      record("agent:thread:open:completed", threadId);
       return {
         thread: summary,
         messages: [
@@ -1279,9 +1957,13 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
       const thread = threads.get(threadId);
       if (thread) threads.set(threadId, { ...thread, archived: false });
     });
-    replace("agent:thread:delete", (_event, threadId) => {
+    replace("agent:thread:delete", async (_event, threadId) => {
       record("agent:thread:delete", threadId);
       threads.delete(threadId);
+      if (testState.threadDeleteDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, testState.threadDeleteDelayMs));
+      }
+      record("agent:thread:delete:completed", threadId);
     });
     replace("agent:turn:start", (_event, params) => {
       record("agent:turn:start", params);
@@ -1317,6 +1999,9 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
     replace("project:save-local-file", (_event, filePath, suggestedName) => {
       record("project:save-local-file", filePath, suggestedName);
       return filePath;
+    });
+    replace("project:show-image-context-menu", (_event, filePath, suggestedName) => {
+      record("project:show-image-context-menu", filePath, suggestedName);
     });
     replace("gateway:status", () => gatewayStatus());
     replace("gateway:start", () => {
@@ -1431,18 +2116,13 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
     });
     replace("storage:status", () => ({
       encryptionAvailable: true,
-      controlState: "restored",
-      mobileAccessState: "restored",
+      controlState: "missing",
+      mobileAccessState: "missing",
     }));
     replace("clipboard:write", (_event, value) => {
       record("clipboard:write", value);
     });
     replace("sync:status", () => syncStatus());
-    replace("sync:port:set", (_event, value) => {
-      record("sync:port:set", value);
-      syncPort = value;
-      return syncStatus();
-    });
     replace("sync:snapshot", () => ({
       hosts: [],
       threads: [],
@@ -1462,8 +2142,9 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
     replace("mobile-access:status", () => mobileAccessStatus);
     replace("mobile-access:key:rotate", () => {
       record("mobile-access:key:rotate");
+      mobileAccessKeySequence += 1;
       const accessKey = {
-        key: `rhzy_${"B".repeat(43)}`,
+        key: `rhzy_${(mobileAccessKeySequence === 1 ? "A" : "B").repeat(43)}`,
         createdAt: new Date().toISOString(),
         lastUsedAt: null,
       };

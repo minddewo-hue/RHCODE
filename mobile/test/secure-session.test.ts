@@ -37,9 +37,9 @@ test("saves multiple computers with separate secure KEY values", async () => {
   const sessions = new SecureSessionStore(storage);
   const firstKey = `rhzy_${"A".repeat(43)}`;
   const secondKey = `rhzy_${"B".repeat(43)}`;
-  const first = await sessions.saveConnection({ host: "192.168.11.103", port: 8790, accessKey: firstKey });
+  const first = await sessions.saveConnection({ accessKey: firstKey });
   const firstId = first.activeConnectionId!;
-  const second = await sessions.saveConnection({ host: "192.168.11.104", port: 8791, accessKey: secondKey });
+  const second = await sessions.saveConnection({ accessKey: secondKey });
   const secondId = second.activeConnectionId!;
 
   assert.equal(firstId === secondId, false);
@@ -53,11 +53,25 @@ test("saves multiple computers with separate secure KEY values", async () => {
   assert.equal((await sessions.load()).activeConnectionId, firstId);
 });
 
-test("updates an existing endpoint instead of duplicating it", async () => {
+test("keeps multiple KEY-only computers on the shared transfer endpoint", async () => {
   const storage = new MemoryStorage();
   const sessions = new SecureSessionStore(storage);
-  await sessions.saveConnection({ host: "192.168.11.103", port: 8790, accessKey: `rhzy_${"A".repeat(43)}` });
-  const updated = await sessions.saveConnection({ host: "192.168.11.103", port: 8790, accessKey: `rhzy_${"B".repeat(43)}` });
+  const firstKey = `rhzy_${"A".repeat(43)}`;
+  const secondKey = `rhzy_${"B".repeat(43)}`;
+  await sessions.saveConnection({ accessKey: firstKey });
+  const saved = await sessions.saveConnection({ accessKey: secondKey });
+  assert.equal(saved.connections.length, 2);
+  assert.deepEqual(saved.connections.map((connection) => connection.accessKey), [firstKey, secondKey]);
+});
+
+test("updates an existing computer by id instead of duplicating it", async () => {
+  const storage = new MemoryStorage();
+  const sessions = new SecureSessionStore(storage);
+  const original = await sessions.saveConnection({ accessKey: `rhzy_${"A".repeat(43)}` });
+  const updated = await sessions.saveConnection({
+    id: original.activeConnectionId!,
+    accessKey: `rhzy_${"B".repeat(43)}`,
+  });
   assert.equal(updated.connections.length, 1);
   assert.equal(updated.connections[0]?.accessKey, `rhzy_${"B".repeat(43)}`);
 });
@@ -69,11 +83,13 @@ test("persists the last project and thread separately for each computer", async 
     projectPath: "D:\\work\\first",
     threadId: "thread-first",
     newThreadDraft: false,
+    collapsedProjectPaths: ["D:\\work\\first", "D:\\work\\shared"],
   });
   await sessions.saveNavigation("computer-2", {
     projectPath: "D:\\work\\second",
     threadId: null,
     newThreadDraft: true,
+    collapsedProjectPaths: ["D:\\work\\second"],
   });
 
   const restored = new SecureSessionStore(storage);
@@ -81,25 +97,44 @@ test("persists the last project and thread separately for each computer", async 
     projectPath: "D:\\work\\first",
     threadId: "thread-first",
     newThreadDraft: false,
+    collapsedProjectPaths: ["D:\\work\\first", "D:\\work\\shared"],
   });
   assert.deepEqual(await restored.loadNavigation("computer-2"), {
     projectPath: "D:\\work\\second",
     threadId: null,
     newThreadDraft: true,
+    collapsedProjectPaths: ["D:\\work\\second"],
   });
+});
+
+test("loads older navigation and filters malformed collapsed project paths", async () => {
+  const storage = new MemoryStorage();
+  storage.values.set(mobileNavigationKey("computer-old"), JSON.stringify({
+    projectPath: "D:\\work\\old",
+    threadId: null,
+    newThreadDraft: false,
+  }));
+  storage.values.set(mobileNavigationKey("computer-malformed"), JSON.stringify({
+    collapsedProjectPaths: ["D:\\work\\valid", "", null, 42, "D:\\work\\valid"],
+  }));
+  const sessions = new SecureSessionStore(storage);
+
+  assert.deepEqual((await sessions.loadNavigation("computer-old")).collapsedProjectPaths, []);
+  assert.deepEqual((await sessions.loadNavigation("computer-malformed")).collapsedProjectPaths, ["D:\\work\\valid"]);
 });
 
 test("clears or removes only the selected computer", async () => {
   const storage = new MemoryStorage();
   const sessions = new SecureSessionStore(storage);
-  const first = await sessions.saveConnection({ host: "192.168.11.103", port: 8790, accessKey: `rhzy_${"A".repeat(43)}` });
+  const first = await sessions.saveConnection({ accessKey: `rhzy_${"A".repeat(43)}` });
   const firstId = first.activeConnectionId!;
-  const second = await sessions.saveConnection({ host: "192.168.11.104", port: 8790, accessKey: `rhzy_${"B".repeat(43)}` });
+  const second = await sessions.saveConnection({ accessKey: `rhzy_${"B".repeat(43)}` });
   const secondId = second.activeConnectionId!;
   await sessions.saveNavigation(secondId, {
     projectPath: "D:\\work",
     threadId: "thread-2",
     newThreadDraft: false,
+    collapsedProjectPaths: ["D:\\work"],
   });
 
   const cleared = await sessions.clearAccessKey(firstId);
@@ -113,17 +148,20 @@ test("clears or removes only the selected computer", async () => {
   assert.equal(storage.values.has(mobileNavigationKey(secondId)), false);
 });
 
-test("migrates the legacy single-computer session", async () => {
+test("rejects connection metadata from obsolete direct-endpoint versions", async () => {
   const storage = new MemoryStorage();
-  const key = `rhzy_${"A".repeat(43)}`;
-  storage.values.set(secureSessionKeys.legacyHost, "192.168.11.103");
-  storage.values.set(secureSessionKeys.legacyPort, "not-a-port");
-  storage.values.set(secureSessionKeys.legacyAccessKey, key);
+  const firstKey = `rhzy_${"A".repeat(43)}`;
+  const secondKey = `rhzy_${"B".repeat(43)}`;
+  storage.values.set(secureSessionKeys.connections, JSON.stringify([
+    { id: "computer-1", host: "192.168.11.103", port: 8790 },
+    { id: "computer-2", host: "192.168.11.104", port: 8791 },
+  ]));
+  storage.values.set(secureSessionKeys.activeConnectionId, "computer-2");
+  storage.values.set(secureConnectionKey("computer-1"), firstKey);
+  storage.values.set(secureConnectionKey("computer-2"), secondKey);
 
-  const migrated = await new SecureSessionStore(storage).load("192.168.1.2", 9000);
-  assert.equal(migrated.connections.length, 1);
-  assert.equal(migrated.connections[0]?.host, "192.168.11.103");
-  assert.equal(migrated.connections[0]?.port, 9000);
-  assert.equal(migrated.connections[0]?.accessKey, key);
-  assert.equal(storage.values.has(secureSessionKeys.legacyAccessKey), false);
+  assert.deepEqual(await new SecureSessionStore(storage).load(), {
+    connections: [],
+    activeConnectionId: null,
+  });
 });

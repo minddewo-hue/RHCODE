@@ -38,6 +38,43 @@ test("encrypts and restores durable control-plane state", (context) => {
   persistence.detach();
 });
 
+test("defers persistence until a streaming timeline item reaches a durable state", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-control-streaming-"));
+  const filePath = path.join(root, "control-state.bin");
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const encryption = {
+    isAvailable: () => true,
+    encrypt: (value: string) => Buffer.from(value, "utf8"),
+    decrypt: (value: Buffer) => value.toString("utf8"),
+  };
+  const store = new ControlStore();
+  const persistence = new EncryptedControlPersistence(filePath, encryption);
+  persistence.attach(store);
+  const item = {
+    id: "streaming-item",
+    threadId: "streaming-thread",
+    kind: "assistant" as const,
+    title: "",
+    content: "partial",
+    createdAt: new Date().toISOString(),
+  };
+
+  store.publish({ type: "timeline.upserted", item: { ...item, status: "running" } });
+  await new Promise((resolve) => setTimeout(resolve, 220));
+  assert.equal(fs.existsSync(filePath), false);
+
+  store.publish({
+    type: "timeline.upserted",
+    item: { ...item, status: "completed", content: "complete" },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 220));
+  assert.equal(fs.existsSync(filePath), true);
+  const restored = new EncryptedControlPersistence(filePath, encryption).load();
+  assert.equal(restored?.snapshot.timeline[0]?.content, "complete");
+  assert.equal(restored?.events.some((event) => event.type === "timeline.upserted"), false);
+  persistence.detach();
+});
+
 test("reports missing, partial, invalid, and unavailable restore states", (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-control-status-"));
   const filePath = path.join(root, "control-state.bin");

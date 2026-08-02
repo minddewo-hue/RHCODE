@@ -32,6 +32,37 @@ test("registers uploaded files without copying or persisting user data", () => {
   }
 });
 
+test("copies and persists uploaded images after the temporary source is removed", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-managed-images-"));
+  try {
+    const source = path.join(root, "temporary", "screen.png");
+    const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nKsAAAAASUVORK5CYII=", "base64");
+    fs.mkdirSync(path.dirname(source), { recursive: true });
+    fs.writeFileSync(source, bytes);
+    const managedDirectory = path.join(root, "managed");
+    const store = new ManagedFileStore(managedDirectory);
+    const [record] = store.registerUploads("thread-1", [{
+      path: source,
+      name: "screen.png",
+      kind: "image",
+      size: bytes.length,
+    }]);
+    assert.ok(record);
+    store.bindTurn([record.id], "turn-1");
+    assert.notEqual(record.path, source);
+    fs.unlinkSync(source);
+    assert.deepEqual(store.read(record.id)?.bytes, bytes);
+
+    const restored = new ManagedFileStore(managedDirectory);
+    assert.equal(restored.listThread("thread-1")[0]?.turnId, "turn-1");
+    assert.deepEqual(restored.read(record.id)?.bytes, bytes);
+    restored.removeThread("thread-1");
+    assert.equal(fs.existsSync(record.path), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("collects supported document and image artifacts inside the active project", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-artifact-paths-"));
   try {

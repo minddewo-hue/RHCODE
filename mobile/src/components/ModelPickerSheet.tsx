@@ -11,7 +11,7 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { colors } from "../ui/theme";
+import { colors, createThemedStyles } from "../ui/theme";
 import { groupRemoteModels } from "./model-picker-model";
 
 interface ModelPickerSheetProps {
@@ -114,7 +114,7 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = createThemedStyles((colors) => ({
   modalRoot: { flex: 1, justifyContent: "flex-end" },
   scrim: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0, backgroundColor: colors.overlay },
   sheet: { maxHeight: "72%", borderTopLeftRadius: 8, borderTopRightRadius: 8, backgroundColor: colors.canvas },
@@ -140,4 +140,4 @@ const styles = StyleSheet.create({
   retryButton: { height: 36, marginTop: 12, paddingHorizontal: 12, borderWidth: 1, borderColor: colors.borderStrong, borderRadius: 6, flexDirection: "row", alignItems: "center", gap: 6 },
   retryText: { color: colors.ink, fontSize: 12, lineHeight: 16, fontWeight: "600", letterSpacing: 0 },
   pressed: { opacity: 0.72 },
-});
+}));

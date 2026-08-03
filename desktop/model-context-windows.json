@@ -18,6 +18,11 @@
       "max_context_window": 262144,
       "verification": "deployment_owner"
     },
+    "gemma4-31b-uncensored-bf16-256k-seq4": {
+      "context_window": 262144,
+      "max_context_window": 262144,
+      "verification": "deployment_owner"
+    },
     "MiniMax-M2": {
       "context_window": 204800,
       "max_context_window": 204800,

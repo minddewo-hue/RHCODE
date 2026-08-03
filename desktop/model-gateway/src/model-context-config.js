@@ -22,12 +22,16 @@ export function loadModelContextConfig(rootDir, configPath) {
 export function applyModelContextConfig(model, config) {
   if (!model || !config) return model;
 
+  // A deployment-level value is the most specific source of truth. This lets
+  // two providers expose the same upstream model with different safe limits.
+  if (model.contextWindow && model.contextWindowSource === "gateway_config") return model;
+
   const candidates = [];
+  if (typeof model.id === "string") candidates.push(model.id.trim());
   for (const route of model.routes || []) {
     if (typeof route?.upstreamModel === "string") candidates.push(route.upstreamModel.trim());
   }
   if (typeof model.id === "string") {
-    candidates.push(model.id.trim());
     const separator = model.id.indexOf("/");
     if (separator >= 0) candidates.push(model.id.slice(separator + 1).trim());
   }

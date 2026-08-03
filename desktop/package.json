@@ -1,6 +1,6 @@
 {
   "name": "@rhzycode/desktop",
-  "version": "0.1.20",
+  "version": "0.1.22",
   "description": "RHZYCODE multi-model coding agent desktop client",
   "author": "RHZYCODE",
   "private": true,
@@ -17,6 +17,7 @@
     "smoke:agent": "tsx scripts/smoke-agent.ts",
     "smoke:models": "tsx scripts/model-stability-matrix.ts",
     "smoke:models:coding": "tsx scripts/model-stability-matrix.ts --code-edit",
+    "smoke:model-switch": "tsx scripts/model-switch-live.ts",
     "audit:release": "node scripts/release-audit.mjs",
     "pack:win": "npm run build:dependencies && npm run build && node scripts/package-release.mjs --dir",
     "dist:win": "npm run build:dependencies && npm run build && node scripts/package-release.mjs",

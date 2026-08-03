@@ -15,9 +15,10 @@ const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 test("bundles a validated context entry for every current upstream model", () => {
   const config = loadModelContextConfig(desktopRoot);
   assert.ok(config);
-  assert.equal(config.models.size, 55);
+  assert.equal(config.models.size, 56);
   assert.deepEqual(contextPair(config, "gemma-4-31b-it-uncensored-bf16"), [131_072, 131_072]);
   assert.deepEqual(contextPair(config, "gemma4-31b-uncensored-bf16-256k"), [262_144, 262_144]);
+  assert.deepEqual(contextPair(config, "gemma4-31b-uncensored-bf16-256k-seq4"), [262_144, 262_144]);
   assert.deepEqual(contextPair(config, "MiniMax-M2.7"), [204_800, 204_800]);
   assert.deepEqual(contextPair(config, "MiniMax-M3"), [524_288, 1_048_576]);
   assert.deepEqual(contextPair(config, "k3"), [262_144, 1_048_576]);
@@ -59,6 +60,43 @@ test("uses the conservative default only when an unknown model has no explicit w
   assert.equal(unknown.contextWindowSource, "conservative_fallback");
   assert.equal(explicit.contextWindow, 65_536);
   assert.equal(explicit.maxContextWindow, 65_536);
+});
+
+test("preserves an explicit deployment context over the bundled upstream default", () => {
+  const config = loadModelContextConfig(desktopRoot);
+  const model = {
+    id: "private/grok-latest",
+    contextWindow: 64_000,
+    maxContextWindow: 96_000,
+    contextWindowSource: "gateway_config",
+    routes: [{ upstreamModel: "grok-latest" }],
+  };
+
+  applyModelContextConfig(model, config);
+
+  assert.equal(model.contextWindow, 64_000);
+  assert.equal(model.maxContextWindow, 96_000);
+  assert.equal(model.contextWindowSource, "gateway_config");
+});
+
+test("supports a provider-specific entry before the shared upstream entry", () => {
+  const config = loadModelContextConfig(desktopRoot);
+  config.models.set("private/grok-latest", {
+    contextWindow: 80_000,
+    maxContextWindow: 80_000,
+    effectiveContextWindowPercent: 85,
+    verification: "provider_override",
+  });
+  const model = {
+    id: "private/grok-latest",
+    routes: [{ upstreamModel: "grok-latest" }],
+  };
+
+  applyModelContextConfig(model, config);
+
+  assert.equal(model.contextWindow, 80_000);
+  assert.equal(model.effectiveContextWindowPercent, 85);
+  assert.equal(model.contextWindowSource, "provider_override");
 });
 
 test("applies configured values to the embedded gateway catalog", async (context) => {

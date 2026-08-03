@@ -119,14 +119,14 @@ export function preferTimelineItem(current: TimelineItem, incoming: TimelineItem
 
 
 /**
- * Live mobile turns publish a provisional user row (`user-${clientMessageId}`)
- * before App Server history returns the turn-scoped id. After openThread /
- * snapshot catch-up both rows can coexist; collapse only that provisional form.
+ * Runtime turns publish an unscoped user row (`user-*`) before App Server
+ * history returns the turn-scoped id. This also covers desktop-started turns,
+ * which do not carry a mobile clientMessageId.
  */
 export function isProvisionalUserTimelineItem(item: TimelineItem): boolean {
   return item.kind === "user"
-    && Boolean(item.clientMessageId)
-    && item.id === `user-${item.clientMessageId}`;
+    && item.id.startsWith("user-")
+    && !item.id.includes("::");
 }
 
 /**
@@ -252,6 +252,9 @@ function sameUserPayload(left: TimelineItem, right: TimelineItem): boolean {
 function isStreamingContentDuplicate(left: TimelineItem, right: TimelineItem): boolean {
   if (left.threadId !== right.threadId || left.kind !== right.kind) return false;
   if (left.id === right.id) return true;
+  const leftTurnId = timelineItemTurnId(left.id);
+  const rightTurnId = timelineItemTurnId(right.id);
+  if (leftTurnId && rightTurnId && leftTurnId !== rightTurnId) return false;
   const leftContent = left.content || "";
   const rightContent = right.content || "";
   if (!leftContent && !rightContent) {
@@ -262,6 +265,11 @@ function isStreamingContentDuplicate(left: TimelineItem, right: TimelineItem): b
   return leftContent === rightContent
     || leftContent.startsWith(rightContent)
     || rightContent.startsWith(leftContent);
+}
+
+function timelineItemTurnId(itemId: string): string | null {
+  const separator = itemId.indexOf("::");
+  return separator > 0 ? itemId.slice(0, separator) : null;
 }
 
 function normalizeTimelineText(value: string): string {

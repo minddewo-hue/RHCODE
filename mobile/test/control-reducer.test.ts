@@ -505,6 +505,46 @@ test("collapses provisional user rows after history catch-up while keeping inten
   assert.equal(merged.timeline[1]?.clientMessageId, "pending-2");
 });
 
+test("collapses desktop runtime user rows without client ids one-to-one", () => {
+  const liveFirst = {
+    ...timeline,
+    id: "user-1722521926736",
+    kind: "user" as const,
+    status: "completed" as const,
+    content: "reconnect",
+    createdAt: "2026-07-15T10:05:00.000Z",
+  };
+  const liveSecond = {
+    ...liveFirst,
+    id: "user-1722521930000",
+    createdAt: "2026-07-15T10:06:00.000Z",
+  };
+  const historyFirst = {
+    ...liveFirst,
+    id: "turn-1::item-user-1",
+    createdAt: "2026-07-15T10:00:00.000Z",
+  };
+  const historySecond = {
+    ...liveFirst,
+    id: "turn-2::item-user-2",
+    createdAt: "2026-07-15T10:01:00.000Z",
+  };
+
+  const hydrated = hydrateThreadSnapshot({
+    ...emptyControlSnapshot,
+    threads: [thread],
+    timeline: [liveFirst, liveSecond],
+  }, {
+    thread,
+    timeline: [historyFirst, historySecond],
+  });
+
+  assert.deepEqual(hydrated.timeline.map((item) => item.id), [
+    "turn-1::item-user-1",
+    "turn-2::item-user-2",
+  ]);
+});
+
 test("collapses unscoped live assistant rows into turn-scoped history rows", () => {
   const live = {
     ...timeline,
@@ -536,4 +576,33 @@ test("collapses unscoped live assistant rows into turn-scoped history rows", () 
   assert.equal(hydrated.timeline[0]?.id, "turn-9::assistant-1");
   assert.equal(hydrated.timeline[0]?.content, history.content);
   assert.equal(hydrated.timeline[0]?.status, "completed");
+});
+
+test("keeps similar assistant replies from different turns", () => {
+  const hydrated = hydrateThreadSnapshot({
+    ...emptyControlSnapshot,
+    threads: [thread],
+  }, {
+    thread,
+    timeline: [{
+      ...timeline,
+      id: "turn-1::assistant-1",
+      kind: "assistant",
+      status: "completed",
+      content: "Connection restored",
+      createdAt: "2026-07-15T10:00:01.000Z",
+    }, {
+      ...timeline,
+      id: "turn-2::assistant-2",
+      kind: "assistant",
+      status: "completed",
+      content: "Connection restored and verified",
+      createdAt: "2026-07-15T10:01:01.000Z",
+    }],
+  });
+
+  assert.deepEqual(hydrated.timeline.map((item) => item.id), [
+    "turn-1::assistant-1",
+    "turn-2::assistant-2",
+  ]);
 });

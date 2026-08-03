@@ -1,4 +1,4 @@
-﻿import { EventEmitter } from "node:events";
+import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -132,6 +132,11 @@ const ROLLOUT_WRITE_RETRY_DELAYS_MS = [25, 50, 100, 200, 400] as const;
 const INTERNAL_MODEL_PROVIDER_ID = "rhzy_gateway";
 const MAX_CACHED_THREAD_DETAILS = 10;
 const GATEWAY_FAILURE_GRACE_MS = 15_000;
+/** Bound App Server resume during mobile openThread so flaky links still get a local payload. */
+function mobileOpenResumeBudgetMs(): number {
+  const parsed = Number(process.env.RHZYCODE_MOBILE_OPEN_RESUME_MS || 12_000);
+  return Math.max(250, Number.isFinite(parsed) ? parsed : 12_000);
+}
 
 function isRolloutNotReadyMessage(message: string): boolean {
   return /no rollout found|rollout\b.*\bis empty/i.test(message);
@@ -139,6 +144,25 @@ function isRolloutNotReadyMessage(message: string): boolean {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function withDeadline<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return new Promise<T>((resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} exceeded ${timeoutMs}ms`));
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        if (timer) clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        if (timer) clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 interface ServerThread {
@@ -739,14 +763,24 @@ export class DesktopRuntime extends EventEmitter {
       ? this.threadDetailCache.get(threadId)
       : null;
     if (cached) {
-      this.rememberThreadDetail(threadId, cached);
-      this.activeThreadId = threadId;
-      return cached;
+      // Never treat sparse local fallback as an agent-backed load. A flaky
+      // resume must not permanently hide assistant replies behind this cache.
+      if (!requireAgent || !isIncompleteRolloutHistory(cached)) {
+        this.rememberThreadDetail(threadId, cached);
+        this.activeThreadId = threadId;
+        return cached;
+      }
+      this.loadedThreadIds.delete(threadId);
+      this.threadDetailCache.delete(threadId);
     }
     const pending = this.threadLoadPromises.get(threadId);
     if (pending) {
       const detail = await pending;
-      if (!requireAgent || this.loadedThreadIds.has(threadId)) return detail;
+      if (!requireAgent || (
+        this.loadedThreadIds.has(threadId) && !isIncompleteRolloutHistory(detail)
+      )) {
+        return detail;
+      }
     }
 
     const operation = requireAgent
@@ -819,7 +853,14 @@ export class DesktopRuntime extends EventEmitter {
           const localDetail = await this.loadLocalThreadDetail(localThread);
           if (localDetail) {
             this.activeThreadId = threadId;
-            this.loadedThreadIds.add(threadId);
+            // Incomplete rollouts are display fallbacks only. Marking them loaded
+            // poisons later requireAgent opens so AI replies stay missing.
+            if (isIncompleteRolloutHistory(localDetail)) {
+              this.loadedThreadIds.delete(threadId);
+              this.threadDetailCache.delete(threadId);
+            } else {
+              this.loadedThreadIds.add(threadId);
+            }
             return localDetail;
           }
         }
@@ -1683,15 +1724,28 @@ export class DesktopRuntime extends EventEmitter {
     try {
       const localThread = this.threads.get(threadId)!;
       const localDetail = await this.loadLocalThreadDetail(localThread);
-      // Mobile has no separate messages store; force App Server resume so
-      // incomplete local rollouts cannot hide assistant replies. Still keep the
-      // richer side when resume only returns an empty idle stub.
+      // Mobile only receives this payload. Prefer complete local history so large
+      // conversations stay fast on flaky links; resume only when the rollout is
+      // sparse or missing assistant finals.
       let detail: ThreadDetail;
-      try {
-        detail = preferRicherThreadDetail(localDetail, await this.openThread(threadId, true));
-      } catch (error) {
-        if (!localDetail) throw error;
+      if (localDetail && !isIncompleteRolloutHistory(localDetail)) {
         detail = localDetail;
+      } else {
+        try {
+          // Cap resume so a stuck App Server cannot starve mobile of the local
+          // user rows; the client keeps retrying sparse opens separately.
+          const resumed = await withDeadline(
+            this.openThread(threadId, true),
+            mobileOpenResumeBudgetMs(),
+            "Mobile openThread resume",
+          );
+          detail = preferRicherThreadDetail(localDetail, resumed);
+        } catch (error) {
+          if (!localDetail) throw error;
+          // Return the best local copy so the client can render something, but the
+          // incomplete-cache guards above keep forcing resume on later opens.
+          detail = localDetail;
+        }
       }
       const timelineById = new Map<string, (typeof detail.timeline)[number]>();
       for (const item of [...detail.timeline, ...remoteMessageTimeline(detail)]) {
@@ -2328,13 +2382,16 @@ function isVisibleHistoryMessage(message: ConversationMessage): boolean {
   );
 }
 
-/** Local rollouts sometimes only contain user rows until resume reconstitutes replies. */
+/** Local rollouts often keep user turns while omitting many assistant finals. */
 function isIncompleteRolloutHistory(detail: ThreadDetail): boolean {
   const visible = detail.messages.filter(isVisibleHistoryMessage);
   if (!visible.length) return false;
   const users = visible.filter((message) => message.role === "user").length;
   const assistants = visible.filter((message) => message.role === "assistant").length;
-  return users > 0 && assistants === 0;
+  if (users === 0) return false;
+  // Zero assistants is the common sparse case; fewer assistants than users also
+  // means resume should still run (partial tool-call rollouts, dropped finals).
+  return assistants < users;
 }
 
 function historyCompletenessScore(detail: ThreadDetail): number {
@@ -2356,36 +2413,42 @@ function preferRicherThreadDetail(
   resumed: ThreadDetail,
 ): ThreadDetail {
   if (!localDetail) return resumed;
-  const localIncomplete = isIncompleteRolloutHistory(localDetail);
-  const resumedIncomplete = isIncompleteRolloutHistory(resumed);
-  const localHasAssistant = localDetail.messages.some((message) => (
-    message.role === "assistant" && isVisibleHistoryMessage(message)
-  ));
-  const resumedHasAssistant = resumed.messages.some((message) => (
-    message.role === "assistant" && isVisibleHistoryMessage(message)
-  ));
-  if (localIncomplete && resumedHasAssistant) return resumed;
-  if (resumedIncomplete && localHasAssistant) {
+  const localAssistants = countVisibleRole(localDetail, "assistant");
+  const resumedAssistants = countVisibleRole(resumed, "assistant");
+  const localScore = historyCompletenessScore(localDetail);
+  const resumedScore = historyCompletenessScore(resumed);
+
+  // Assistant count is the primary signal. Long user-only rollouts must not beat a
+  // shorter resume payload that actually restored AI replies.
+  if (resumedAssistants > localAssistants) return resumed;
+  if (localAssistants > resumedAssistants) {
     return {
       thread: resumed.thread,
       messages: localDetail.messages,
       timeline: resumed.timeline.length ? resumed.timeline : localDetail.timeline,
     };
   }
-  const localScore = historyCompletenessScore(localDetail);
-  const resumedScore = historyCompletenessScore(resumed);
-  if (resumedScore >= localScore) {
-    if (resumedScore > localScore || resumed.messages.length >= localDetail.messages.length) {
-      return resumed;
-    }
+
+  if (resumedScore > localScore) return resumed;
+  if (localScore > resumedScore) {
+    return {
+      thread: resumed.thread,
+      messages: localDetail.messages,
+      timeline: resumed.timeline.length ? resumed.timeline : localDetail.timeline,
+    };
   }
-  // Keep local messages when resume came back emptier (e.g. idle stub), but prefer
-  // the resumed thread summary/status from App Server when available.
+  if (resumed.messages.length >= localDetail.messages.length) return resumed;
   return {
     thread: resumed.thread,
     messages: localDetail.messages,
     timeline: resumed.timeline.length ? resumed.timeline : localDetail.timeline,
   };
+}
+
+function countVisibleRole(detail: ThreadDetail, role: ConversationMessage["role"]): number {
+  return detail.messages.filter((message) => (
+    message.role === role && isVisibleHistoryMessage(message)
+  )).length;
 }
 
 function remoteMessageTimeline(detail: ThreadDetail): TimelineItem[] {

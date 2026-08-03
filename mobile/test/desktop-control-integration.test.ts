@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { RemoteTurnStartRequest } from "@rhzycode/protocol";
+import type { ControlSnapshot, RemoteTurnStartRequest } from "@rhzycode/protocol";
 import {
   createControlPlane,
   MobileAccessManager,
@@ -9,6 +9,11 @@ import {
 import { ControlClient, ControlClientError } from "../src/api/control-client";
 import { runControlCommandWithRetry } from "../src/api/control-connection-model";
 import { buildChatEntries, type PendingMessage } from "../src/components/chat-screen-model";
+import {
+  emptyControlSnapshot,
+  hydrateThreadSnapshot,
+  mergeControlSnapshot,
+} from "../src/state/control-reducer";
 
 test("connects the mobile client to the real desktop control contract", async () => {
   const mobileAccess = new MobileAccessManager();
@@ -168,6 +173,114 @@ test("replays one accepted turn after multiple lost mobile responses without dup
     assert.equal(snapshot.timeline.length, 1);
     assert.deepEqual(entries.map((entry) => entry.id), ["timeline:user-mobile-message-loss-1"]);
   } finally {
+    await controlPlane.stop();
+  }
+});
+
+test("recovers one user row and the completed AI reply after socket and HTTP loss", async () => {
+  const mobileAccess = new MobileAccessManager();
+  const accessKey = mobileAccess.rotateAccessKey();
+  const thread = {
+    id: "thread-weak-network",
+    hostId: "desktop-weak-network",
+    title: "Weak network recovery",
+    projectPath: "D:\\work",
+    model: "test/model",
+    status: "running" as const,
+    updatedAt: new Date().toISOString(),
+  };
+  const canonicalUser = {
+    id: "turn-weak::user-history",
+    threadId: thread.id,
+    kind: "user" as const,
+    status: "completed" as const,
+    title: "You",
+    content: "Continue after reconnecting",
+    createdAt: "2026-08-02T10:00:00.000Z",
+  };
+  const assistant = {
+    id: "turn-weak::assistant-history",
+    threadId: thread.id,
+    kind: "assistant" as const,
+    status: "completed" as const,
+    title: "RHZYCODE",
+    content: "The reply completed while the phone was disconnected.",
+    createdAt: "2026-08-02T10:00:01.000Z",
+  };
+  let openCalls = 0;
+  const commands = {
+    async openThread() {
+      openCalls += 1;
+      return { thread: { ...thread, status: "completed" as const }, timeline: [canonicalUser, assistant] };
+    },
+  } as Pick<ControlCommandHandlers, "openThread"> as ControlCommandHandlers;
+  const controlPlane = await createControlPlane({ logLevel: "silent", mobileAccess, commands });
+  controlPlane.store.upsertThread(thread);
+  controlPlane.store.publish({
+    type: "timeline.upserted",
+    item: {
+      ...canonicalUser,
+      id: "user-mobile-weak-network",
+      clientMessageId: "mobile-weak-network",
+    },
+  });
+  const address = await controlPlane.start({ host: "127.0.0.1", port: 0 });
+  const controlUrl = `http://127.0.0.1:${address.port}`;
+  let lostHistoryResponses = 0;
+  const unstableFetch: typeof fetch = async (input, init) => {
+    const response = await fetch(input, init);
+    if (String(input).endsWith(`/commands/threads/${thread.id}`) && lostHistoryResponses < 2) {
+      lostHistoryResponses += 1;
+      await response.arrayBuffer();
+      throw new TypeError("History response was lost after the desktop completed it");
+    }
+    return response;
+  };
+  const client = new ControlClient(accessKey.key, { controlUrl, fetchImpl: unstableFetch });
+  const pending: PendingMessage = {
+    id: "mobile-weak-network",
+    threadId: thread.id,
+    content: canonicalUser.content,
+    createdAt: canonicalUser.createdAt,
+    state: "sent",
+  };
+  let mobileState: ControlSnapshot = emptyControlSnapshot;
+  const socketDescriptor = client.eventSocket(0);
+  const socket = new WebSocket(socketDescriptor.url, socketDescriptor.protocols);
+
+  try {
+    await waitForSocket(socket, "open");
+    const closed = waitForSocket(socket, "close");
+    socket.close();
+    await closed;
+
+    controlPlane.store.publish({ type: "timeline.upserted", item: assistant });
+    controlPlane.store.upsertThread({ ...thread, status: "completed" });
+    mobileState = mergeControlSnapshot(mobileState, await client.getSnapshot());
+    const history = await runControlCommandWithRetry(
+      () => client.openThread(thread.id, 5_000),
+      { sleep: async () => undefined },
+    );
+    mobileState = hydrateThreadSnapshot(mobileState, history);
+    const entries = buildChatEntries({
+      selectedThreadId: thread.id,
+      timeline: mobileState.timeline,
+      pendingMessages: [pending],
+      approvals: [],
+      userInputs: [],
+    }, false);
+
+    assert.equal(lostHistoryResponses, 2);
+    assert.equal(openCalls, 3);
+    assert.equal(entries.every((entry) => entry.type === "timeline"), true);
+    assert.deepEqual(entries.flatMap((entry) => entry.type === "timeline"
+      ? [[entry.item.kind, entry.item.content]]
+      : []), [
+      ["user", canonicalUser.content],
+      ["assistant", assistant.content],
+    ]);
+  } finally {
+    socket.close();
     await controlPlane.stop();
   }
 });

@@ -86,6 +86,108 @@ export function shouldCatchUpActiveThread(options: {
   return ["running", "waiting_for_approval", "waiting_for_input"].includes(options.threadStatus);
 }
 
+/** A mobile-started turn gets one authoritative history reload after it stops. */
+export function shouldReloadCompletedThreadHistory(options: {
+  selectedThreadId: string | null;
+  threadStatus?: string | null;
+  online: boolean;
+  needsCatchUp: boolean;
+}): boolean {
+  return Boolean(
+    options.selectedThreadId
+    && options.threadStatus
+    && options.online
+    && options.needsCatchUp
+    && !shouldCatchUpActiveThread({ online: true, threadStatus: options.threadStatus }),
+  );
+}
+
+/** True when opened history still looks user-heavy and likely missing AI replies. */
+export function isSparseThreadHistory(
+  timeline: ReadonlyArray<Pick<TimelineItem, "threadId" | "kind">>,
+  threadId: string | null | undefined,
+): boolean {
+  if (!threadId) return false;
+  let users = 0;
+  let assistants = 0;
+  for (const item of timeline) {
+    if (item.threadId !== threadId) continue;
+    if (item.kind === "user") users += 1;
+    if (item.kind === "assistant") assistants += 1;
+  }
+  return users > 0 && assistants < users;
+}
+
+/** Whether a sparse openThread result should keep retrying instead of locking the cache. */
+export function shouldRetrySparseThreadHistory(options: {
+  online: boolean;
+  attempt: number;
+  maxAttempts?: number;
+  sparse: boolean;
+}): boolean {
+  return shouldRetryOpenThreadHistory({
+    online: options.online,
+    attempt: options.attempt,
+    maxAttempts: options.maxAttempts ?? 4,
+    sparse: options.sparse,
+  });
+}
+
+/**
+ * Unified openThread catch-up policy for sparse history and retryable transport
+ * failures. `attempt` is how many retries were already spent (0 = first try done).
+ */
+export function shouldRetryOpenThreadHistory(options: {
+  online: boolean;
+  attempt: number;
+  maxAttempts?: number;
+  sparse?: boolean;
+  error?: unknown;
+  isRetryableError?: (error: unknown) => boolean;
+}): boolean {
+  if (!options.online) return false;
+  const maxAttempts = Math.max(1, Math.floor(options.maxAttempts ?? 6));
+  if (options.attempt >= maxAttempts) return false;
+  if (options.error !== undefined) {
+    return Boolean(options.isRetryableError?.(options.error));
+  }
+  return Boolean(options.sparse);
+}
+
+/** Backoff between immediate openThread history retries. */
+export function openThreadHistoryRetryDelayMs(attempt: number): number {
+  const n = Math.max(1, Math.floor(attempt));
+  return Math.min(10_000, 1_000 * n);
+}
+
+/** Quiet follow-up delay after the immediate retry budget is exhausted. */
+export function openThreadHistorySoftRetryDelayMs(softAttempt = 1): number {
+  const n = Math.max(1, Math.floor(softAttempt));
+  return Math.min(30_000, 12_000 + (n - 1) * 3_000);
+}
+
+/** Sparse payloads and retryable transport failures both need quiet catch-up. */
+export function needsThreadHistoryCatchUp(options: {
+  sparse?: boolean;
+  error?: unknown;
+  isRetryableError?: (error: unknown) => boolean;
+}): boolean {
+  if (options.sparse) return true;
+  return options.error !== undefined && Boolean(options.isRetryableError?.(options.error));
+}
+
+/** Keep softly polling while the selected thread history is still incomplete. */
+export function shouldContinueThreadHistorySoftRetry(options: {
+  online: boolean;
+  needsCatchUp: boolean;
+  softAttempt: number;
+  maxSoftAttempts?: number;
+}): boolean {
+  if (!options.online || !options.needsCatchUp) return false;
+  const maxSoftAttempts = Math.max(0, Math.floor(options.maxSoftAttempts ?? 10));
+  return options.softAttempt < maxSoftAttempts;
+}
+
 /** Drop cached openThread state after an offline stretch so history reloads on recovery. */
 export function shouldResetOpenedThreadHistory(previousStatus: string | null | undefined, nextStatus: string): boolean {
   if (nextStatus === "offline") return true;

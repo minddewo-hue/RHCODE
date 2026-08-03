@@ -36,7 +36,7 @@ import {
   ControlClientError,
   verifyControlAccess,
 } from "./api/control-client";
-import { runControlCommandWithRetry } from "./api/control-connection-model";
+import { isRetryableConnectionError, runControlCommandWithRetry } from "./api/control-connection-model";
 import {
   normalizeAccessKey,
 } from "./auth/control-access";
@@ -44,12 +44,19 @@ import { AppDrawer, type DrawerPage } from "./components/AppDrawer";
 import { ChatScreen, type PendingMessage } from "./components/ChatScreen";
 import {
   findRetryablePendingMessage,
+  isSparseThreadHistory,
   isThreadHistoryLoading,
+  needsThreadHistoryCatchUp,
+  openThreadHistoryRetryDelayMs,
+  openThreadHistorySoftRetryDelayMs,
   reconcilePendingMessages,
   shouldCatchUpActiveThread,
+  shouldContinueThreadHistorySoftRetry,
   shouldKeepSelectedThread,
   shouldOpenThreadHistory,
+  shouldReloadCompletedThreadHistory,
   shouldResetOpenedThreadHistory,
+  shouldRetryOpenThreadHistory,
 } from "./components/chat-screen-model";
 import { remoteModelReasoningEfforts } from "./components/model-picker-model";
 import { ModelPickerSheet } from "./components/ModelPickerSheet";
@@ -166,6 +173,8 @@ function AppContent() {
   const modelSelectionContext = useRef("");
   const navigationSessionIdRef = useRef<string | null>(null);
   const openedThreadHistoryRef = useRef<string | null>(null);
+  const sparseHistoryAttemptsRef = useRef(new Map<string, number>());
+  const threadsNeedingHistoryCatchUpRef = useRef(new Set<string>());
   const connectionStatusRef = useRef<string | null>(null);
   const turnCatchUpTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
   const sendInFlightRef = useRef(false);
@@ -419,40 +428,163 @@ function AppContent() {
   );
 
   useEffect(() => {
-    if (!selectedThreadId) openedThreadHistoryRef.current = null;
-    if (!taskClient || !selectedThreadId || !shouldOpenThreadHistory({
+    if (!selectedThreadId) {
+      openedThreadHistoryRef.current = null;
+      sparseHistoryAttemptsRef.current.clear();
+    }
+    const needsCompletedTurnCatchUp = shouldReloadCompletedThreadHistory({
+      selectedThreadId,
+      threadStatus: selectedThread?.status,
+      online: control.status === "online",
+      needsCatchUp: Boolean(selectedThreadId && threadsNeedingHistoryCatchUpRef.current.has(selectedThreadId)),
+    });
+    const shouldOpenHistory = shouldOpenThreadHistory({
       selectedThreadId,
       selectedIsArchived,
       online: control.status === "online",
-      alreadyOpenedThreadId: openedThreadHistoryRef.current,
-    })) {
+      alreadyOpenedThreadId: needsCompletedTurnCatchUp ? null : openedThreadHistoryRef.current,
+    });
+    if (!taskClient || !selectedThreadId || !shouldOpenHistory) {
       setOpeningThreadId(null);
       return undefined;
     }
     let cancelled = false;
     const threadId = selectedThreadId;
     setOpeningThreadId(threadId);
-    void taskClient.openThread(threadId).then((result) => {
-      if (cancelled) return;
-      control.hydrateThread(result);
-      openedThreadHistoryRef.current = threadId;
-    }).catch((error) => {
-      if (cancelled) return;
-      Alert.alert("无法加载对话", describeControlError(error));
-      if (isUnauthorized(error) && session) rejectCredentials(session.id);
-    }).finally(() => {
+
+    const loadHistory = async () => {
+      let attempt = sparseHistoryAttemptsRef.current.get(threadId) || 0;
+      let sawSparse = false;
+      let needsSoftCatchUp = false;
+      const clearOpeningIndicator = () => {
+        if (!cancelled) {
+          setOpeningThreadId((current) => (current === threadId ? null : current));
+        }
+      };
+
+      // Immediate retries: cover both sparse payloads and flaky transport.
+      while (!cancelled) {
+        try {
+          const result = await runControlCommandWithRetry(
+            () => taskClient.openThread(threadId),
+            { attempts: 2 },
+          );
+          if (cancelled) return;
+          control.hydrateThread(result);
+          // Show whatever we got while catch-up continues in the background.
+          clearOpeningIndicator();
+          const sparse = isSparseThreadHistory(result.timeline, threadId);
+          sawSparse = sparse;
+          if (shouldRetryOpenThreadHistory({
+            online: true,
+            attempt,
+            sparse,
+          })) {
+            attempt += 1;
+            sparseHistoryAttemptsRef.current.set(threadId, attempt);
+            await new Promise((resolve) => setTimeout(resolve, openThreadHistoryRetryDelayMs(attempt)));
+            continue;
+          }
+          sparseHistoryAttemptsRef.current.delete(threadId);
+          if (!sparse) {
+            openedThreadHistoryRef.current = threadId;
+            threadsNeedingHistoryCatchUpRef.current.delete(threadId);
+            return;
+          }
+          // Still sparse after the immediate budget: do not lock the cache yet.
+          needsSoftCatchUp = needsThreadHistoryCatchUp({ sparse });
+          break;
+        } catch (error) {
+          if (cancelled) return;
+          if (isUnauthorized(error) && session) {
+            rejectCredentials(session.id);
+            return;
+          }
+          if (shouldRetryOpenThreadHistory({
+            online: true,
+            attempt,
+            error,
+            isRetryableError: isRetryableConnectionError,
+          })) {
+            attempt += 1;
+            sparseHistoryAttemptsRef.current.set(threadId, attempt);
+            await new Promise((resolve) => setTimeout(resolve, openThreadHistoryRetryDelayMs(attempt)));
+            continue;
+          }
+          needsSoftCatchUp = needsThreadHistoryCatchUp({
+            error,
+            isRetryableError: isRetryableConnectionError,
+          });
+          if (needsSoftCatchUp) break;
+          Alert.alert("无法加载对话", describeControlError(error));
+          return;
+        }
+      }
+
+      // Soft catch-up also covers repeated transport failures while the socket
+      // still reports online, so a lost openThread response cannot strand history.
+      let softAttempt = 0;
+      while (!cancelled && shouldContinueThreadHistorySoftRetry({
+        online: true,
+        needsCatchUp: needsSoftCatchUp,
+        softAttempt,
+      })) {
+        softAttempt += 1;
+        await new Promise((resolve) => setTimeout(resolve, openThreadHistorySoftRetryDelayMs(softAttempt)));
+        if (cancelled) return;
+        try {
+          const result = await runControlCommandWithRetry(
+            () => taskClient.openThread(threadId),
+            { attempts: 2 },
+          );
+          if (cancelled) return;
+          control.hydrateThread(result);
+          const sparse = isSparseThreadHistory(result.timeline, threadId);
+          sawSparse = sparse;
+          needsSoftCatchUp = needsThreadHistoryCatchUp({ sparse });
+          if (!sparse) {
+            sparseHistoryAttemptsRef.current.delete(threadId);
+            openedThreadHistoryRef.current = threadId;
+            threadsNeedingHistoryCatchUpRef.current.delete(threadId);
+            return;
+          }
+        } catch (error) {
+          if (cancelled) return;
+          if (isUnauthorized(error) && session) {
+            rejectCredentials(session.id);
+            return;
+          }
+          needsSoftCatchUp = needsThreadHistoryCatchUp({
+            error,
+            isRetryableError: isRetryableConnectionError,
+          });
+          if (!needsSoftCatchUp) {
+            Alert.alert("无法加载对话", describeControlError(error));
+            return;
+          }
+        }
+      }
+
+      // Exhausted soft retries while still sparse: lock to avoid thrashing until reconnect.
+      if (!cancelled && sawSparse) {
+        openedThreadHistoryRef.current = threadId;
+      }
+    };
+
+    void loadHistory().finally(() => {
       if (!cancelled) setOpeningThreadId((current) => current === threadId ? null : current);
     });
     return () => {
       cancelled = true;
     };
-  }, [control.hydrateThread, control.status, rejectCredentials, selectedIsArchived, selectedThreadId, session, taskClient]);
+  }, [control.hydrateThread, control.status, rejectCredentials, selectedIsArchived, selectedThread?.status, selectedThreadId, session, taskClient]);
 
   useEffect(() => {
     const previous = connectionStatusRef.current;
     connectionStatusRef.current = control.status;
     if (shouldResetOpenedThreadHistory(previous, control.status)) {
       openedThreadHistoryRef.current = null;
+      sparseHistoryAttemptsRef.current.clear();
     }
   }, [control.status]);
 
@@ -471,7 +603,7 @@ function AppContent() {
       void control.refresh();
     }, 3_500);
     return () => clearInterval(timer);
-  }, [control, control.status, selectedThread?.status, selectedThreadId]);
+  }, [control.refresh, control.status, selectedThread?.status, selectedThreadId]);
 
   useEffect(() => {
     if (!projectsLoaded || !selectedProjectPath || isRegisteredProject(selectedProjectPath, recentProjects)) return;
@@ -755,6 +887,7 @@ function AppContent() {
         45_000,
         `${id}:turn`,
       ));
+      threadsNeedingHistoryCatchUpRef.current.add(turnThreadId);
       setPendingMessages((current) => current.map((message) => (
         message.id === id ? { ...message, state: "sent" } : message
       )));
@@ -767,6 +900,7 @@ function AppContent() {
       }, delay));
     } catch (error) {
       if (pendingAdded) {
+        if (targetThreadId) threadsNeedingHistoryCatchUpRef.current.add(targetThreadId);
         setPendingMessages((current) => current.map((message) => (
           message.id === id ? { ...message, state: "failed" } : message
         )));

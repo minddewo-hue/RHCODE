@@ -377,6 +377,76 @@ test("prefers recovered assistant history over a longer user-only rollout", asyn
   );
 });
 
+
+test("mobile openThread returns local sparse history when resume exceeds budget", async (context) => {
+  const previousBudget = process.env.RHZYCODE_MOBILE_OPEN_RESUME_MS;
+  process.env.RHZYCODE_MOBILE_OPEN_RESUME_MS = "80";
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-resume-budget-"));
+  const { runtime, internals } = createRuntimeHarness(codexHome);
+  const thread = internals.threads.get("thread-1")!;
+  const rolloutPath = path.join(codexHome, "sessions", "rollout-thread-1.jsonl");
+  let releaseResume: (() => void) | undefined;
+  context.after(() => {
+    releaseResume?.();
+    if (previousBudget === undefined) delete process.env.RHZYCODE_MOBILE_OPEN_RESUME_MS;
+    else process.env.RHZYCODE_MOBILE_OPEN_RESUME_MS = previousBudget;
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  });
+  fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+  fs.writeFileSync(rolloutPath, [
+    JSON.stringify({
+      timestamp: "2026-07-30T00:00:00.000Z",
+      type: "session_meta",
+      payload: { id: thread.id, cwd: thread.projectPath },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-30T00:00:01.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Question waiting on resume" }],
+      },
+    }),
+    "",
+  ].join("\n"), "utf8");
+  internals.loadedThreadIds.delete(thread.id);
+
+  let resumeStarted = 0;
+  const resumeGate = new Promise<void>((resolve) => {
+    releaseResume = resolve;
+  });
+  runtime.agent.request = async (method) => {
+    if (method === "thread/resume") {
+      resumeStarted += 1;
+      await resumeGate;
+      return {
+        thread: {
+          id: thread.id,
+          cwd: thread.projectPath,
+          preview: thread.title,
+          status: { type: "idle" },
+          turns: [],
+        },
+        model: thread.model,
+      } as never;
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const started = Date.now();
+  const remote = await runtime.remoteCommandHandlers().openThread(thread.id, remoteContext());
+  const elapsed = Date.now() - started;
+
+  assert.ok(resumeStarted >= 1, "resume should start for sparse local history");
+  assert.ok(elapsed < 2_000, `openThread should fail open within resume budget, took ${elapsed}ms`);
+  assert.deepEqual(
+    remote.timeline
+      .filter((item) => item.kind === "user" || item.kind === "assistant")
+      .map((item) => [item.kind, item.content]),
+    [["user", "Question waiting on resume"]],
+  );
+});
 test("hydrates historical messages for mobile thread opening", async () => {
   const { runtime, internals } = createRuntimeHarness();
   const thread = internals.threads.get("thread-1")!;

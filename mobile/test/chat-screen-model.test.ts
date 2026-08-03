@@ -13,14 +13,22 @@ import {
   countActivityEntries,
   findRetryablePendingMessage,
   isResultEntry,
+  isSparseThreadHistory,
   isThreadHistoryLoading,
+  needsThreadHistoryCatchUp,
+  openThreadHistoryRetryDelayMs,
+  openThreadHistorySoftRetryDelayMs,
   reconcilePendingMessages,
   resumeConnectionAction,
   shouldCaptureConversationPageSwipe,
   shouldCatchUpActiveThread,
+  shouldContinueThreadHistorySoftRetry,
   shouldKeepSelectedThread,
   shouldOpenThreadHistory,
+  shouldReloadCompletedThreadHistory,
   shouldResetOpenedThreadHistory,
+  shouldRetryOpenThreadHistory,
+  shouldRetrySparseThreadHistory,
   type PendingMessage,
 } from "../src/components/chat-screen-model";
 
@@ -92,6 +100,27 @@ test("keeps a newly started thread selected while its server summary is delayed"
   assert.equal(shouldKeepSelectedThread("thread-new", [{ id: "thread-new" }], []), true);
   assert.equal(shouldKeepSelectedThread("thread-new", [{ id: "thread-old" }], []), false);
   assert.equal(shouldKeepSelectedThread(null, [{ id: "thread-new" }], [{ threadId: "thread-new" }]), false);
+});
+
+test("reloads authoritative history only after a mobile-started turn stops", () => {
+  assert.equal(shouldReloadCompletedThreadHistory({
+    selectedThreadId: "thread-1",
+    threadStatus: "running",
+    online: true,
+    needsCatchUp: true,
+  }), false);
+  assert.equal(shouldReloadCompletedThreadHistory({
+    selectedThreadId: "thread-1",
+    threadStatus: "completed",
+    online: true,
+    needsCatchUp: true,
+  }), true);
+  assert.equal(shouldReloadCompletedThreadHistory({
+    selectedThreadId: "thread-1",
+    threadStatus: "failed",
+    online: false,
+    needsCatchUp: true,
+  }), false);
 });
 
 test("captures deliberate horizontal page swipes without stealing vertical scrolling", () => {
@@ -398,4 +427,97 @@ test("resets opened history when the live connection drops", () => {
   assert.equal(shouldResetOpenedThreadHistory("online", "connecting"), true);
   assert.equal(shouldResetOpenedThreadHistory("offline", "connecting"), false);
   assert.equal(shouldResetOpenedThreadHistory("connecting", "online"), false);
+});
+
+
+test("isSparseThreadHistory marks conversations that still lack AI replies", () => {
+  assert.equal(isSparseThreadHistory([
+    timeline("u1", "thread-1", "user", "hello"),
+    timeline("u2", "thread-1", "user", "again"),
+  ], "thread-1"), true);
+  assert.equal(isSparseThreadHistory([
+    timeline("u1", "thread-1", "user", "hello"),
+    timeline("a1", "thread-1", "assistant", "hi"),
+  ], "thread-1"), false);
+  assert.equal(isSparseThreadHistory([
+    timeline("u1", "thread-1", "user", "hello"),
+    timeline("a1", "thread-other", "assistant", "hi"),
+  ], "thread-1"), true);
+});
+
+test("shouldRetrySparseThreadHistory bounds flaky openThread catch-up", () => {
+  assert.equal(shouldRetrySparseThreadHistory({ online: true, attempt: 0, sparse: true }), true);
+  assert.equal(shouldRetrySparseThreadHistory({ online: true, attempt: 3, sparse: true }), true);
+  assert.equal(shouldRetrySparseThreadHistory({ online: true, attempt: 4, sparse: true }), false);
+  assert.equal(shouldRetrySparseThreadHistory({ online: false, attempt: 0, sparse: true }), false);
+  assert.equal(shouldRetrySparseThreadHistory({ online: true, attempt: 0, sparse: false }), false);
+});
+
+test("shouldRetryOpenThreadHistory retries sparse payloads and retryable errors", () => {
+  assert.equal(shouldRetryOpenThreadHistory({ online: true, attempt: 0, sparse: true }), true);
+  assert.equal(shouldRetryOpenThreadHistory({ online: true, attempt: 5, sparse: true }), true);
+  assert.equal(shouldRetryOpenThreadHistory({ online: true, attempt: 6, sparse: true }), false);
+  assert.equal(shouldRetryOpenThreadHistory({
+    online: true,
+    attempt: 1,
+    error: new Error("timeout"),
+    isRetryableError: () => true,
+  }), true);
+  assert.equal(shouldRetryOpenThreadHistory({
+    online: true,
+    attempt: 1,
+    error: new Error("unauthorized"),
+    isRetryableError: () => false,
+  }), false);
+  assert.equal(shouldRetryOpenThreadHistory({
+    online: false,
+    attempt: 0,
+    error: new Error("timeout"),
+    isRetryableError: () => true,
+  }), false);
+});
+
+test("openThread history retry delays stay bounded", () => {
+  assert.equal(openThreadHistoryRetryDelayMs(1), 1_000);
+  assert.equal(openThreadHistoryRetryDelayMs(3), 3_000);
+  assert.equal(openThreadHistoryRetryDelayMs(20), 10_000);
+  assert.equal(openThreadHistorySoftRetryDelayMs(1), 12_000);
+  assert.equal(openThreadHistorySoftRetryDelayMs(10), 30_000);
+});
+
+test("soft history retries cover sparse payloads and exhausted network errors", () => {
+  assert.equal(needsThreadHistoryCatchUp({ sparse: true }), true);
+  assert.equal(needsThreadHistoryCatchUp({
+    error: new Error("timeout"),
+    isRetryableError: () => true,
+  }), true);
+  assert.equal(needsThreadHistoryCatchUp({
+    error: new Error("unauthorized"),
+    isRetryableError: () => false,
+  }), false);
+  assert.equal(shouldContinueThreadHistorySoftRetry({
+    online: true,
+    needsCatchUp: true,
+    softAttempt: 0,
+  }), true);
+  assert.equal(shouldContinueThreadHistorySoftRetry({
+    online: true,
+    needsCatchUp: true,
+    softAttempt: 9,
+  }), true);
+  assert.equal(shouldContinueThreadHistorySoftRetry({
+    online: true,
+    needsCatchUp: true,
+    softAttempt: 10,
+  }), false);
+  assert.equal(shouldContinueThreadHistorySoftRetry({
+    online: true,
+    needsCatchUp: false,
+    softAttempt: 0,
+  }), false);
+  assert.equal(shouldContinueThreadHistorySoftRetry({
+    online: false,
+    needsCatchUp: true,
+    softAttempt: 0,
+  }), false);
 });

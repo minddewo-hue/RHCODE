@@ -218,3 +218,165 @@ test("ignores obsolete event_msg history rows", async (context) => {
   const detail = await runtime.openThread(threadId);
   assert.deepEqual(detail.messages, []);
 });
+
+
+test("does not cache sparse local fallback as agent-loaded history", async (context) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-sparse-cache-"));
+  context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+
+  const threadId = "019fa195-11c9-76b2-84c1-bf33068b6000";
+  const projectPath = path.join(codexHome, "offline-project");
+  const sessionDirectory = path.join(codexHome, "sessions", "2026", "08", "02");
+  fs.mkdirSync(sessionDirectory, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessionDirectory, `rollout-sparse-${threadId}.jsonl`),
+    [
+      record("session_meta", { id: threadId, cwd: projectPath }),
+      record("response_item", {
+        type: "message",
+        id: "user-1",
+        role: "user",
+        content: [{ type: "input_text", text: "First question" }],
+      }),
+      record("response_item", {
+        type: "message",
+        id: "user-2",
+        role: "user",
+        content: [{ type: "input_text", text: "Second question" }],
+      }),
+      record("response_item", {
+        type: "message",
+        id: "assistant-1",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Only one local answer" }],
+      }),
+    ].join("\n"),
+    "utf8",
+  );
+
+  const runtime = new DesktopRuntime(".", codexHome);
+  let resumeCalls = 0;
+  runtime.agent.request = async (method: string) => {
+    if (method === "thread/resume") {
+      resumeCalls += 1;
+      if (resumeCalls === 1) {
+        throw new Error("temporary agent host timeout");
+      }
+      return {
+        model: "test/model",
+        cwd: projectPath,
+        thread: {
+          id: threadId,
+          cwd: projectPath,
+          name: "Recovered conversation",
+          preview: "Recovered conversation",
+          createdAt: 1,
+          updatedAt: 2,
+          status: "idle",
+          turns: [{
+            id: "turn-1",
+            status: "completed",
+            items: [
+              { id: "u1", type: "userMessage", content: [{ type: "input_text", text: "First question" }] },
+              { id: "a1", type: "agentMessage", text: "First recovered answer" },
+              { id: "u2", type: "userMessage", content: [{ type: "input_text", text: "Second question" }] },
+              { id: "a2", type: "agentMessage", text: "Second recovered answer" },
+            ],
+          }],
+        },
+      };
+    }
+    throw new Error(`Unexpected method ${method}`);
+  };
+
+  await runtime.listThreads();
+  const first = await runtime.openThread(threadId, true);
+  assert.deepEqual(first.messages.map((message) => message.role), ["user", "user", "assistant"]);
+  assert.equal(resumeCalls, 1);
+
+  const second = await runtime.openThread(threadId, true);
+  assert.equal(resumeCalls, 2, "sparse fallback must not be treated as a loaded agent thread");
+  assert.deepEqual(second.messages.map(({ role, content }) => ({ role, content })), [
+    { role: "user", content: "First question" },
+    { role: "assistant", content: "First recovered answer" },
+    { role: "user", content: "Second question" },
+    { role: "assistant", content: "Second recovered answer" },
+  ]);
+});
+
+test("forces resume when local history has fewer assistants than users", async (context) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-sparse-ratio-"));
+  context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+
+  const threadId = "019fa195-11c9-76b2-84c1-bf33068b6001";
+  const projectPath = path.join(codexHome, "offline-project");
+  const sessionDirectory = path.join(codexHome, "sessions", "2026", "08", "02");
+  fs.mkdirSync(sessionDirectory, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessionDirectory, `rollout-sparse-ratio-${threadId}.jsonl`),
+    [
+      record("session_meta", { id: threadId, cwd: projectPath }),
+      record("response_item", {
+        type: "message",
+        id: "user-1",
+        role: "user",
+        content: [{ type: "input_text", text: "One" }],
+      }),
+      record("response_item", {
+        type: "message",
+        id: "user-2",
+        role: "user",
+        content: [{ type: "input_text", text: "Two" }],
+      }),
+      record("response_item", {
+        type: "message",
+        id: "assistant-1",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Only local" }],
+      }),
+    ].join("\n"),
+    "utf8",
+  );
+
+  const runtime = new DesktopRuntime(".", codexHome);
+  let resumeCalls = 0;
+  runtime.agent.request = async (method: string) => {
+    if (method === "thread/resume") {
+      resumeCalls += 1;
+      return {
+        model: "test/model",
+        cwd: projectPath,
+        thread: {
+          id: threadId,
+          cwd: projectPath,
+          name: "Full conversation",
+          preview: "Full conversation",
+          createdAt: 1,
+          updatedAt: 2,
+          status: "idle",
+          turns: [{
+            id: "turn-1",
+            status: "completed",
+            items: [
+              { id: "u1", type: "userMessage", content: [{ type: "input_text", text: "One" }] },
+              { id: "a1", type: "agentMessage", text: "Answer one" },
+              { id: "u2", type: "userMessage", content: [{ type: "input_text", text: "Two" }] },
+              { id: "a2", type: "agentMessage", text: "Answer two" },
+            ],
+          }],
+        },
+      };
+    }
+    throw new Error(`Unexpected method ${method}`);
+  };
+
+  await runtime.listThreads();
+  const detail = await runtime.openThread(threadId);
+  assert.equal(resumeCalls, 1);
+  assert.deepEqual(detail.messages.map(({ role, content }) => ({ role, content })), [
+    { role: "user", content: "One" },
+    { role: "assistant", content: "Answer one" },
+    { role: "user", content: "Two" },
+    { role: "assistant", content: "Answer two" },
+  ]);
+});

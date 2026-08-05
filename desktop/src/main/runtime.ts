@@ -36,8 +36,14 @@ import type {
   RemoteUserInputSubmitRequest,
   RemoteUserInputSubmitResult,
 } from "@rhzycode/protocol";
-import { preferTimelineItem } from "@rhzycode/protocol";
+import { dedupeTimelineItems, preferTimelineItem } from "@rhzycode/protocol";
 import { TimelinePublishCoalescer } from "./timeline-publish-coalesce";
+import {
+  summarizeTaskActivity,
+  taskActivityEventFromTransition,
+  type TaskActivityEvent,
+  type TaskActivityStatus,
+} from "./task-activity";
 import {
   ControlCommandError,
   createControlPlane,
@@ -76,7 +82,11 @@ import {
   type RolloutGeneratedImage,
 } from "./generated-image-rollout";
 import { loadRolloutThreadState } from "./rollout-thread-state";
-import { loadLocalRolloutThread, loadRolloutUploadedImages } from "./local-rollout-thread";
+import {
+  loadLocalRolloutThread,
+  loadRolloutUploadedImages,
+  reconcileRolloutUploadedImages,
+} from "./local-rollout-thread";
 import {
   backupProjectConversations as createConversationBackup,
   backupSelectedConversations as createSelectedConversationBackup,
@@ -238,6 +248,7 @@ export class DesktopRuntime extends EventEmitter {
     this.controlPlane?.store.publish({ type: "timeline.upserted", item });
   });
   private activeTurns = new Map<string, string>();
+  private turnClientMessageIds = new Map<string, string>();
   private pendingTurnStarts = new Set<string>();
   private remoteAttachments = new Map<string, string[]>();
   private loadedThreadIds = new Set<string>();
@@ -826,10 +837,35 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   private async loadLocalThreadDetail(thread: ThreadSummary): Promise<ThreadDetail | null> {
-    for (const image of await loadRolloutUploadedImages(this.codexHome, thread.id)) {
-      this.managedFiles.storeUploadedImageData(thread.id, image.turnId, image.dataUrl, image.name);
+    const managedFiles = await this.loadManagedThreadFiles(thread.id);
+    return loadLocalRolloutThread(this.codexHome, thread, managedFiles, {
+      materializeArtifacts: (turnId, content) => resolveArtifactPaths(thread.projectPath, [content])
+        .flatMap((filePath) => {
+          const record = this.managedFiles.storeGenerated(thread.id, turnId, filePath);
+          return record ? [record] : [];
+        }),
+    });
+  }
+
+  private async loadManagedThreadFiles(threadId: string): Promise<ManagedFileRecord[]> {
+    const rolloutImages = await loadRolloutUploadedImages(this.codexHome, threadId);
+    const existing = this.managedFiles.listThread(threadId);
+    const existingByTurn = new Map<string, number>();
+    for (const file of existing) {
+      if (file.source !== "upload" || file.kind !== "image") continue;
+      const key = file.turnId || "\u0000";
+      existingByTurn.set(key, (existingByTurn.get(key) || 0) + 1);
     }
-    return loadLocalRolloutThread(this.codexHome, thread, this.managedFiles.listThread(thread.id));
+
+    const seenByTurn = new Map<string, number>();
+    for (const image of rolloutImages) {
+      const key = image.turnId || "\u0000";
+      const seen = seenByTurn.get(key) || 0;
+      seenByTurn.set(key, seen + 1);
+      if (seen < (existingByTurn.get(key) || 0)) continue;
+      this.managedFiles.storeUploadedImageData(threadId, image.turnId, image.dataUrl, image.name);
+    }
+    return reconcileRolloutUploadedImages(this.managedFiles.listThread(threadId), rolloutImages);
   }
 
   private async resumeThread(threadId: string): Promise<ThreadDetail> {
@@ -904,10 +940,7 @@ export class DesktopRuntime extends EventEmitter {
         }
       }
     }
-    for (const image of await loadRolloutUploadedImages(this.codexHome, summary.id)) {
-      this.managedFiles.storeUploadedImageData(summary.id, image.turnId, image.dataUrl, image.name);
-    }
-    const managedFiles = this.managedFiles.listThread(summary.id);
+    const managedFiles = await this.loadManagedThreadFiles(summary.id);
     for (const file of managedFiles) this.publishedManagedFileIds.add(file.id);
     const detail = toThreadDetail(
       response.thread,
@@ -1041,6 +1074,7 @@ export class DesktopRuntime extends EventEmitter {
       const turnId = response.turn?.id;
       if (turnId) {
         this.activeTurns.set(params.threadId, turnId);
+        if (params.clientMessageId) this.turnClientMessageIds.set(turnId, params.clientMessageId);
         this.managedFiles.bindTurn(managedAttachments.map((attachment) => attachment.id), turnId);
       }
       const files = managedAttachments.map((attachment) => managedFileReference(attachment, true));
@@ -1759,7 +1793,7 @@ export class DesktopRuntime extends EventEmitter {
       }
       return {
         thread: detail.thread,
-        timeline: [...timelineById.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+        timeline: dedupeTimelineItems([...timelineById.values()]),
       };
     } catch (error) {
       if (error instanceof ControlCommandError) throw error;
@@ -2095,7 +2129,10 @@ export class DesktopRuntime extends EventEmitter {
     const thread = { ...current, ...patch, updatedAt: new Date().toISOString() };
     this.threads.set(threadId, thread);
     this.controlPlane?.store.upsertThread(thread);
-    this.updateHostTaskCount();
+    const lastEvent = typeof patch.status === "string"
+      ? taskActivityEventFromTransition(current.status, thread.status, thread.id, thread.title)
+      : null;
+    this.updateHostTaskCount(lastEvent);
   }
 
   private rememberThreadDetail(threadId: string, detail: ThreadDetail): void {
@@ -2170,18 +2207,17 @@ export class DesktopRuntime extends EventEmitter {
     }
   }
 
-  private updateHostTaskCount(): void {
-    const activeTaskCount = [...this.threads.values()].filter((thread) =>
-      ["running", "waiting_for_approval", "waiting_for_input"].includes(thread.status),
-    ).length;
+  private updateHostTaskCount(lastEvent: TaskActivityEvent | null = null): void {
+    const activity: TaskActivityStatus = summarizeTaskActivity([...this.threads.values()], lastEvent);
     this.controlPlane?.store.upsertHost({
       id: "local-desktop",
       name: os.hostname(),
       platform: desktopHostPlatform(),
-      status: activeTaskCount > 0 ? "busy" : "online",
+      status: activity.activeCount > 0 ? "busy" : "online",
       lastSeenAt: new Date().toISOString(),
-      activeTaskCount,
+      activeTaskCount: activity.activeCount,
     });
+    this.emit("task:activity", activity);
   }
 
   private publishTimeline(item: TimelineItem): void {

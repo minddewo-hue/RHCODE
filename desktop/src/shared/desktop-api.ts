@@ -64,6 +64,19 @@ export interface AgentStatus {
   error: string | null;
 }
 
+export interface TaskActivityStatus {
+  activeCount: number;
+  runningCount: number;
+  waitingCount: number;
+  lastEvent: {
+    kind: "started" | "waiting" | "completed" | "failed" | "interrupted";
+    threadId: string;
+    title: string;
+  } | null;
+  accent: "idle" | "running" | "waiting" | "completed" | "failed";
+  toast: { tone: "success" | "error" | "warning" | "info"; message: string } | null;
+}
+
 export interface GatewayProviderStatus {
   id: string;
   protocol: string;
@@ -365,6 +378,7 @@ export interface RhzycodeDesktopApi {
   stopTerminal(processId: string): Promise<unknown>;
   onWindowFocus(listener: () => void): Unsubscribe;
   onAgentStatus(listener: (status: AgentStatus) => void): Unsubscribe;
+  onTaskActivity(listener: (status: TaskActivityStatus) => void): Unsubscribe;
   onAgentMessage(listener: (message: RpcNotification) => void): Unsubscribe;
   onDiagnostic(listener: (message: string) => void): Unsubscribe;
   onGatewayStatus(listener: (status: GatewayStatus) => void): Unsubscribe;

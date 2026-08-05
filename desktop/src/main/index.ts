@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, net, safeStorage, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, net, Notification, safeStorage, shell } from "electron";
 import updaterPackage from "electron-updater";
 import {
   ControlStore,
@@ -37,6 +37,12 @@ import {
   shouldQuitWhenAllWindowsClose,
 } from "./platform/desktop-platform";
 import {
+  resolveTaskWindowChrome,
+  toRendererTaskActivity,
+  type RendererTaskActivityStatus,
+  type TaskActivityStatus,
+} from "./task-activity";
+import {
   validateApprovalResolution,
   validateClipboardText,
   validateCredentialUpdate,
@@ -65,6 +71,7 @@ let runtime: DesktopRuntime | null = null;
 let controlPersistence: EncryptedControlPersistence | null = null;
 let quitAfterCleanup = false;
 let startupEnvironmentMigration: Promise<void> = Promise.resolve();
+let taskActivityPresenter: WindowTaskActivityPresenter | null = null;
 
 const userDataOverride = process.env.RHZYCODE_USER_DATA_DIR?.trim();
 if (userDataOverride) app.setPath("userData", resolve(userDataOverride));
@@ -130,6 +137,7 @@ function createWindow(): BrowserWindow {
   });
   mainWindow.on("focus", () => {
     if (!mainWindow) return;
+    mainWindow.flashFrame(false);
     mainWindow.webContents.focus();
     mainWindow.webContents.send("window:focused");
   });
@@ -449,6 +457,9 @@ function registerIpc(
   });
 
   activeRuntime.on("agent:status", (status) => mainWindow?.webContents.send("agent:status", status));
+  activeRuntime.on("task:activity", (activity: TaskActivityStatus) => {
+    taskActivityPresenter?.handle(activity);
+  });
   activeRuntime.on("agent:message", (message) => mainWindow?.webContents.send("agent:message", message));
   activeRuntime.on("agent:diagnostic", (message) =>
     mainWindow?.webContents.send("agent:diagnostic", message),
@@ -587,8 +598,7 @@ async function runStartupEnvironmentMigrations(
       projectDirectories.remember(projectPath);
     },
     onProgress: (source, active) => {
-      window.setProgressBar(active ? 2 : -1);
-      window.setTitle(active ? `RHZYCODE - 正在迁移 ${migrationSourceLabel(source)} 对话` : "RHZYCODE");
+      taskActivityPresenter?.setMigrationActive(active, migrationSourceLabel(source));
     },
     onError: async (source, error) => {
       console.error(`[Environment migration:${source}]`, error.message);
@@ -721,6 +731,7 @@ app.whenReady().then(async () => {
     finishEnvironmentMigration = resolveMigration;
   });
   const window = createWindow();
+  taskActivityPresenter = new WindowTaskActivityPresenter(() => mainWindow);
   traceStartup("window-created");
   await new Promise<void>((resolveWindow) => {
     if (!window.webContents.isLoadingMainFrame()) resolveWindow();
@@ -779,3 +790,113 @@ app.on("window-all-closed", () => {
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
+
+class WindowTaskActivityPresenter {
+  private holdTimer: NodeJS.Timeout | null = null;
+  private latest: TaskActivityStatus = {
+    activeCount: 0,
+    runningCount: 0,
+    waitingCount: 0,
+    lastEvent: null,
+  };
+  private migrationActive = false;
+
+  constructor(private readonly getWindow: () => BrowserWindow | null) {}
+
+  setMigrationActive(active: boolean, sourceLabel = ""): void {
+    this.migrationActive = active;
+    const window = this.getWindow();
+    if (!window || window.isDestroyed()) return;
+    this.clearHold();
+    if (active) {
+      window.setProgressBar(2, { mode: "indeterminate" });
+      window.setTitle(`RHZYCODE - 正在迁移 ${sourceLabel} 对话`.trim());
+      this.publish({
+        activeCount: 0,
+        runningCount: 0,
+        waitingCount: 0,
+        lastEvent: null,
+      }, {
+        progress: 2,
+        mode: "indeterminate",
+        title: `RHZYCODE - 正在迁移 ${sourceLabel} 对话`.trim(),
+        accent: "running",
+        shouldFlash: false,
+        notification: null,
+        holdMs: 0,
+      });
+      return;
+    }
+    this.apply(this.latest, true);
+  }
+
+  handle(activity: TaskActivityStatus): void {
+    this.latest = activity;
+    if (this.migrationActive) return;
+    this.apply(activity, false);
+  }
+
+  private apply(activity: TaskActivityStatus, suppressCompletionCue: boolean): void {
+    const window = this.getWindow();
+    if (!window || window.isDestroyed()) return;
+    const focused = window.isFocused();
+    const effective = suppressCompletionCue ? { ...activity, lastEvent: null } : activity;
+    const chrome = resolveTaskWindowChrome(effective, { focused });
+    this.clearHold();
+    this.paint(window, chrome);
+    this.publish(effective, chrome);
+
+    if (chrome.shouldFlash) window.flashFrame(true);
+    if (chrome.notification && Notification.isSupported()) {
+      const notification = new Notification({
+        title: chrome.notification.title,
+        body: chrome.notification.body,
+      });
+      notification.on("click", () => {
+        const target = this.getWindow();
+        if (!target || target.isDestroyed()) return;
+        if (target.isMinimized()) target.restore();
+        target.show();
+        target.focus();
+      });
+      notification.show();
+    }
+
+    if (chrome.holdMs > 0) {
+      this.holdTimer = setTimeout(() => {
+        this.holdTimer = null;
+        const current = this.getWindow();
+        if (!current || current.isDestroyed() || this.migrationActive) return;
+        const steadyActivity = { ...this.latest, lastEvent: null };
+        const steady = resolveTaskWindowChrome(steadyActivity, { focused: current.isFocused() });
+        this.paint(current, steady);
+        this.publish(steadyActivity, steady);
+      }, chrome.holdMs);
+    }
+  }
+
+  private paint(
+    window: BrowserWindow,
+    chrome: ReturnType<typeof resolveTaskWindowChrome>,
+  ): void {
+    if (chrome.mode === "none" || chrome.progress < 0) window.setProgressBar(-1);
+    else window.setProgressBar(chrome.progress, { mode: chrome.mode });
+    window.setTitle(chrome.title);
+  }
+
+  private publish(
+    activity: TaskActivityStatus,
+    chrome: ReturnType<typeof resolveTaskWindowChrome>,
+  ): void {
+    const window = this.getWindow();
+    if (!window || window.isDestroyed()) return;
+    const payload: RendererTaskActivityStatus = toRendererTaskActivity(activity, chrome);
+    window.webContents.send("task:activity", payload);
+  }
+
+  private clearHold(): void {
+    if (!this.holdTimer) return;
+    clearTimeout(this.holdTimer);
+    this.holdTimer = null;
+  }
+}

@@ -1102,10 +1102,13 @@ test("multi-model gateway integration", async (t) => {
     assert.equal(response.status, 200);
     const call = calls.slice(before).find((entry) => entry.path === "/primary/v1/responses");
     assert.ok(call, "expected native upstream call");
-    const imageItem = call.body.input.find((item) => item?.type === "image_generation_call");
+    const imageItem = call.body.input.find((item) =>
+      item?.type === "message"
+      && item.role === "assistant"
+      && item.content?.some((content) => /generated image omitted/.test(content?.text || "")));
     assert.ok(imageItem);
     assert.equal(imageItem.result, undefined);
-    assert.match(String(imageItem.output || ""), /generated image omitted from history/);
+    assert.match(String(imageItem.content[0]?.text || ""), /generated image omitted from history/);
     const serialized = JSON.stringify(call.body);
     assert.ok(serialized.length < 5_000, `upstream body still too large: ${serialized.length}`);
     assert.doesNotMatch(serialized, /iVBORw0KGgoAAAA/);

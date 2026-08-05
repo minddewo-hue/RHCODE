@@ -74,15 +74,17 @@ function sanitizeImageGenerationCall(item, maxInlineBinaryChars, stats) {
   stats.strippedCount += 1;
   stats.strippedBytes += Buffer.byteLength(item.result, "utf8");
 
-  const next = { ...item };
-  delete next.result;
-  // Keep a short marker so models still see that an image was produced.
-  if (typeof next.revised_prompt === "string" && next.revised_prompt.trim()) {
-    next.output = `[generated image omitted from history: ${truncate(next.revised_prompt.trim(), 240)}]`;
-  } else {
-    next.output = "[generated image omitted from history]";
-  }
-  return next;
+  const marker = typeof item.revised_prompt === "string" && item.revised_prompt.trim()
+    ? `[generated image omitted from history: ${truncate(item.revised_prompt.trim(), 240)}]`
+    : "[generated image omitted from history]";
+
+  // A completed image_generation_call requires its result when replayed as a
+  // Responses item. Keep valid assistant history after removing the binary.
+  return {
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text: marker }],
+  };
 }
 
 function shouldStripInlineBinary(value, maxInlineBinaryChars) {

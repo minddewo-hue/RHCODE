@@ -276,11 +276,33 @@ export function claimPendingTimelineMatches(
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
 
   for (const pending of orderedPending) {
-    const match = userItems.find((item) => (
+    const exactMatch = userItems.find((item) => (
       item.threadId === pending.threadId
       && item.clientMessageId === pending.id
       && !claimedTimelineIds.has(item.id)
     ));
+    const pendingAt = Date.parse(pending.createdAt);
+    const fallbackMatch = Number.isFinite(pendingAt)
+      ? userItems
+        .filter((item) => {
+          if (
+            item.threadId !== pending.threadId
+            || item.clientMessageId
+            || claimedTimelineIds.has(item.id)
+            || normalizeMessageContent(item.content) !== normalizeMessageContent(pending.content)
+          ) return false;
+          const itemAt = Date.parse(item.createdAt);
+          return Number.isFinite(itemAt)
+            && itemAt >= pendingAt - 5_000
+            && itemAt <= pendingAt + 5 * 60_000;
+        })
+        .sort((left, right) => (
+          Math.abs(Date.parse(left.createdAt) - pendingAt) - Math.abs(Date.parse(right.createdAt) - pendingAt)
+          || left.createdAt.localeCompare(right.createdAt)
+          || left.id.localeCompare(right.id)
+        ))[0]
+      : undefined;
+    const match = exactMatch || fallbackMatch;
     if (!match) continue;
     claimedTimelineIds.add(match.id);
     matches.set(pending.id, match.id);

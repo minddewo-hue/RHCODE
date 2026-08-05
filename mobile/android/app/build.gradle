@@ -93,8 +93,8 @@ android {
         applicationId 'ai.rhzy.code'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 32
-        versionName "0.1.31"
+        versionCode 34
+        versionName "0.1.33"
 
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
     }

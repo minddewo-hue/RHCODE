@@ -99,10 +99,7 @@ interface ChatScreenProps {
 }
 type ConversationPage = "result" | "activity";
 
-const conversationPages: ConversationPage[] = ["result", "activity"];
-
 export function ChatScreen(props: ChatScreenProps) {
-  const pagerRef = useRef<FlatList<ConversationPage>>(null);
   const resultListRef = useRef<FlatList<ChatEntry>>(null);
   const activityListRef = useRef<FlatList<ChatEntry>>(null);
   const { width: pageWidth } = useWindowDimensions();
@@ -133,10 +130,6 @@ export function ChatScreen(props: ChatScreenProps) {
       if (!targetPage || targetPage === activePageRef.current) return;
       activePageRef.current = targetPage;
       setActivePage(targetPage);
-      pagerRef.current?.scrollToIndex({
-        index: conversationPages.indexOf(targetPage),
-        animated: true,
-      });
     },
     onPanResponderTerminationRequest: () => false,
   })).current;
@@ -169,15 +162,11 @@ export function ChatScreen(props: ChatScreenProps) {
 
   useEffect(() => {
     setActivePage("result");
-    pagerRef.current?.scrollToOffset({ offset: 0, animated: false });
   }, [props.selectedThreadId]);
 
   const selectPage = (page: ConversationPage) => {
+    activePageRef.current = page;
     setActivePage(page);
-    pagerRef.current?.scrollToIndex({
-      index: conversationPages.indexOf(page),
-      animated: true,
-    });
   };
 
   return (
@@ -253,28 +242,14 @@ export function ChatScreen(props: ChatScreenProps) {
       )}
 
       <View {...pagerSwipeResponder.panHandlers} style={styles.pager}>
-        <FlatList
-          data={conversationPages}
-          getItemLayout={(_, index) => ({ length: pageWidth, offset: pageWidth * index, index })}
-          horizontal
-          keyExtractor={(page) => page}
-          ref={pagerRef}
-          renderItem={({ item: page }) => (
-            <View style={{ flex: 1, width: pageWidth }}>
-              <ConversationList
-                activityListRef={activityListRef}
-                activePage={page}
-                entries={page === "result" ? resultEntries : activityEntries}
-                hasThread={Boolean(props.selectedThreadId || props.newThreadDraft)}
-                props={props}
-                resultListRef={resultListRef}
-                visible={activePage === page}
-              />
-            </View>
-          )}
-          scrollEnabled={false}
-          showsHorizontalScrollIndicator={false}
-          style={styles.pager}
+        <ConversationList
+          activityListRef={activityListRef}
+          activePage={activePage}
+          entries={activePage === "result" ? resultEntries : activityEntries}
+          hasThread={Boolean(props.selectedThreadId || props.newThreadDraft)}
+          props={props}
+          resultListRef={resultListRef}
+          visible
         />
       </View>
 

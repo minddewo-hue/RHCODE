@@ -147,7 +147,18 @@ export class ManagedFileStore {
   }
 
   listThread(threadId: string): ManagedFileRecord[] {
-    return this.records.filter((record) => record.threadId === threadId && isManagedRecord(this.directory, record));
+    const seenImages = new Set<string>();
+    return this.records.filter((record) => {
+      if (record.threadId !== threadId || !isManagedRecord(this.directory, record)) return false;
+      if (record.kind !== "image" || record.source !== "upload") return true;
+
+      // A rollout can re-materialize an uploaded image that is already present
+      // in the attachment index. Keep one visual attachment per turn.
+      const key = `${record.turnId || ""}\u0000${comparablePath(record.path)}`;
+      if (seenImages.has(key)) return false;
+      seenImages.add(key);
+      return true;
+    });
   }
 
   read(id: string): ManagedFileContents | null {

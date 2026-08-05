@@ -64,6 +64,7 @@ import type {
   SkillImportSource,
   SkillsStatus,
   SyncStatus,
+  TaskActivityStatus,
   TerminalStatus,
   UpdateStatus,
 } from "../../shared/desktop-api";
@@ -139,6 +140,16 @@ const MAX_CACHED_THREAD_VIEWS = 10;
 
 type AppDialogView = "settings" | "skills" | "transfer" | "export";
 type ThemeMode = "light" | "dark";
+type ThemePreset = "forest" | "studio" | "glass" | "noir" | "rose" | "ocean";
+const THEME_PRESETS: Array<{ id: ThemePreset; label: string }> = [
+  { id: "forest", label: "Forest" },
+  { id: "studio", label: "Studio" },
+  { id: "glass", label: "Glass" },
+  { id: "noir", label: "Noir" },
+  { id: "rose", label: "Rose" },
+  { id: "ocean", label: "Ocean" },
+];
+const THEME_PRESET_IDS = new Set<string>(THEME_PRESETS.map((item) => item.id));
 
 interface ExportProjectGroup {
   key: string;
@@ -207,8 +218,16 @@ function storedThemeMode(): ThemeMode {
   return mode;
 }
 
+function storedThemePreset(): ThemePreset {
+  const preset = localStorage.getItem("rhzycode.themePreset");
+  const value = THEME_PRESET_IDS.has(preset ?? "") ? (preset as ThemePreset) : "forest";
+  document.documentElement.dataset.preset = value;
+  return value;
+}
+
 export function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>(storedThemeMode);
+  const [themePreset, setThemePreset] = useState<ThemePreset>(storedThemePreset);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>({ state: "connecting", error: null });
   const [gatewayStatus, setGatewayStatus] = useState<GatewayStatus>(emptyGateway);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(emptySync);
@@ -247,6 +266,15 @@ export function App() {
   const [failedPrompt, setFailedPrompt] = useState<string | null>(null);
   const [submittingTurn, setSubmittingTurn] = useState(false);
   const [activeThreadIds, setActiveThreadIds] = useState<Set<string>>(() => new Set());
+  const [taskActivity, setTaskActivity] = useState<TaskActivityStatus>({
+    activeCount: 0,
+    runningCount: 0,
+    waitingCount: 0,
+    lastEvent: null,
+    accent: "idle",
+    toast: null,
+  });
+  const [taskToast, setTaskToast] = useState<{ tone: "success" | "error" | "warning" | "info"; message: string } | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [primaryView, setPrimaryView] = useState<"workspace" | "terminal">("workspace");
   const [dialogView, setDialogView] = useState<AppDialogView | null>(null);
@@ -293,6 +321,11 @@ export function App() {
     document.documentElement.style.colorScheme = themeMode;
     localStorage.setItem("rhzycode.themeMode", themeMode);
   }, [themeMode]);
+
+  useEffect(() => {
+    document.documentElement.dataset.preset = themePreset;
+    localStorage.setItem("rhzycode.themePreset", themePreset);
+  }, [themePreset]);
 
   useEffect(() => {
     selectedModelRef.current = selectedModel;
@@ -355,6 +388,10 @@ export function App() {
   useEffect(() => {
     const unsubscribers = [
       window.rhzycode.onAgentStatus(setAgentStatus),
+      window.rhzycode.onTaskActivity((status) => {
+        setTaskActivity(status);
+        if (status.toast) setTaskToast(status.toast);
+      }),
       window.rhzycode.onGatewayStatus(setGatewayStatus),
       window.rhzycode.onSyncStatus(setSyncStatus),
       window.rhzycode.onAgentMessage(handleNotification),
@@ -509,6 +546,12 @@ export function App() {
     if (next !== reasoningEffort) setReasoningEffort(next);
     localStorage.setItem("rhzycode.reasoningEffort", next);
   }, [reasoningEffort, reasoningEfforts]);
+
+  useEffect(() => {
+    if (!taskToast) return;
+    const timer = window.setTimeout(() => setTaskToast(null), 4200);
+    return () => window.clearTimeout(timer);
+  }, [taskToast]);
 
   const running = isComposerRunning(threadId, activeThreadIds, submittingTurn);
   const isOpeningSelectedThread = threadId !== null && openingThreadId === threadId;
@@ -1956,7 +1999,22 @@ export function App() {
   }
 
   return (
-    <div className={`app-shell ${rightPanelOpen ? "with-panel" : ""}`}>
+    <div className={`app-shell ${rightPanelOpen ? "with-panel" : ""}`} data-task-accent={taskActivity.accent}>
+      {taskToast && (
+        <div className={`task-toast ${taskToast.tone}`} role="status" aria-live="polite">
+          <span className="task-toast-dot" aria-hidden="true" />
+          <span>{taskToast.message}</span>
+          <button
+            type="button"
+            className="task-toast-close"
+            title="Dismiss"
+            aria-label="Dismiss notification"
+            onClick={() => setTaskToast(null)}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
       <nav className="app-rail" aria-label="Primary navigation">
         <button
           className={`rail-brand ${primaryView === "workspace" ? "active" : ""}`}
@@ -2324,6 +2382,7 @@ export function App() {
         <AppModal title="Settings" icon={<Settings size={18} />} className="settings-modal" onClose={() => setDialogView(null)}>
           <SettingsView
             themeMode={themeMode}
+            themePreset={themePreset}
             status={credentialStatus}
             updateStatus={updateStatus}
             mobileAccessStatus={mobileAccessStatus}
@@ -2334,6 +2393,7 @@ export function App() {
             onUpdateAction={runUpdateAction}
             onRotateAccessKey={rotateMobileAccessKey}
             onThemeModeChange={setThemeMode}
+            onThemePresetChange={setThemePreset}
           />
         </AppModal>
       )}
@@ -3121,6 +3181,7 @@ function SkillsView() {
 
 function SettingsView({
   themeMode,
+  themePreset,
   status,
   updateStatus,
   mobileAccessStatus,
@@ -3131,8 +3192,10 @@ function SettingsView({
   onUpdateAction,
   onRotateAccessKey,
   onThemeModeChange,
+  onThemePresetChange,
 }: {
   themeMode: ThemeMode;
+  themePreset: ThemePreset;
   status: CredentialStatus;
   updateStatus: UpdateStatus;
   mobileAccessStatus: MobileAccessStatus;
@@ -3143,6 +3206,7 @@ function SettingsView({
   onUpdateAction: (action: "check" | "download" | "install") => Promise<void>;
   onRotateAccessKey: () => Promise<void>;
   onThemeModeChange: (mode: ThemeMode) => void;
+  onThemePresetChange: (preset: ThemePreset) => void;
 }) {
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [providerEditor, setProviderEditor] = useState<LlmProviderConfigurationInput | null>(null);
@@ -3238,6 +3302,22 @@ function SettingsView({
           <div className="theme-segmented" role="radiogroup" aria-label="Display mode">
             <button className={themeMode === "light" ? "active" : ""} role="radio" aria-checked={themeMode === "light"} onClick={() => onThemeModeChange("light")}><Sun size={14} /> Day</button>
             <button className={themeMode === "dark" ? "active" : ""} role="radio" aria-checked={themeMode === "dark"} onClick={() => onThemeModeChange("dark")}><Moon size={14} /> Night</button>
+          </div>
+        </div>
+        <div className="appearance-row">
+          <div><strong>Style preset</strong><small>Switch the visual language</small></div>
+          <div className="theme-segmented preset-segmented" role="radiogroup" aria-label="Style preset">
+            {THEME_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                className={themePreset === preset.id ? "active" : ""}
+                role="radio"
+                aria-checked={themePreset === preset.id}
+                onClick={() => onThemePresetChange(preset.id)}
+              >
+                {preset.label}
+              </button>
+            ))}
           </div>
         </div>
       </section>

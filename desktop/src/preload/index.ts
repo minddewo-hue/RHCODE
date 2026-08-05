@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AgentStatus,
+  TaskActivityStatus,
   GatewayStatus,
   MobileAccessStatus,
   RhzycodeDesktopApi,
@@ -101,6 +102,11 @@ const api: RhzycodeDesktopApi = {
     const handler = (_event: Electron.IpcRendererEvent, status: AgentStatus) => listener(status);
     ipcRenderer.on("agent:status", handler);
     return () => ipcRenderer.removeListener("agent:status", handler);
+  },
+  onTaskActivity: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, status: TaskActivityStatus) => listener(status);
+    ipcRenderer.on("task:activity", handler);
+    return () => ipcRenderer.removeListener("task:activity", handler);
   },
   onAgentMessage: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, message: RpcNotification) => listener(message);

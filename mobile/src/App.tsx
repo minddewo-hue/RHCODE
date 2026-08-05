@@ -413,7 +413,7 @@ function AppContent() {
   useEffect(() => {
     if (!pendingMessages.length) return;
     setPendingMessages((current) => reconcilePendingMessages(current, control.snapshot.timeline));
-  }, [control.snapshot.timeline, pendingMessages.length]);
+  }, [control.snapshot.timeline, pendingMessages]);
 
   const selectedThread = useMemo(
     () => control.snapshot.threads.find((thread) => thread.id === selectedThreadId)

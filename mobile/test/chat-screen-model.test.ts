@@ -270,18 +270,21 @@ test("claims repeated prompts one-to-one using the echoed client message id", ()
   assert.deepEqual(entries.map((entry) => entry.id), ["timeline:user-2", "pending:pending-1"]);
 });
 
-test("does not reconcile a server row without the current client message id", () => {
+test("reconciles in-flight and failed optimistic rows when recent server history omits the client message id", () => {
   const pending: PendingMessage[] = [
-    { id: "pending-1", threadId: "thread-1", content: "same", createdAt: now, state: "sent" },
-    { id: "pending-2", threadId: "thread-1", content: "same", createdAt: now, state: "sent" },
+    { id: "pending-1", threadId: "thread-1", content: "same", createdAt: "2026-07-20T10:00:03.000Z", state: "sending" },
+    { id: "pending-2", threadId: "thread-1", content: "same", createdAt: "2026-07-20T10:01:03.000Z", state: "failed" },
   ];
-  const serverItem = timeline("user-1", "thread-1", "user", "same");
+  const serverItems = [
+    { ...timeline("user-1", "thread-1", "user", "same"), createdAt: "2026-07-20T10:00:00.000Z" },
+    { ...timeline("user-2", "thread-1", "user", "same"), createdAt: "2026-07-20T10:01:00.000Z" },
+  ];
 
-  assert.deepEqual([...claimPendingTimelineMatches(pending, [serverItem])], []);
-  assert.deepEqual(reconcilePendingMessages(pending, [serverItem]).map((message) => message.id), [
-    "pending-1",
-    "pending-2",
+  assert.deepEqual([...claimPendingTimelineMatches(pending, serverItems)], [
+    ["pending-1", "user-1"],
+    ["pending-2", "user-2"],
   ]);
+  assert.deepEqual(reconcilePendingMessages(pending, serverItems), []);
 });
 
 test("does not match a new optimistic send to old identical history", () => {

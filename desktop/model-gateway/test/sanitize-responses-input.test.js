@@ -26,9 +26,10 @@ test("strips oversized image_generation_call.result from Responses history", () 
   assert.equal(sanitized.strippedCount, 1);
   assert.ok(sanitized.strippedBytes > 10_000);
   const imageItem = sanitized.body.input[1];
-  assert.equal(imageItem.type, "image_generation_call");
+  assert.equal(imageItem.type, "message");
+  assert.equal(imageItem.role, "assistant");
   assert.equal(imageItem.result, undefined);
-  assert.match(imageItem.output, /generated image omitted from history/);
+  assert.match(imageItem.content[0].text, /generated image omitted from history/);
   assert.equal(sanitized.body.input[2].content[0].text, "hello");
   // Original body is not mutated.
   assert.equal(typeof body.input[1].result, "string");

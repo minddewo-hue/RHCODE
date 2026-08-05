@@ -14,6 +14,7 @@ interface RuntimeInternals {
   controlPlane: { store: ControlStore };
   threads: Map<string, ThreadSummary>;
   activeTurns: Map<string, string>;
+  turnClientMessageIds: Map<string, string>;
   pendingGatewayFailures: Map<string, { threadId: string; timer: NodeJS.Timeout }>;
   gatewayFailureGraceMs: number;
   loadedThreadIds: Set<string>;
@@ -1206,6 +1207,57 @@ test("compacts an oversized thread with its last successful model before switchi
   assert.equal(requests[3]?.params.model, "provider-2/grok-latest");
 });
 
+test("returns one canonical mobile user row with its client message id", async () => {
+  const { runtime, internals, store } = createRuntimeHarness();
+  const thread = internals.threads.get("thread-1")!;
+  store.publish({
+    type: "timeline.upserted",
+    item: {
+      id: "user-mobile-new-thread-1",
+      threadId: thread.id,
+      clientMessageId: "mobile-new-thread-1",
+      kind: "user",
+      status: "completed",
+      title: "You",
+      content: "123",
+      createdAt: "2026-08-03T08:13:33.687Z",
+    },
+  });
+  runtime.agent.request = async (method) => {
+    assert.equal(method, "thread/resume");
+    return {
+      thread: {
+        id: thread.id,
+        cwd: thread.projectPath,
+        preview: "123",
+        updatedAt: Math.floor(Date.parse("2026-08-03T08:13:30.736Z") / 1_000),
+        status: { type: "idle" },
+        turns: [{
+          id: "turn-new-thread",
+          status: "completed",
+          items: [
+            { id: "user-history", type: "userMessage", content: [{ type: "text", text: "123" }] },
+            { id: "assistant-history", type: "agentMessage", text: "Please add more detail." },
+          ],
+        }],
+      },
+      model: thread.model,
+    } as never;
+  };
+
+  const result = await runtime.remoteCommandHandlers().openThread(thread.id, remoteContext());
+
+  assert.deepEqual(result.timeline.filter((item) => item.kind === "user").map((item) => ({
+    id: item.id,
+    clientMessageId: item.clientMessageId,
+    content: item.content,
+  })), [{
+    id: "turn-new-thread::user-history",
+    clientMessageId: "mobile-new-thread-1",
+    content: "123",
+  }]);
+});
+
 test("updates Agent Host settings before switching an image thread to a text model", async (context) => {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-image-model-switch-"));
   context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
@@ -1700,6 +1752,7 @@ test("executes remote commands through desktop authority with safe defaults", as
     context,
   );
   assert.equal(startedTurn.turnId, "turn-remote");
+  assert.equal(internals.turnClientMessageIds.get("turn-remote"), "mobile-message-1");
   assert.equal(
     store.snapshot().timeline.find((item) => item.kind === "user")?.clientMessageId,
     "mobile-message-1",

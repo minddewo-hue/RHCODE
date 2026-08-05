@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { reconcileRolloutUploadedImages } from "../src/main/local-rollout-thread.js";
 import { ManagedFileStore, resolveArtifactPaths } from "../src/main/managed-file-store.js";
 
 test("registers uploaded files without copying or persisting user data", () => {
@@ -58,6 +59,68 @@ test("copies and persists uploaded images after the temporary source is removed"
     assert.deepEqual(restored.read(record.id)?.bytes, bytes);
     restored.removeThread("thread-1");
     assert.equal(fs.existsSync(record.path), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("deduplicates repeated uploaded image records when listing a turn", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-managed-image-dedupe-"));
+  try {
+    const source = path.join(root, "screen.png");
+    const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nKsAAAAASUVORK5CYII=", "base64");
+    fs.writeFileSync(source, bytes);
+    const store = new ManagedFileStore(path.join(root, "managed"));
+    const records = store.registerUploads("thread-1", [
+      { path: source, name: "screen.png", kind: "image", size: bytes.length },
+      { path: source, name: "screen.png", kind: "image", size: bytes.length },
+    ]);
+    store.bindTurn(records.map((record) => record.id), "turn-1");
+
+    assert.equal(records[0]?.path, records[1]?.path);
+    assert.equal(store.listThread("thread-1").length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("keeps every original image in a multi-image rollout turn", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-managed-multi-image-"));
+  try {
+    const baseImage = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nKsAAAAASUVORK5CYII=", "base64");
+    const sources = [path.join(root, "first.png"), path.join(root, "second.png")];
+    const originalBytes = sources.map((source, index) => {
+      const bytes = Buffer.concat([baseImage, Buffer.from([index + 1])]);
+      fs.writeFileSync(source, bytes);
+      return bytes;
+    });
+    const store = new ManagedFileStore(path.join(root, "managed"));
+    const originals = store.registerUploads("thread-1", sources.map((source, index) => ({
+      path: source,
+      name: path.basename(source),
+      kind: "image" as const,
+      size: originalBytes[index]!.length,
+    })));
+    store.bindTurn(originals.map((record) => record.id), "turn-1");
+    const recoveredData = [
+      baseImage.toString("base64"),
+      Buffer.concat([baseImage, Buffer.from([3])]).toString("base64"),
+    ];
+    for (const [index, data] of recoveredData.entries()) {
+      assert.ok(store.storeUploadedImageData(
+        "thread-1",
+        "turn-1",
+        `data:image/png;base64,${data}`,
+        `recovered-${index + 1}.png`,
+      ));
+    }
+
+    const reconciled = reconcileRolloutUploadedImages(store.listThread("thread-1"), recoveredData.map((data, index) => ({
+      turnId: "turn-1",
+      name: `recovered-${index + 1}.png`,
+      dataUrl: `data:image/png;base64,${data}`,
+    })));
+    assert.deepEqual(reconciled.map((record) => record.id), originals.map((record) => record.id));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

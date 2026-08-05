@@ -12,6 +12,7 @@ interface TimedMessage {
   message: ConversationMessage;
   createdAt: string;
   order: number;
+  turnId: string | null;
 }
 
 interface ParsedRolloutRecord {
@@ -21,10 +22,25 @@ interface ParsedRolloutRecord {
   order: number;
 }
 
+export interface LocalRolloutLoadOptions {
+  /**
+   * Persist project-local document/image paths discovered in assistant text so
+   * reopen can show the same inline previews as the live session.
+   */
+  materializeArtifacts?: (turnId: string | null, content: string) => ManagedFileRecord[];
+}
+
+export interface RolloutUploadedImage {
+  turnId: string | null;
+  name: string;
+  dataUrl: string;
+}
+
 export async function loadLocalRolloutThread(
   codexHome: string,
   thread: ThreadSummary,
   managedFiles: ManagedFileRecord[] = [],
+  options: LocalRolloutLoadOptions = {},
 ): Promise<ThreadDetail | null> {
   const rolloutPath = findRolloutPath(codexHome, thread.id);
   if (!rolloutPath) return null;
@@ -60,6 +76,7 @@ export async function loadLocalRolloutThread(
 
   const hiddenCompactionMessages = compactionMessageOrders(records);
   const responseMessages: TimedMessage[] = [];
+  const materializedArtifacts: ManagedFileRecord[] = [];
   for (const record of records) {
     const payload = record.payload;
     const createdAt = record.createdAt;
@@ -72,6 +89,9 @@ export async function loadLocalRolloutThread(
       const uploadedFiles = role === "user"
         ? managedFiles.filter((file) => file.source === "upload" && file.turnId === turnId)
         : [];
+      if (role === "assistant" && options.materializeArtifacts) {
+        materializedArtifacts.push(...options.materializeArtifacts(turnId, content));
+      }
       responseMessages.push({
         message: {
           id: turnScopedItemId(turnId, stringValue(payload.id) || `offline-message-${record.order}`),
@@ -84,12 +104,14 @@ export async function loadLocalRolloutThread(
         },
         createdAt,
         order: record.order,
+        turnId,
       });
       continue;
     }
   }
 
   const messages = responseMessages;
+  attachGeneratedManagedFiles(messages, [...managedFiles, ...materializedArtifacts]);
   for (const image of loadRolloutGeneratedImages(codexHome, thread.id)) {
     messages.push({
       message: {
@@ -100,6 +122,7 @@ export async function loadLocalRolloutThread(
       },
       createdAt: image.createdAt,
       order: order += 1,
+      turnId: image.turnId,
     });
   }
   messages.sort((left, right) =>
@@ -115,7 +138,7 @@ export async function loadLocalRolloutThread(
 export async function loadRolloutUploadedImages(
   codexHome: string,
   threadId: string,
-): Promise<Array<{ turnId: string | null; name: string; dataUrl: string }>> {
+): Promise<RolloutUploadedImage[]> {
   const rolloutPath = findRolloutPath(codexHome, threadId);
   if (!rolloutPath) return [];
   let contents: string;
@@ -127,7 +150,7 @@ export async function loadRolloutUploadedImages(
     return [];
   }
 
-  const images: Array<{ turnId: string | null; name: string; dataUrl: string }> = [];
+  const images: RolloutUploadedImage[] = [];
   for (const line of contents.split(/\r?\n/)) {
     if (!line) continue;
     let record: Record<string, unknown>;
@@ -153,6 +176,49 @@ export async function loadRolloutUploadedImages(
     });
   }
   return images;
+}
+
+export function reconcileRolloutUploadedImages(
+  managedFiles: ManagedFileRecord[],
+  rolloutImages: RolloutUploadedImage[],
+): ManagedFileRecord[] {
+  const expectedByTurn = new Map<string, number>();
+  for (const image of rolloutImages) {
+    const key = uploadedImageTurnKey(image.turnId);
+    expectedByTurn.set(key, (expectedByTurn.get(key) || 0) + 1);
+  }
+  if (expectedByTurn.size === 0) return managedFiles;
+
+  const candidatesByTurn = new Map<string, ManagedFileRecord[]>();
+  for (const file of managedFiles) {
+    if (file.source !== "upload" || file.kind !== "image") continue;
+    const key = uploadedImageTurnKey(file.turnId);
+    if (!expectedByTurn.has(key)) continue;
+    const candidates = candidatesByTurn.get(key) || [];
+    candidates.push(file);
+    candidatesByTurn.set(key, candidates);
+  }
+
+  const keptIds = new Set<string>();
+  for (const [key, expected] of expectedByTurn) {
+    const candidates = candidatesByTurn.get(key) || [];
+    candidates.sort((left, right) => (
+      Number(left.originalPath.startsWith("data:")) - Number(right.originalPath.startsWith("data:"))
+      || left.createdAt.localeCompare(right.createdAt)
+    ));
+    for (const file of candidates.slice(0, expected)) keptIds.add(file.id);
+  }
+
+  return managedFiles.filter((file) => (
+    file.source !== "upload"
+    || file.kind !== "image"
+    || !expectedByTurn.has(uploadedImageTurnKey(file.turnId))
+    || keptIds.has(file.id)
+  ));
+}
+
+function uploadedImageTurnKey(turnId: string | null): string {
+  return turnId || "\u0000";
 }
 
 function compactionMessageOrders(records: ParsedRolloutRecord[]): Set<number> {
@@ -225,6 +291,98 @@ function localMessageImages(value: unknown): Pick<ConversationMessage, "images">
     return [{ path: imagePath, name: path.basename(imagePath) || "image" }];
   });
   return images.length > 0 ? { images } : {};
+}
+
+function attachGeneratedManagedFiles(
+  messages: TimedMessage[],
+  managedFiles: ManagedFileRecord[],
+): void {
+  const generated = dedupeManagedFiles(managedFiles.filter((file) => file.source === "generated"));
+  if (!generated.length) return;
+
+  const byTurn = new Map<string, ManagedFileRecord[]>();
+  const orphans: ManagedFileRecord[] = [];
+  for (const file of generated) {
+    if (file.turnId) {
+      const list = byTurn.get(file.turnId) || [];
+      list.push(file);
+      byTurn.set(file.turnId, list);
+    } else {
+      orphans.push(file);
+    }
+  }
+
+  for (const [turnId, files] of byTurn) {
+    let assistantIndex = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index]?.message.role === "assistant" && messages[index]?.turnId === turnId) {
+        assistantIndex = index;
+        break;
+      }
+    }
+    if (assistantIndex === -1) {
+      messages.push(artifactMessage(files, turnId));
+    } else {
+      messages[assistantIndex] = {
+        ...messages[assistantIndex]!,
+        message: withGeneratedAttachments(messages[assistantIndex]!.message, files),
+      };
+    }
+  }
+
+  if (!orphans.length) return;
+  let assistantIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.message.role === "assistant") {
+      assistantIndex = index;
+      break;
+    }
+  }
+  if (assistantIndex === -1) {
+    messages.push(artifactMessage(orphans, null));
+  } else {
+    messages[assistantIndex] = {
+      ...messages[assistantIndex]!,
+      message: withGeneratedAttachments(messages[assistantIndex]!.message, orphans),
+    };
+  }
+}
+
+function artifactMessage(files: ManagedFileRecord[], turnId: string | null): TimedMessage {
+  const first = files[0]!;
+  return {
+    message: withGeneratedAttachments({
+      id: turnScopedItemId(turnId, `files-${first.id}`),
+      role: "assistant",
+      content: "",
+    }, files),
+    createdAt: first.createdAt,
+    order: Number.MAX_SAFE_INTEGER,
+    turnId,
+  };
+}
+
+function withGeneratedAttachments(
+  message: ConversationMessage,
+  files: ManagedFileRecord[],
+): ConversationMessage {
+  const generatedFiles = files.filter((file) => file.kind === "file").map(managedFileReference);
+  const generatedImages = files
+    .filter((file) => file.kind === "image")
+    .map((file) => ({ path: file.path, name: file.name, generated: true as const }));
+  return {
+    ...message,
+    ...(generatedFiles.length ? { files: [...(message.files || []), ...generatedFiles] } : {}),
+    ...(generatedImages.length ? { images: [...(message.images || []), ...generatedImages] } : {}),
+  };
+}
+
+function dedupeManagedFiles(files: ManagedFileRecord[]): ManagedFileRecord[] {
+  const unique = new Map<string, ManagedFileRecord>();
+  for (const file of files) {
+    if (!unique.has(file.id)) unique.set(file.id, file);
+  }
+  return [...unique.values()];
 }
 
 function messageTurnId(payload: Record<string, unknown>): string | null {

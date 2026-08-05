@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { ManagedFileStore } from "../src/main/managed-file-store.js";
 import { DesktopRuntime } from "../src/main/runtime.js";
 
 test("lists and opens local conversations when App Server is offline", async (context) => {
@@ -58,7 +59,7 @@ test("lists and opens local conversations when App Server is offline", async (co
   ]);
 });
 
-test("recovers uploaded rollout images and hides serialized image path markup", async (context) => {
+test("recovers uploaded rollout images once and hides serialized image path markup", async (context) => {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-offline-uploaded-image-"));
   context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
   const threadId = "019fa195-11c9-76b2-84c1-bf33068b5900";
@@ -66,7 +67,23 @@ test("recovers uploaded rollout images and hides serialized image path markup", 
   const projectPath = path.join(codexHome, "offline-project");
   const sessionDirectory = path.join(codexHome, "sessions", "2026", "07", "30");
   const imageBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nKsAAAAASUVORK5CYII=";
+  const sourceImage = path.join(codexHome, "screen.png");
   fs.mkdirSync(sessionDirectory, { recursive: true });
+  const originalBytes = Buffer.concat([Buffer.from(imageBase64, "base64"), Buffer.from([0])]);
+  fs.writeFileSync(sourceImage, originalBytes);
+  const managedFiles = new ManagedFileStore(path.join(codexHome, "attachments"));
+  const [originalRecord] = managedFiles.registerUploads(threadId, [
+    { path: sourceImage, name: "screen.png", kind: "image", size: originalBytes.length },
+  ]);
+  managedFiles.bindTurn([originalRecord.id], turnId);
+  const recoveredRecord = managedFiles.storeUploadedImageData(
+    threadId,
+    turnId,
+    `data:image/png;base64,${imageBase64}`,
+    "recovered-screen.png",
+  );
+  assert.ok(recoveredRecord);
+  assert.notEqual(originalRecord.path, recoveredRecord.path);
   fs.writeFileSync(
     path.join(sessionDirectory, `rollout-offline-${threadId}.jsonl`),
     [
@@ -105,6 +122,7 @@ test("recovers uploaded rollout images and hides serialized image path markup", 
   const user = first.messages.find((message) => message.role === "user");
   assert.equal(user?.content, "What is shown here?");
   assert.equal(user?.files?.length, 1);
+  assert.equal(user?.files?.[0]?.id, originalRecord.id);
   assert.equal(user?.files?.[0]?.name, "screen.png");
   assert.equal(user?.files?.[0]?.mimeType, "image/png");
   assert.equal(fs.existsSync(user?.files?.[0]?.path || ""), true);
@@ -113,6 +131,71 @@ test("recovers uploaded rollout images and hides serialized image path markup", 
   assert.equal(restored.messages.find((message) => message.role === "user")?.files?.[0]?.id, user?.files?.[0]?.id);
 });
 
+test("restores generated image links from local rollout without App Server", async (context) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-offline-generated-image-"));
+  context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+
+  const threadId = "019fa195-11c9-76b2-84c1-bf33068b6100";
+  const turnId = "019fa195-11c9-76b2-84c1-bf33068b6101";
+  const projectPath = path.join(codexHome, "offline-project");
+  const sessionDirectory = path.join(codexHome, "sessions", "2026", "08", "03");
+  const imagePath = path.join(projectPath, "playwright-graph-drag-color-fixed.png");
+  fs.mkdirSync(projectPath, { recursive: true });
+  fs.mkdirSync(sessionDirectory, { recursive: true });
+  fs.writeFileSync(imagePath, Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nKsAAAAASUVORK5CYII=",
+    "base64",
+  ));
+  fs.writeFileSync(
+    path.join(sessionDirectory, `rollout-offline-${threadId}.jsonl`),
+    [
+      record("session_meta", { id: threadId, cwd: projectPath }),
+      record("response_item", {
+        type: "message",
+        id: "user-image-link",
+        role: "user",
+        content: [{ type: "input_text", text: "Show the graph screenshot" }],
+        internal_chat_message_metadata_passthrough: { turn_id: turnId },
+      }),
+      record("response_item", {
+        type: "message",
+        id: "assistant-image-link",
+        role: "assistant",
+        content: [{
+          type: "output_text",
+          text: `截图文件仍保存在\n\`${imagePath}\`。`,
+        }],
+        internal_chat_message_metadata_passthrough: { turn_id: turnId },
+      }),
+    ].join("\n"),
+    "utf8",
+  );
+
+  const openOffline = async () => {
+    const runtime = new DesktopRuntime(".", codexHome);
+    runtime.agent.request = async () => {
+      throw new Error("Agent Host is not running.");
+    };
+    await runtime.listThreads();
+    return runtime.openThread(threadId);
+  };
+
+  const first = await openOffline();
+  const assistant = first.messages.find((message) => message.role === "assistant");
+  assert.equal(assistant?.content.includes("截图文件仍保存在"), true);
+  assert.equal(assistant?.images?.length, 1);
+  assert.equal(assistant?.images?.[0]?.name, "playwright-graph-drag-color-fixed.png");
+  assert.equal(assistant?.images?.[0]?.generated, true);
+  assert.deepEqual(
+    fs.readFileSync(assistant?.images?.[0]?.path || ""),
+    fs.readFileSync(imagePath),
+  );
+
+  const restored = await openOffline();
+  const restoredAssistant = restored.messages.find((message) => message.role === "assistant");
+  assert.equal(restoredAssistant?.images?.[0]?.name, "playwright-graph-drag-color-fixed.png");
+  assert.equal(restoredAssistant?.images?.[0]?.generated, true);
+});
 test("hides internal context-compaction handoff messages from local history", async (context) => {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-offline-compaction-"));
   context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));

@@ -184,6 +184,10 @@ function normalizeProvider(id, value) {
       value.empty_response_retries ?? 0,
       `providers.${id}.empty_response_retries`,
     ),
+    preOutputRetries: parseNonNegativeInteger(
+      value.pre_output_retries ?? (protocol === "chat_completions" ? 1 : 0),
+      `providers.${id}.pre_output_retries`,
+    ),
     modelDiscovery: normalizeModelDiscovery(value.model_discovery, id),
     timeoutMs:
       value.timeout_ms == null
@@ -295,7 +299,7 @@ function normalizeModel(id, value, providers) {
     forceSerialToolCalls: Boolean(value.force_serial_tool_calls),
     bufferChatStream: Boolean(value.buffer_chat_stream),
     preOutputRetries: parseNonNegativeInteger(
-      value.pre_output_retries ?? 0,
+      value.pre_output_retries ?? primary.provider.preOutputRetries,
       `models.${id}.pre_output_retries`,
     ),
     maxBufferedStreamBytes: parseByteSize(value.max_buffered_stream_size || "8mb"),

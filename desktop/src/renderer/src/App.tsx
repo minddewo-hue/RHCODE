@@ -387,7 +387,10 @@ export function App() {
 
   useEffect(() => {
     const unsubscribers = [
-      window.rhzycode.onAgentStatus(setAgentStatus),
+      window.rhzycode.onAgentStatus((status) => {
+        setAgentStatus(status);
+        if (status.state === "connected") void refreshModels();
+      }),
       window.rhzycode.onTaskActivity((status) => {
         setTaskActivity(status);
         if (status.toast) setTaskToast(status.toast);
@@ -432,6 +435,18 @@ export function App() {
     }
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
   }, []);
+
+  async function refreshModels(): Promise<void> {
+    const available = (await window.rhzycode.listModels().catch(() => ({ data: [] }))).data || [];
+    if (!available.length) return;
+    setModels(available);
+    setSelectedModel((current) => {
+      if (available.some((model) => model.model === current)) return current;
+      const next = available.find((model) => model.isDefault)?.model || available[0]?.model || "";
+      if (next) localStorage.setItem("rhzycode.selectedModel", next);
+      return next;
+    });
+  }
 
   useEffect(() => {
     if (!followConversationRef.current) return;

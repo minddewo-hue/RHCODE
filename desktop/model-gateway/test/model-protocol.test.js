@@ -37,6 +37,28 @@ test("allows models from one provider to use different protocols", () => {
   }
 });
 
+test("retries transient pre-output failures once for Chat Completions models by default", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-chat-retry-config-"));
+  const configPath = path.join(root, "gateway.config.json");
+  fs.writeFileSync(configPath, JSON.stringify({
+    providers: {
+      chat: { base_url: "https://models.example/v1", protocol: "chat_completions" },
+    },
+    models: {
+      "chat/default": { provider: "chat", upstream_model: "default" },
+      "chat/no-retry": { provider: "chat", upstream_model: "no-retry", pre_output_retries: 0 },
+    },
+  }));
+
+  try {
+    const config = loadGatewayConfig({ configPath });
+    assert.equal(config.models.get("chat/default").preOutputRetries, 1);
+    assert.equal(config.models.get("chat/no-retry").preOutputRetries, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("selects protocol separately for every discovered provider model", async (context) => {
   const routeCalls = [];
   const upstream = http.createServer(async (request, response) => {

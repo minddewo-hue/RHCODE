@@ -156,6 +156,11 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function isAgentUnavailableBeforeRequest(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Agent Host is not running|Agent Host input is unavailable/i.test(message);
+}
+
 function withDeadline<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   return new Promise<T>((resolve, reject) => {
@@ -973,13 +978,21 @@ export class DesktopRuntime extends EventEmitter {
     sandboxMode?: SandboxMode;
   }): Promise<{ thread?: { id?: string } }> {
     this.projectDirectories.remember(params.cwd);
-    const response = await this.agent.request<{ thread?: { id?: string } }>("thread/start", {
+    const request = {
       cwd: params.cwd,
       modelProvider: INTERNAL_MODEL_PROVIDER_ID,
       ...(params.model ? { model: params.model } : {}),
       ...(params.approvalPolicy ? { approvalPolicy: params.approvalPolicy } : {}),
       sandbox: params.sandboxMode || "workspace-write",
-    });
+    };
+    let response: { thread?: { id?: string } };
+    try {
+      response = await this.agent.request<{ thread?: { id?: string } }>("thread/start", request);
+    } catch (error) {
+      if (!isAgentUnavailableBeforeRequest(error)) throw error;
+      await this.restartGateway();
+      response = await this.agent.request<{ thread?: { id?: string } }>("thread/start", request);
+    }
     const threadId = response.thread?.id;
     if (threadId) {
       if (params.model) this.gateway.setThreadModel(threadId, params.model);

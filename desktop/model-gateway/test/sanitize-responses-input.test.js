@@ -72,3 +72,23 @@ test("chat adapter converts image_generation_call without dumping base64", () =>
   assert.match(chat.messages[0].content, /generated image omitted/);
   assert.doesNotMatch(chat.messages[0].content, /iVBORw0KGgo/);
 });
+
+test("chat adapter combines developer messages into the leading system message", () => {
+  const chat = responsesToChatRequest(
+    {
+      instructions: "Base instructions.",
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "First task" }] },
+        { role: "developer", content: [{ type: "input_text", text: "Additional rules." }] },
+        { role: "user", content: [{ type: "input_text", text: "Second task" }] },
+      ],
+    },
+    "chat-upstream",
+  );
+
+  assert.deepEqual(chat.messages, [
+    { role: "system", content: "Base instructions.\n\nAdditional rules." },
+    { role: "user", content: "First task" },
+    { role: "user", content: "Second task" },
+  ]);
+});

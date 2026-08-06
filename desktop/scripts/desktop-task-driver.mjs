@@ -1,5 +1,6 @@
 import { _electron as electron } from "playwright";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,7 +28,10 @@ delete environment.ELECTRON_RENDERER_URL;
 
 const startedAt = Date.now();
 const errors = [];
+const automationUserData = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-task-driver-"));
 let app;
+
+copyRuntimeConfiguration(automationUserData);
 
 try {
   app = await electron.launch({
@@ -37,6 +41,8 @@ try {
     env: {
       ...environment,
       RHZYCODE_GATEWAY_HOME: path.join(workspaceDir, "desktop"),
+      RHZYCODE_USER_DATA_DIR: automationUserData,
+      RHZYCODE_CODEX_HOME: path.join(automationUserData, "codex-home"),
       RHZYCODE_SKIP_ENVIRONMENT_MIGRATION: "1",
     },
     timeout: 30_000,
@@ -58,27 +64,34 @@ try {
   }, projectDir);
 
   await waitForDesktop(page, options.model, options.timeoutMs);
-  await page.locator(".project-picker").click();
-  await page.getByRole("menuitem", { name: /Open folder/i }).click();
-  await page.locator(".project-picker")
-    .filter({ hasText: path.basename(projectDir) })
-    .waitFor({ timeout: 20_000 });
-  await page.getByRole("button", { name: "New task" }).click();
-
-  const modelSelect = page.getByRole("combobox", { name: "Model" });
-  const modelValues = await modelSelect.locator("option").evaluateAll((nodes) =>
-    nodes.map((node) => ({ value: node.value, label: node.textContent || "" })),
-  );
-  if (!modelValues.some((entry) => entry.value === options.model)) {
-    throw new Error(`Requested model is unavailable: ${options.model}`);
-  }
-  await modelSelect.selectOption(options.model);
-  await page.getByRole("combobox", { name: "Sandbox policy" }).selectOption(options.sandbox);
-  await page.getByRole("combobox", { name: "Approval mode" }).selectOption("never");
-
   const before = await page.evaluate(() => window.rhzycode.getSyncSnapshot());
-  await page.getByRole("textbox", { name: "Task prompt" }).fill(prompt);
-  await page.locator("button.send-button").click();
+  const started = await page.evaluate(async ({ cwd, text, model, sandbox }) => {
+    let lastError = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        await window.rhzycode.connectAgent();
+        const thread = await window.rhzycode.startThread({
+          cwd,
+          model,
+          approvalPolicy: "never",
+          sandboxMode: sandbox,
+        });
+        if (!thread.thread?.id) throw new Error("Desktop client did not return a thread id.");
+        await window.rhzycode.startTurn({
+          threadId: thread.thread.id,
+          text,
+          model,
+          approvalPolicy: "never",
+          sandboxMode: sandbox,
+        });
+        return thread.thread.id;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+        await new Promise((resolve) => setTimeout(resolve, 1_000 * (attempt + 1)));
+      }
+    }
+    throw new Error(`Desktop task could not start after retries: ${lastError || "unknown error"}`);
+  }, { cwd: projectDir, text: prompt, model: options.model, sandbox: options.sandbox });
 
   const result = await waitForTask(page, projectDir, before.threads.map((thread) => thread.id), options.timeoutMs);
   const screenshotPath = path.join(projectDir, "desktop-task-result.png");
@@ -96,6 +109,7 @@ try {
   process.stdout.write(`${JSON.stringify({
     ok: true,
     threadId: result.thread.id,
+    startedThreadId: started,
     status: result.thread.status,
     model: result.thread.model,
     sandbox: options.sandbox,
@@ -106,18 +120,31 @@ try {
   }, null, 2)}\n`);
 } finally {
   await app?.close().catch(() => undefined);
+  fs.rmSync(automationUserData, { recursive: true, force: true });
+}
+
+function copyRuntimeConfiguration(userDataDirectory) {
+  const sourceDirectory = path.join(process.env.APPDATA || "", "@rhzycode", "desktop");
+  for (const fileName of ["gateway-credentials.json", "gateway-runtime-config.json"]) {
+    const source = path.join(sourceDirectory, fileName);
+    if (fs.existsSync(source)) fs.copyFileSync(source, path.join(userDataDirectory, fileName));
+  }
 }
 
 async function waitForDesktop(page, model, timeoutMs) {
   await page.waitForFunction(async (requestedModel) => {
-    const [agent, gateway, models] = await Promise.all([
-      window.rhzycode.getAgentStatus(),
-      window.rhzycode.getGatewayStatus(),
-      window.rhzycode.listModels(),
-    ]);
-    return agent.state === "connected"
-      && gateway.state === "running"
-      && Boolean(models.data?.some((entry) => entry.model === requestedModel));
+    try {
+      const [agent, gateway, models] = await Promise.all([
+        window.rhzycode.getAgentStatus(),
+        window.rhzycode.getGatewayStatus(),
+        window.rhzycode.listModels(),
+      ]);
+      return agent.state === "connected"
+        && gateway.state === "running"
+        && Boolean(models.data?.some((entry) => entry.model === requestedModel));
+    } catch {
+      return false;
+    }
   }, model, { timeout: Math.min(timeoutMs, 120_000), polling: 1_000 });
 }
 

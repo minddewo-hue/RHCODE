@@ -39,8 +39,21 @@ export function responsesToChatRequest(request, upstreamModel, debugLog = () => 
   const toolChoice = responsesToolChoiceToChatToolChoice(request.tool_choice);
   if (toolChoice != null) chat.tool_choice = toolChoice;
 
+  chat.messages = mergeSystemMessages(chat.messages);
+
   debugLog(redactForLog(chat));
   return chat;
+}
+
+function mergeSystemMessages(messages) {
+  const systemMessages = messages.filter((message) => message.role === "system");
+  if (systemMessages.length === 0) return messages;
+
+  const remainingMessages = messages.filter((message) => message.role !== "system");
+  return [{
+    role: "system",
+    content: systemMessages.map((message) => contentToText(message.content)).join("\n\n"),
+  }, ...remainingMessages];
 }
 
 export function chatToResponse(request, chatResponse, responseId, publicModel) {

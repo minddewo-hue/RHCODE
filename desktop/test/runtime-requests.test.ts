@@ -99,6 +99,28 @@ test("starts the agent without waiting for sync startup", { timeout: 1_000 }, as
   assert.deepEqual(startupOrder, ["agent", "sync"]);
 });
 
+test("restarts the Agent Host before retrying a thread that was not submitted", async () => {
+  const { runtime } = createRuntimeHarness();
+  let requests = 0;
+  let restarts = 0;
+  runtime.agent.request = async () => {
+    requests += 1;
+    if (requests === 1) throw new Error("Agent Host is not running.");
+    return { thread: { id: "thread-recovered" } } as never;
+  };
+  runtime.restartGateway = async () => { restarts += 1; };
+
+  const response = await runtime.startThread({
+    cwd: path.resolve("."),
+    model: "test/model",
+    approvalPolicy: "never",
+  });
+
+  assert.equal(response.thread?.id, "thread-recovered");
+  assert.equal(restarts, 1);
+  assert.equal(requests, 2);
+});
+
 test("opens a mobile-created empty thread before its rollout exists", async () => {
   const { runtime, internals } = createRuntimeHarness();
   const emptyThread: ThreadSummary = {

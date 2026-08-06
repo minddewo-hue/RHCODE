@@ -164,7 +164,7 @@ async function discoverProviderModels(config, timeoutMs, fetchImpl) {
           capabilities: {},
           forceSerialToolCalls: false,
           bufferChatStream: false,
-          preOutputRetries: 0,
+          preOutputRetries: provider.preOutputRetries,
           maxBufferedStreamBytes: 8 * 1024 * 1024,
           runtimeInstructions: null,
           routes: [{

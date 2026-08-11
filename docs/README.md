@@ -9,6 +9,7 @@
 | 了解系统组成和安全边界 | [系统架构](architecture.md) |
 | 判断代码应该放在哪里 | [项目结构与依赖边界](project-structure.md) |
 | 开发桌面应用 | [桌面端开发](desktop-development.md) |
+| 排查删除对话后输入框失焦 | [删除对话焦点故障复盘](desktop-conversation-delete-focus-incident.md) |
 | 开发 Android/iOS 应用 | [移动端开发](mobile-development.md) |
 | 理解 KEY、快照、事件流和中转 | [移动连接](mobile-connection.md) |
 | 协调桌面与移动并行开发 | [并行开发约定](parallel-development.md) |

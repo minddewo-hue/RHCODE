@@ -4,6 +4,7 @@ import {
   bundledCodexExecutable,
   desktopHostPlatform,
   desktopUpdatePlatform,
+  linuxOzonePlatform,
   preferredCodexPath,
   shouldQuitWhenAllWindowsClose,
 } from "../src/main/platform/desktop-platform.js";
@@ -22,6 +23,12 @@ test("uses native executable and application lifecycle conventions", () => {
   assert.equal(bundledCodexExecutable("darwin"), "codex");
   assert.equal(shouldQuitWhenAllWindowsClose("win32"), true);
   assert.equal(shouldQuitWhenAllWindowsClose("darwin"), false);
+});
+
+test("uses the stable X11 backend for Linux unless the operator overrides it", () => {
+  assert.equal(linuxOzonePlatform("linux"), "x11");
+  assert.equal(linuxOzonePlatform("linux", " wayland "), "wayland");
+  assert.equal(linuxOzonePlatform("win32"), undefined);
 });
 
 test("prefers the bundled Codex binary and only falls back when it is absent", () => {

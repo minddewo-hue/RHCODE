@@ -6,6 +6,7 @@ import {
   getSnapshotWithRetry,
   heartbeatPingFrame,
   heartbeatPongId,
+  incomingSequenceAction,
   reconnectDelay,
   webSocketConnectTimeoutMs,
   webSocketHeartbeatIntervalMs,
@@ -45,6 +46,8 @@ interface UseControlPlaneOptions {
 interface RuntimeConnection {
   client: ControlClient;
   lastSequence: number;
+  streamId: string | null;
+  snapshotPromise: Promise<ControlSnapshot> | null;
   socket: WebSocket | null;
   socketOpen: boolean;
   connecting: boolean;
@@ -122,6 +125,8 @@ export function useControlPlane({
       const runtime: RuntimeConnection = {
         client,
         lastSequence: 0,
+        streamId: null,
+        snapshotPromise: null,
         socket: null,
         socketOpen: false,
         connecting: false,
@@ -167,12 +172,32 @@ export function useControlPlane({
       };
       runtime.reconnect = scheduleReconnect;
 
+      const loadSnapshot = (): Promise<ControlSnapshot> => {
+        if (runtime.snapshotPromise) return runtime.snapshotPromise;
+        const request = getSnapshotWithRetry(client);
+        runtime.snapshotPromise = request;
+        void request.finally(() => {
+          if (runtime.snapshotPromise === request) runtime.snapshotPromise = null;
+        }).catch(() => undefined);
+        return request;
+      };
+
+      const acceptSnapshotCursor = (snapshot: ControlSnapshot) => {
+        const streamChanged = Boolean(
+          snapshot.streamId && runtime.streamId && snapshot.streamId !== runtime.streamId,
+        );
+        runtime.lastSequence = streamChanged
+          ? snapshot.lastSequence
+          : Math.max(runtime.lastSequence, snapshot.lastSequence);
+        runtime.streamId = snapshot.streamId || runtime.streamId;
+      };
+
       const resyncSnapshot = async () => {
         if (disposed || stopped) return;
         try {
-          const next = await getSnapshotWithRetry(client);
+          const next = await loadSnapshot();
           if (disposed || stopped) return;
-          runtime.lastSequence = Math.max(runtime.lastSequence, next.lastSequence);
+          acceptSnapshotCursor(next);
           update((current) => ({
             ...current,
             snapshot: mergeControlSnapshot(current.snapshot, next),
@@ -243,9 +268,9 @@ export function useControlPlane({
         runtime.connecting = true;
         update({ status: "connecting", notice: null });
         try {
-          const next = await getSnapshotWithRetry(client);
+          const next = await loadSnapshot();
           if (disposed || stopped) return;
-          runtime.lastSequence = Math.max(runtime.lastSequence, next.lastSequence);
+          acceptSnapshotCursor(next);
           update((current) => ({
             ...current,
             snapshot: mergeControlSnapshot(current.snapshot, next),
@@ -303,10 +328,27 @@ export function useControlPlane({
           if (disposed || stopped || runtime.socket !== socket) return;
           if (acceptHeartbeat(String(message.data))) return;
           try {
-            const event = client.parseEvent(String(message.data));
-            // Snapshots can advance the cursor; skip already-applied events so
-            // reconnect storms do not reshuffle or flicker the timeline.
-            if (event.sequence <= runtime.lastSequence) return;
+            const frame = client.parseSocketFrame(String(message.data));
+            if (frame.type === "control.sync") {
+              const streamChanged = Boolean(runtime.streamId && runtime.streamId !== frame.streamId);
+              const replayUnavailable = runtime.lastSequence < frame.earliestReplaySequence - 1
+                && runtime.lastSequence < frame.lastSequence;
+              if (streamChanged || replayUnavailable) {
+                update({ notice: "实时数据版本已变化，正在重新同步。" });
+                socket.close();
+                return;
+              }
+              runtime.streamId = frame.streamId;
+              return;
+            }
+            const event = frame;
+            const sequenceAction = incomingSequenceAction(runtime.lastSequence, event.sequence);
+            if (sequenceAction === "duplicate") return;
+            if (sequenceAction === "gap") {
+              update({ notice: "检测到实时数据缺口，正在重新同步。" });
+              socket.close();
+              return;
+            }
             runtime.lastSequence = event.sequence;
             update((current) => ({
               ...current,
@@ -369,8 +411,21 @@ export function useControlPlane({
       ...(!runtime?.socketOpen ? { status: "connecting" as const, notice: null } : {}),
     });
     try {
-      const next = await getSnapshotWithRetry(client);
-      if (runtime) runtime.lastSequence = Math.max(runtime.lastSequence, next.lastSequence);
+      const request = runtime?.snapshotPromise || getSnapshotWithRetry(client);
+      if (runtime && !runtime.snapshotPromise) {
+        runtime.snapshotPromise = request;
+        void request.finally(() => {
+          if (runtime.snapshotPromise === request) runtime.snapshotPromise = null;
+        }).catch(() => undefined);
+      }
+      const next = await request;
+      if (runtime) {
+        const streamChanged = Boolean(next.streamId && runtime.streamId && next.streamId !== runtime.streamId);
+        runtime.lastSequence = streamChanged
+          ? next.lastSequence
+          : Math.max(runtime.lastSequence, next.lastSequence);
+        runtime.streamId = next.streamId || runtime.streamId;
+      }
       updateConnectionState(setConnectionStates, activeSession.id, (current) => ({
         ...current,
         snapshot: mergeControlSnapshot(current.snapshot, next),
@@ -407,12 +462,15 @@ export function useControlPlane({
     const client = runtime?.client || new ControlClient(activeSession.accessKey);
     try {
       const event = await client.resolveApproval(approvalId, decision);
-      if (runtime) runtime.lastSequence = Math.max(runtime.lastSequence, event.sequence);
       updateConnectionState(setConnectionStates, activeSession.id, (current) => ({
         ...current,
-        snapshot: applyAgentEvent(current.snapshot, event),
+        snapshot: {
+          ...current.snapshot,
+          approvals: current.snapshot.approvals.filter((approval) => approval.id !== event.approvalId),
+        },
         approvalOperations: omitKey(current.approvalOperations, approvalId),
       }));
+      runtime?.resync?.();
     } catch (error) {
       if (error instanceof ControlClientError && error.code === "not_found") {
         updateConnectionState(setConnectionStates, activeSession.id, (current) => ({

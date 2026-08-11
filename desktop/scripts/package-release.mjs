@@ -10,10 +10,14 @@ const rootDir = path.resolve(desktopDir, "..");
 const desktopPackage = JSON.parse(fs.readFileSync(path.join(desktopDir, "package.json"), "utf8"));
 const directoryOnly = process.argv.includes("--dir");
 const requestedPlatform = process.argv.find((argument) => argument.startsWith("--platform="))?.split("=", 2)[1] || "windows";
-if (requestedPlatform !== "windows" && requestedPlatform !== "macos") {
+if (!["windows", "macos", "linux"].includes(requestedPlatform)) {
   throw new Error(`Unsupported desktop release platform: ${requestedPlatform}.`);
 }
-const requiredNodePlatform = requestedPlatform === "macos" ? "darwin" : "win32";
+const requiredNodePlatform = {
+  windows: "win32",
+  macos: "darwin",
+  linux: "linux",
+}[requestedPlatform];
 if (process.platform !== requiredNodePlatform) {
   throw new Error(`${requestedPlatform} releases must be built on ${requiredNodePlatform}. Current platform: ${process.platform}.`);
 }
@@ -27,7 +31,12 @@ const signingRequired = process.env.RHZYCODE_REQUIRE_SIGNING === "1";
 const signingConfigured = Boolean(
   process.env.CSC_LINK || process.env.WIN_CSC_LINK || process.env.CSC_NAME,
 );
-const defaultUpdateUrl = `http://218.201.210.211:8000/updates/${requestedPlatform}`;
+if (requestedPlatform === "linux" && signingRequired) {
+  throw new Error("RHZYCODE_REQUIRE_SIGNING is not supported for Linux releases.");
+}
+const defaultUpdateUrl = requestedPlatform === "linux"
+  ? ""
+  : `http://218.201.210.211:8000/updates/${requestedPlatform}`;
 const configuredUpdateUrl = process.env.RHZYCODE_UPDATE_URL?.trim() || "";
 const updateUrl = configuredUpdateUrl || defaultUpdateUrl;
 const electronDist = resolveElectronDist(desktopPackage.devDependencies.electron);
@@ -36,18 +45,21 @@ if (signingRequired && !signingConfigured) {
     "Code signing is required, but CSC_LINK, WIN_CSC_LINK, or CSC_NAME is not configured.",
   );
 }
-const iconPath = requestedPlatform === "macos"
-  ? path.join(desktopDir, "build", "icon.icns")
-  : path.join(desktopDir, "build", "icon.png");
-const iconResult = requestedPlatform === "macos"
-  ? spawnSync(process.execPath, [path.join(desktopDir, "scripts", "generate-mac-icon.mjs")], { encoding: "utf8" })
-  : spawnSync(
-      "powershell.exe",
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(desktopDir, "scripts", "generate-icon.ps1"), "-OutputPath", iconPath],
-      { encoding: "utf8" },
-    );
-if (iconResult.status !== 0 || !fs.existsSync(iconPath)) {
-  throw new Error(`Unable to generate the ${requestedPlatform} release icon: ${iconResult.stderr.trim()}`);
+const iconPath = path.join(desktopDir, "build", requestedPlatform === "macos" ? "icon.icns" : "icon.png");
+if (requestedPlatform === "linux") {
+  fs.mkdirSync(path.dirname(iconPath), { recursive: true });
+  fs.copyFileSync(path.join(rootDir, "assets", "app-icon.png"), iconPath);
+} else {
+  const iconResult = requestedPlatform === "macos"
+    ? spawnSync(process.execPath, [path.join(desktopDir, "scripts", "generate-mac-icon.mjs")], { encoding: "utf8" })
+    : spawnSync(
+        "powershell.exe",
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(desktopDir, "scripts", "generate-icon.ps1"), "-OutputPath", iconPath],
+        { encoding: "utf8" },
+      );
+  if (iconResult.status !== 0 || !fs.existsSync(iconPath)) {
+    throw new Error(`Unable to generate the ${requestedPlatform} release icon: ${iconResult.stderr.trim()}`);
+  }
 }
 const codexPath = resolveCodexPath();
 const expectedVersion = JSON.parse(
@@ -85,23 +97,33 @@ const extraResources = [
     from: path.join(desktopDir, "model-context-windows.json"),
     to: "gateway/model-context-windows.json",
   },
-  {
+];
+const codexDistributionRoot = resolveCodexDistributionRoot(codexPath);
+if (codexDistributionRoot) {
+  extraResources.push({
+    from: codexDistributionRoot,
+    to: "codex",
+  });
+} else {
+  extraResources.push({
     from: codexPath,
     to: `codex/${codexExecutableName}`,
-  },
-];
-if (fs.existsSync(codeModeHost)) {
-  extraResources.push({
-    from: codeModeHost,
-    to: `codex/${codeModeHostName}`,
   });
+  if (fs.existsSync(codeModeHost)) {
+    extraResources.push({
+      from: codeModeHost,
+      to: `codex/${codeModeHostName}`,
+    });
+  }
 }
 
 const artifacts = await build({
   projectDir: desktopDir,
   targets: requestedPlatform === "windows"
     ? Platform.WINDOWS.createTarget(directoryOnly ? "dir" : "nsis", releaseArch)
-    : Platform.MAC.createTarget(directoryOnly ? "dir" : ["dmg", "zip"], releaseArch),
+    : requestedPlatform === "macos"
+      ? Platform.MAC.createTarget(directoryOnly ? "dir" : ["dmg", "zip"], releaseArch)
+      : Platform.LINUX.createTarget(directoryOnly ? "dir" : ["AppImage", "deb"], releaseArch),
   config: {
     appId: "ai.rhzycode.desktop",
     productName: "RHZYCODE",
@@ -141,6 +163,15 @@ const artifacts = await build({
       hardenedRuntime: true,
       minimumSystemVersion: "12.0",
       notarize: signingRequired,
+    },
+    linux: {
+      executableName: "rhzycode",
+      icon: iconPath,
+      category: "Development",
+      maintainer: "RHZYCODE",
+      synopsis: "Cross-platform coding agent",
+      syncDesktopName: true,
+      target: directoryOnly ? ["dir"] : ["AppImage", "deb"],
     },
   },
 });
@@ -185,6 +216,15 @@ function resolveCodexPath() {
     throw new Error("Codex CLI was not found. Set RHZYCODE_CODEX_PATH before packaging.");
   }
   return path.resolve(executable.trim());
+}
+
+function resolveCodexDistributionRoot(codexPath) {
+  const binDirectory = path.dirname(codexPath);
+  if (path.basename(binDirectory) !== "bin") return null;
+  const distributionRoot = path.dirname(binDirectory);
+  return fs.existsSync(path.join(distributionRoot, "codex-resources"))
+    ? distributionRoot
+    : null;
 }
 
 function resolveElectronDist(expectedVersion) {

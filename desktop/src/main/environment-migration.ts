@@ -19,11 +19,13 @@ interface StoredMigrationState {
 export interface CodexSessionCandidate {
   sourcePath: string;
   destinationPath: string;
+  threadId: string;
   cwd: string | null;
 }
 
 export interface CodexMigrationPlan {
   sessions: CodexSessionCandidate[];
+  skippedCount: number;
 }
 
 export interface SessionMigrationResult {
@@ -31,6 +33,11 @@ export interface SessionMigrationResult {
   skippedCount: number;
   failedCount: number;
   projectPaths: string[];
+}
+
+export interface ExternalConversationImportResult extends SessionMigrationResult {
+  source: EnvironmentMigrationSource;
+  discoveredCount: number;
 }
 
 export interface SessionProviderNormalizationResult {
@@ -98,6 +105,11 @@ interface ClaudeMigrationPlan {
   sessionCount: number;
 }
 
+interface ExternalSessionImportRecord {
+  source_path?: unknown;
+  imported_thread_id?: unknown;
+}
+
 export interface FirstLaunchMigrationOptions {
   statePath: string;
   codexSourceHome: string;
@@ -144,9 +156,12 @@ export function planCodexSessionMigration(
   sourceHome: string,
   destinationHome: string,
 ): CodexMigrationPlan {
-  if (samePath(sourceHome, destinationHome)) return { sessions: [] };
+  if (samePath(sourceHome, destinationHome)) return { sessions: [], skippedCount: 0 };
 
   const sessions: CodexSessionCandidate[] = [];
+  const existingThreadIds = collectCodexSessionIds(destinationHome);
+  const plannedThreadIds = new Set<string>();
+  let skippedCount = 0;
   for (const directoryName of ["sessions", "archived_sessions"]) {
     const sourceRoot = path.join(sourceHome, directoryName);
     const destinationRoot = path.join(destinationHome, directoryName);
@@ -154,13 +169,87 @@ export function planCodexSessionMigration(
       const relativePath = path.relative(sourceRoot, sourcePath);
       if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) continue;
       const destinationPath = path.join(destinationRoot, relativePath);
-      if (fs.existsSync(destinationPath)) continue;
       const metadata = readCodexSessionMetadata(sourcePath);
       if (!metadata) continue;
-      sessions.push({ sourcePath, destinationPath, cwd: metadata.cwd });
+      if (
+        fs.existsSync(destinationPath)
+        || existingThreadIds.has(metadata.id)
+        || plannedThreadIds.has(metadata.id)
+      ) {
+        skippedCount += 1;
+        continue;
+      }
+      plannedThreadIds.add(metadata.id);
+      sessions.push({ sourcePath, destinationPath, threadId: metadata.id, cwd: metadata.cwd });
     }
   }
-  return { sessions };
+  return { sessions, skippedCount };
+}
+
+export function importCodexConversations(
+  sourceHome: string,
+  destinationHome: string,
+): ExternalConversationImportResult {
+  const plan = planCodexSessionMigration(sourceHome, destinationHome);
+  const result = migrateCodexSessions(plan);
+  return {
+    source: "codex",
+    discoveredCount: plan.sessions.length + plan.skippedCount,
+    ...result,
+    skippedCount: result.skippedCount + plan.skippedCount,
+  };
+}
+
+export async function importClaudeConversations(
+  client: ExternalMigrationClient,
+  codexHome: string,
+): Promise<ExternalConversationImportResult> {
+  const detected = await detectClaudeMigration(client);
+  if (!detected) {
+    return {
+      source: "claude",
+      discoveredCount: 0,
+      importedCount: 0,
+      skippedCount: 0,
+      failedCount: 0,
+      projectPaths: [],
+    };
+  }
+
+  const existingThreadIds = collectCodexSessionIds(codexHome);
+  const existingSources = collectImportedClaudeSources(codexHome, existingThreadIds);
+  const sessions = detected.item.details?.sessions || [];
+  const pendingSessions = sessions.filter((session) =>
+    !existingSources.has(comparableExternalPath(session.path)),
+  );
+  const skippedCount = sessions.length - pendingSessions.length;
+  if (pendingSessions.length === 0) {
+    return {
+      source: "claude",
+      discoveredCount: sessions.length,
+      importedCount: 0,
+      skippedCount,
+      failedCount: 0,
+      projectPaths: [],
+    };
+  }
+
+  const plan: ClaudeMigrationPlan = {
+    item: {
+      ...detected.item,
+      details: { ...detected.item.details, sessions: pendingSessions },
+    },
+    sessionCount: pendingSessions.length,
+  };
+  const result = await importClaudeSessions(client, plan);
+  const normalizationFailures = normalizeNewCodexSessions(codexHome, existingThreadIds);
+  return {
+    source: "claude",
+    discoveredCount: sessions.length,
+    ...result,
+    skippedCount: result.skippedCount + skippedCount,
+    failedCount: result.failedCount + normalizationFailures,
+  };
 }
 
 export function migrateCodexSessions(plan: CodexMigrationPlan): SessionMigrationResult {
@@ -348,7 +437,7 @@ async function runClaudeMigration(
 async function detectClaudeMigration(client: ExternalMigrationClient): Promise<ClaudeMigrationPlan | null> {
   const response = await client.request<{ items?: ExternalMigrationItem[] }>(
     "externalAgentConfig/detect",
-    { includeHome: true, cwds: [] },
+    { includeHome: true, cwds: [], migrationSource: "claude" },
   );
   const item = (response.items || []).find((candidate) =>
     candidate.itemType === "SESSIONS" && (candidate.details?.sessions?.length || 0) > 0,
@@ -366,6 +455,7 @@ async function importClaudeSessions(
     const started = await client.request<{ importId: string }>("externalAgentConfig/import", {
       migrationItems: [plan.item],
       source: "claude",
+      migrationSource: "claude",
     });
     const completed = await waiter.promise;
     if (completed.importId !== started.importId) {
@@ -470,20 +560,97 @@ function listJsonlFiles(root: string): string[] {
   return files.sort((left, right) => left.localeCompare(right));
 }
 
-function readCodexSessionMetadata(filePath: string): { cwd: string | null } | null {
+function readCodexSessionMetadata(filePath: string): { id: string; cwd: string | null } | null {
   const firstLine = readFirstJsonLine(filePath);
   if (!firstLine || firstLine.nextOffset >= fs.statSync(filePath).size) return null;
   const record = firstLine.value as {
     type?: string;
     payload?: { id?: string; session_id?: string; cwd?: string; source?: unknown };
   };
-  if (record.type !== "session_meta" || !(record.payload?.id || record.payload?.session_id)) return null;
-  const source = record.payload.source;
+  const payload = record.payload;
+  const id = payload?.id || payload?.session_id;
+  if (!payload || record.type !== "session_meta" || typeof id !== "string" || !id) return null;
+  const source = payload.source;
   if (typeof source === "string" && !new Set(["cli", "vscode", "appServer", "unknown"]).has(source)) {
     return null;
   }
   if (source && typeof source === "object") return null;
-  return { cwd: typeof record.payload.cwd === "string" ? record.payload.cwd : null };
+  return { id, cwd: typeof payload.cwd === "string" ? payload.cwd : null };
+}
+
+function collectCodexSessionIds(codexHome: string): Set<string> {
+  const ids = new Set<string>();
+  for (const directoryName of ["sessions", "archived_sessions"]) {
+    for (const filePath of listJsonlFiles(path.join(codexHome, directoryName))) {
+      const firstLine = readFirstJsonLine(filePath);
+      if (!firstLine || !firstLine.value || typeof firstLine.value !== "object") continue;
+      const record = firstLine.value as {
+        type?: string;
+        payload?: { id?: unknown; session_id?: unknown };
+      };
+      const id = typeof record.payload?.id === "string"
+        ? record.payload.id
+        : typeof record.payload?.session_id === "string" ? record.payload.session_id : "";
+      if (record.type === "session_meta" && id) ids.add(id);
+    }
+  }
+  return ids;
+}
+
+function collectImportedClaudeSources(
+  codexHome: string,
+  existingThreadIds = collectCodexSessionIds(codexHome),
+): Set<string> {
+  const sources = new Set<string>();
+  const ledgerPath = path.join(codexHome, "external_agent_session_imports.json");
+  try {
+    const parsed = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as {
+      records?: ExternalSessionImportRecord[];
+    };
+    for (const record of parsed.records || []) {
+      if (
+        typeof record.source_path !== "string"
+        || typeof record.imported_thread_id !== "string"
+        || !existingThreadIds.has(record.imported_thread_id)
+      ) continue;
+      sources.add(comparableExternalPath(record.source_path));
+    }
+  } catch {
+    // A missing or damaged import ledger should not hide importable conversations.
+  }
+  return sources;
+}
+
+function normalizeNewCodexSessions(codexHome: string, existingThreadIds: Set<string>): number {
+  let failedCount = 0;
+  for (const directoryName of ["sessions", "archived_sessions"]) {
+    for (const filePath of listJsonlFiles(path.join(codexHome, directoryName))) {
+      const firstLine = readFirstJsonLine(filePath);
+      if (!firstLine || !firstLine.value || typeof firstLine.value !== "object") continue;
+      const record = firstLine.value as {
+        type?: string;
+        payload?: { id?: unknown; session_id?: unknown };
+      };
+      const id = typeof record.payload?.id === "string"
+        ? record.payload.id
+        : typeof record.payload?.session_id === "string" ? record.payload.session_id : "";
+      if (record.type !== "session_meta" || !id || existingThreadIds.has(id)) continue;
+      try {
+        normalizeCodexSessionProvider(filePath);
+      } catch {
+        failedCount += 1;
+      }
+    }
+  }
+  return failedCount;
+}
+
+function comparableExternalPath(value: string): string {
+  let normalized = value.trim();
+  if (/^\\\\\?\\UNC\\/i.test(normalized)) normalized = `\\\\${normalized.slice(8)}`;
+  else normalized = normalized.replace(/^\\\\\?\\/, "").replace(/^\/\/\?\//, "");
+  normalized = path.normalize(path.resolve(normalized));
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 function copyCodexSession(sourcePath: string, destinationPath: string): void {

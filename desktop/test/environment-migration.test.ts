@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  importClaudeConversations,
+  importCodexConversations,
   migrateCodexSessions,
   normalizeCodexSessionProviders,
   normalizeCodexSessionProvidersOnce,
@@ -40,6 +42,7 @@ test("copies valid Codex conversations without overwriting local sessions", (con
 
   const plan = planCodexSessionMigration(sourceHome, destinationHome);
   assert.equal(plan.sessions.length, 2);
+  assert.equal(plan.skippedCount, 1);
   assert.deepEqual(new Set(plan.sessions.map((session) => session.cwd)), new Set([project]));
 
   const result = migrateCodexSessions(plan);
@@ -60,6 +63,56 @@ test("copies valid Codex conversations without overwriting local sessions", (con
   assert.equal(afterFirstLine(
     fs.readFileSync(path.join(destinationHome, "sessions", "2026", "07", "22", "rollout-active.jsonl")),
   ).equals(afterFirstLine(fs.readFileSync(active))), true);
+});
+
+test("reports Codex conversations skipped by stable thread ID", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-codex-manual-import-"));
+  const sourceHome = path.join(root, "source");
+  const destinationHome = path.join(root, "destination");
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  writeSession(path.join(sourceHome, "sessions", "new.jsonl"), "new-id", root);
+  writeSession(path.join(sourceHome, "sessions", "duplicate.jsonl"), "existing-id", root);
+  writeSession(path.join(destinationHome, "archived_sessions", "elsewhere.jsonl"), "existing-id", root);
+
+  assert.deepEqual(importCodexConversations(sourceHome, destinationHome), {
+    source: "codex",
+    discoveredCount: 2,
+    importedCount: 1,
+    skippedCount: 1,
+    failedCount: 0,
+    projectPaths: [root],
+  });
+});
+
+test("filters Claude sessions already recorded in the destination", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-claude-manual-import-"));
+  const codexHome = path.join(root, "codex-home");
+  const existingSource = path.join(root, "claude", "existing.jsonl");
+  const newSource = path.join(root, "claude", "new.jsonl");
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  writeSession(path.join(codexHome, "sessions", "existing.jsonl"), "imported-existing-id", root);
+  fs.writeFileSync(path.join(codexHome, "external_agent_session_imports.json"), JSON.stringify({
+    records: [{
+      source_path: process.platform === "win32" ? `\\\\?\\${existingSource}` : existingSource,
+      imported_thread_id: "imported-existing-id",
+    }],
+  }), "utf8");
+  const importedPath = path.join(codexHome, "sessions", "new-import.jsonl");
+  const client = new FilteringClaudeMigrationClient(existingSource, newSource, root, importedPath);
+
+  assert.deepEqual(await importClaudeConversations(client, codexHome), {
+    source: "claude",
+    discoveredCount: 2,
+    importedCount: 1,
+    skippedCount: 1,
+    failedCount: 0,
+    projectPaths: [root],
+  });
+  assert.deepEqual(client.importedPaths, [newSource]);
+  const importedMetadata = JSON.parse(fs.readFileSync(importedPath, "utf8").split("\n", 1)[0]!) as {
+    payload: { model_provider: string };
+  };
+  assert.equal(importedMetadata.payload.model_provider, "rhzy_gateway");
 });
 
 test("normalizes imported provider metadata without changing conversation text", (context) => {
@@ -279,6 +332,62 @@ class FakeClaudeMigrationClient extends EventEmitter {
     }
     throw new Error(`Unexpected request: ${method}`);
   }
+}
+
+class FilteringClaudeMigrationClient extends EventEmitter {
+  importedPaths: string[] = [];
+
+  constructor(
+    private readonly existingSource: string,
+    private readonly newSource: string,
+    private readonly projectPath: string,
+    private readonly importedPath: string,
+  ) {
+    super();
+  }
+
+  async start(): Promise<void> {}
+
+  stop(): void {}
+
+  async request<T>(method: string, params?: unknown): Promise<T> {
+    if (method === "externalAgentConfig/detect") {
+      return {
+        items: [{
+          itemType: "SESSIONS",
+          description: "Claude sessions",
+          details: {
+            sessions: [
+              { cwd: this.projectPath, path: this.existingSource, title: "Existing" },
+              { cwd: this.projectPath, path: this.newSource, title: "New" },
+            ],
+          },
+        }],
+      } as T;
+    }
+    if (method === "externalAgentConfig/import") {
+      const request = params as { migrationItems: Array<{ details?: { sessions?: ExternalSession[] } }> };
+      this.importedPaths = request.migrationItems[0]?.details?.sessions?.map((session) => session.path) || [];
+      writeSession(this.importedPath, "new-imported-id", this.projectPath);
+      queueMicrotask(() => this.emit("message", {
+        method: "externalAgentConfig/import/completed",
+        params: {
+          importId: "filtered-import",
+          itemTypeResults: [{
+            itemType: "SESSIONS",
+            successes: [{ itemType: "SESSIONS", cwd: this.projectPath }],
+            failures: [],
+          }],
+        },
+      }));
+      return { importId: "filtered-import" } as T;
+    }
+    throw new Error(`Unexpected request: ${method}`);
+  }
+}
+
+interface ExternalSession {
+  path: string;
 }
 
 function writeSession(filePath: string, id: string, cwd: string, source: unknown = "cli"): void {

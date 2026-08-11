@@ -24,15 +24,19 @@ import { DEFAULT_UPDATE_MANIFEST_URL, UpdateManager, type UpdateAdapter } from "
 import { EncryptedControlPersistence, EncryptedStateFile, type PersistenceStatus } from "./control-persistence";
 import { AppServerClient } from "./app-server";
 import {
+  importClaudeConversations,
+  importCodexConversations,
   normalizeCodexSessionProvidersOnce,
   runFirstLaunchEnvironmentMigrations,
   type EnvironmentMigrationSource,
 } from "./environment-migration";
 import { selectGatewayRoot } from "./gateway-module";
 import { SkillsManager } from "./skills-manager";
+import { showStartupDialog } from "./startup-dialog";
 import {
   bundledCodexExecutable,
   desktopUpdatePlatform,
+  linuxOzonePlatform,
   preferredCodexPath,
   shouldQuitWhenAllWindowsClose,
 } from "./platform/desktop-platform";
@@ -75,6 +79,14 @@ let taskActivityPresenter: WindowTaskActivityPresenter | null = null;
 
 const userDataOverride = process.env.RHZYCODE_USER_DATA_DIR?.trim();
 if (userDataOverride) app.setPath("userData", resolve(userDataOverride));
+
+const remoteDebugPort = process.env.RHZYCODE_DEBUG_PORT?.trim();
+if (remoteDebugPort && /^\d{2,5}$/.test(remoteDebugPort)) {
+  app.commandLine.appendSwitch("remote-debugging-port", remoteDebugPort);
+}
+
+const ozonePlatform = linuxOzonePlatform();
+if (ozonePlatform) app.commandLine.appendSwitch("ozone-platform", ozonePlatform);
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
@@ -152,6 +164,7 @@ function createWindow(): BrowserWindow {
 
 function registerIpc(
   activeRuntime: DesktopRuntime,
+  codexHome: string,
   credentials: ProviderCredentialStore,
   updates: UpdateManager,
   mobileAccess: MobileAccessManager,
@@ -242,6 +255,28 @@ function registerIpc(
     });
     if (result.canceled || !result.filePaths[0]) return null;
     return activeRuntime.restoreProjectConversations(validateLocalFilePath(result.filePaths[0]));
+  });
+  ipcMain.handle("conversation:import-external", async (_event, value: unknown) => {
+    if (value !== "codex" && value !== "claude") {
+      throw new Error("Conversation import source is invalid.");
+    }
+    await startupEnvironmentMigration;
+    const result = value === "codex"
+      ? importCodexConversations(resolveUserCodexHome(), codexHome)
+      : await (async () => {
+          if (activeRuntime.agent.getStatus().state !== "connected") {
+            await activeRuntime.startGatewayAndAgent();
+          }
+          return importClaudeConversations(activeRuntime.agent, codexHome);
+        })();
+    for (const projectPath of result.projectPaths) {
+      try {
+        activeRuntime.rememberProjectDirectory(projectPath);
+      } catch {
+        // Imported conversations remain available if their old project was moved.
+      }
+    }
+    return result;
   });
   ipcMain.handle("agent:turn:start", (_event, params: unknown) =>
     activeRuntime.startTurn(validateStartTurn(params)),
@@ -362,6 +397,33 @@ function registerIpc(
   ipcMain.handle("storage:status", () => getPersistenceStatus());
   ipcMain.handle("clipboard:write", (_event, value: unknown) => {
     clipboard.writeText(validateClipboardText(value));
+  });
+  ipcMain.handle("window:focus-contents", async () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const restoreFocus = () => {
+      // DOM focus alone does not restore the native keyboard/caret target when
+      // a menu or confirmation dialog has just released the renderer window.
+      mainWindow?.focus();
+      mainWindow?.webContents.focus();
+    };
+    restoreFocus();
+    // Electron's synchronous confirmation dialog releases native focus after
+    // its click handler returns. Re-apply it on the following event-loop turn.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    restoreFocus();
+  });
+  ipcMain.on("diagnostic:performance", (_event, event: unknown, detail: unknown) => {
+    if (typeof event !== "string" || !/^[a-z0-9:_-]{1,80}$/i.test(event)) return;
+    const fields = detail && typeof detail === "object" ? detail as Record<string, unknown> : {};
+    const safeDetail = Object.fromEntries(Object.entries(fields).flatMap(([key, value]) => (
+      typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null
+        ? [[key.slice(0, 80), value]]
+        : []
+    )));
+    const logPath = join(codexHome, "logs", "interaction-performance.jsonl");
+    void fs.promises.mkdir(join(codexHome, "logs"), { recursive: true })
+      .then(() => fs.promises.appendFile(logPath, `${JSON.stringify({ at: new Date().toISOString(), event, detail: safeDetail })}\n`))
+      .catch(() => undefined);
   });
 
   ipcMain.handle("sync:status", () => activeRuntime.getSyncStatus());
@@ -582,7 +644,7 @@ async function runStartupEnvironmentMigrations(
     createClaudeClient: () => new AppServerClient(),
     confirm: async (source, count) => {
       const label = migrationSourceLabel(source);
-      const result = await dialog.showMessageBox(window, {
+      const result = await showStartupDialog(window, () => dialog.showMessageBox(window, {
         type: "question",
         title: `迁移 ${label} 对话`,
         message: `检测到 ${count} 个 ${label} 项目对话，是否迁移到 RHZYCODE？`,
@@ -591,7 +653,7 @@ async function runStartupEnvironmentMigrations(
         defaultId: 0,
         cancelId: 1,
         noLink: true,
-      });
+      }));
       return result.response === 0;
     },
     rememberProject: (projectPath) => {
@@ -602,7 +664,7 @@ async function runStartupEnvironmentMigrations(
     },
     onError: async (source, error) => {
       console.error(`[Environment migration:${source}]`, error.message);
-      await dialog.showMessageBox(window, {
+      await showStartupDialog(window, () => dialog.showMessageBox(window, {
         type: "error",
         title: `${migrationSourceLabel(source)} 对话迁移失败`,
         message: `${migrationSourceLabel(source)} 对话未能全部迁移`,
@@ -610,14 +672,17 @@ async function runStartupEnvironmentMigrations(
         buttons: ["确定"],
         defaultId: 0,
         noLink: true,
-      });
+      }));
     },
   });
 }
 
 function useBundledCodexBinary(): void {
   const executable = bundledCodexExecutable();
-  const bundledPath = join(process.resourcesPath, "codex", executable);
+  const bundledPath = [
+    join(process.resourcesPath, "codex", executable),
+    join(process.resourcesPath, "codex", "bin", executable),
+  ].find((candidate) => fs.existsSync(candidate)) || join(process.resourcesPath, "codex", executable);
   const selectedPath = preferredCodexPath(
     bundledPath,
     fs.existsSync(bundledPath),
@@ -720,7 +785,7 @@ app.whenReady().then(async () => {
     systemFetch,
   );
   traceStartup("runtime-created");
-  registerIpc(runtime, credentials, updates, mobileAccess, skillsManager, () => ({
+  registerIpc(runtime, codexHome, credentials, updates, mobileAccess, skillsManager, () => ({
     encryptionAvailable: encryption.isAvailable(),
     controlState: controlPersistence!.getLoadStatus(),
     mobileAccessState: mobileAccessState.getLoadStatus(),
@@ -776,10 +841,11 @@ app.on("before-quit", (event) => {
   if (quitAfterCleanup || !runtime) return;
   event.preventDefault();
   void runtime.stop().finally(() => {
-    controlPersistence?.flush();
-    controlPersistence?.detach();
-    quitAfterCleanup = true;
-    app.quit();
+    void controlPersistence?.flush().finally(() => {
+      controlPersistence?.detach();
+      quitAfterCleanup = true;
+      app.quit();
+    });
   });
 });
 

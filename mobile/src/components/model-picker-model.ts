@@ -19,6 +19,12 @@ export function remoteModelReasoningEfforts(model: RemoteModelOption | null): Re
   return [...new Set(model?.reasoningEfforts || [])].filter((value) => reasoningEffortValues.has(value));
 }
 
+export function preferredRemoteModel(models: RemoteModelOption[], preferredModel: string): string {
+  return models.some((model) => model.model === preferredModel)
+    ? preferredModel
+    : models.find((model) => model.isDefault)?.model || models[0]?.model || "";
+}
+
 export function groupRemoteModels(models: RemoteModelOption[]): RemoteModelGroup[] {
   const groups = new Map<string, RemoteModelGroup & { sourceOrder: number }>();
   for (const [index, model] of models.entries()) {

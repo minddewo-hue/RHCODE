@@ -1,5 +1,5 @@
 import type { AgentEvent, ControlSnapshot, RemoteThreadOpenResult, TimelineItem } from "@rhzycode/protocol";
-import { dedupeTimelineItems, preferTimelineItem } from "@rhzycode/protocol";
+import { dedupeTimelineItems, mergeDuplicateTimelineItems, preferTimelineItem } from "@rhzycode/protocol";
 
 export const emptyControlSnapshot: ControlSnapshot = {
   hosts: [],
@@ -67,29 +67,52 @@ export function mergeControlSnapshot(
   current: ControlSnapshot,
   incoming: ControlSnapshot,
 ): ControlSnapshot {
-  const incomingIsStale = incoming.lastSequence < current.lastSequence;
-  const base = incomingIsStale ? current : incoming;
-  const retainedThreadIds = new Set(base.threads.map((thread) => thread.id));
-  const timeline = new Map(
-    current.timeline
-      .filter((item) => retainedThreadIds.has(item.threadId))
-      .map((item) => [item.id, item]),
+  const streamChanged = Boolean(
+    current.streamId && incoming.streamId && current.streamId !== incoming.streamId,
   );
-  for (const item of incoming.timeline) {
+  if (streamChanged) return normalizeSnapshot(incoming);
+  if (incoming.lastSequence < current.lastSequence) return current;
+
+  const retainedThreadIds = new Set(incoming.threads.map((thread) => thread.id));
+  const incomingTimeline = dedupeTimelineItems(
+    incoming.timeline.filter((item) => retainedThreadIds.has(item.threadId)),
+  );
+  const timeline = new Map(incomingTimeline.map((item) => [timelineIdentity(item), item]));
+
+  // Full thread history is richer than the bounded control snapshot. The server
+  // stream id is the authority boundary; within one stream, retain history that
+  // is absent from the bounded snapshot and collapse matching logical rows.
+  for (const item of current.timeline) {
     if (!retainedThreadIds.has(item.threadId)) continue;
-    const existing = timeline.get(item.id);
-    timeline.set(item.id, existing ? preferTimelineItem(existing, item) : item);
+    const key = timelineIdentity(item);
+    const existing = timeline.get(key);
+    if (existing) timeline.set(key, mergeDuplicateTimelineItems(item, existing));
+    else timeline.set(key, item);
   }
   return {
-    ...base,
+    ...incoming,
     timeline: dedupeTimelineItems([...timeline.values()]),
-    lastSequence: Math.max(current.lastSequence, incoming.lastSequence),
   };
 }
 
+function normalizeSnapshot(snapshot: ControlSnapshot): ControlSnapshot {
+  const threadIds = new Set(snapshot.threads.map((thread) => thread.id));
+  return {
+    ...snapshot,
+    timeline: dedupeTimelineItems(snapshot.timeline.filter((item) => threadIds.has(item.threadId))),
+  };
+}
+
+function timelineIdentity(item: TimelineItem): string {
+  return `${item.threadId}\u0000${item.logicalId || item.id}`;
+}
+
 function upsertTimeline(items: TimelineItem[], value: TimelineItem): TimelineItem[] {
-  return items.some((item) => item.id === value.id)
-    ? items.map((item) => (item.id === value.id ? preferTimelineItem(item, value) : item))
+  const identity = timelineIdentity(value);
+  return items.some((item) => timelineIdentity(item) === identity)
+    ? items.map((item) => (
+      timelineIdentity(item) === identity ? mergeDuplicateTimelineItems(item, value) : item
+    ))
     : [...items, value];
 }
 

@@ -3,6 +3,7 @@ import test from "node:test";
 import type { ControlSnapshot, RemoteTurnStartRequest } from "@rhzycode/protocol";
 import {
   createControlPlane,
+  ControlStore,
   MobileAccessManager,
   type ControlCommandHandlers,
 } from "../../desktop/src/main/control-plane/app";
@@ -29,7 +30,10 @@ test("connects the mobile client to the real desktop control contract", async ()
 
     const descriptor = client.eventSocket(snapshot.lastSequence);
     const socket = new WebSocket(descriptor.url, descriptor.protocols);
+    const syncMessage = waitForSocket(socket, "message");
     await waitForSocket(socket, "open");
+    const sync = client.parseSocketFrame(String((await syncMessage as MessageEvent).data));
+    assert.equal(sync.type, "control.sync");
     const pong = waitForSocket(socket, "message");
     socket.send(JSON.stringify({ type: "control.ping", id: "integration-heartbeat" }));
     assert.deepEqual(JSON.parse(String((await pong as MessageEvent).data)), {
@@ -82,7 +86,10 @@ test("keeps two desktop event streams connected and isolated", async () => {
   const secondSocket = new WebSocket(secondClient.eventSocket(0).url, secondClient.eventSocket(0).protocols);
 
   try {
+    const firstSync = waitForSocket(firstSocket, "message");
+    const secondSync = waitForSocket(secondSocket, "message");
     await Promise.all([waitForSocket(firstSocket, "open"), waitForSocket(secondSocket, "open")]);
+    await Promise.all([firstSync, secondSync]);
     const firstMessage = waitForSocket(firstSocket, "message");
     const secondMessage = waitForSocket(secondSocket, "message");
     firstControl.store.upsertHost(createHost("desktop-one", "Desktop one"));
@@ -174,6 +181,50 @@ test("replays one accepted turn after multiple lost mobile responses without dup
     assert.deepEqual(entries.map((entry) => entry.id), ["timeline:user-mobile-message-loss-1"]);
   } finally {
     await controlPlane.stop();
+  }
+});
+
+test("restores accepted command results after a desktop restart", async () => {
+  const mobileAccess = new MobileAccessManager();
+  const accessKey = mobileAccess.rotateAccessKey().key;
+  let commandCalls = 0;
+  const commands = {
+    async startTurn(threadId: string) {
+      commandCalls += 1;
+      return { threadId, turnId: "turn-persisted", acceptedAt: new Date().toISOString() };
+    },
+  } as Pick<ControlCommandHandlers, "startTurn"> as ControlCommandHandlers;
+  const first = await createControlPlane({ logLevel: "silent", mobileAccess, commands });
+  const request = {
+    method: "POST" as const,
+    url: "/v1/commands/threads/thread-persisted/turns/start",
+    headers: {
+      authorization: `Bearer ${accessKey}`,
+      "idempotency-key": "message-persisted:turn",
+    },
+    payload: { text: "run once", clientMessageId: "message-persisted" },
+  };
+
+  const firstResponse = await first.app.inject(request);
+  assert.equal(firstResponse.statusCode, 202);
+  const persistedState = first.store.exportState();
+  await first.stop();
+
+  const restoredStore = new ControlStore(persistedState);
+  const second = await createControlPlane({
+    logLevel: "silent",
+    mobileAccess,
+    commands,
+    store: restoredStore,
+  });
+  try {
+    const replay = await second.app.inject(request);
+    assert.equal(replay.statusCode, 202);
+    assert.equal(replay.json().turnId, "turn-persisted");
+    assert.equal(commandCalls, 1);
+    assert.equal(restoredStore.clientMessageIdForTurn("turn-persisted"), "message-persisted");
+  } finally {
+    await second.stop();
   }
 });
 

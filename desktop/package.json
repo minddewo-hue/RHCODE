@@ -3,6 +3,8 @@
   "version": "0.1.25",
   "description": "RHZYCODE multi-model coding agent desktop client",
   "author": "RHZYCODE",
+  "homepage": "https://github.com/minddewo-hue/RHCODE",
+  "desktopName": "rhzycode.desktop",
   "private": true,
   "type": "module",
   "main": "./out/main/index.js",
@@ -21,6 +23,8 @@
     "audit:release": "node scripts/release-audit.mjs",
     "pack:win": "npm run build:dependencies && npm run build && node scripts/package-release.mjs --dir",
     "dist:win": "npm run build:dependencies && npm run build && node scripts/package-release.mjs",
+    "pack:linux": "npm run build:dependencies && npm run build && node scripts/package-release.mjs --platform=linux --dir",
+    "dist:linux": "npm run build:dependencies && npm run build && node scripts/package-release.mjs --platform=linux",
     "pack:mac": "npm run build:dependencies && npm run build && node scripts/package-release.mjs --platform=macos --dir",
     "dist:mac": "npm run build:dependencies && npm run build && node scripts/package-release.mjs --platform=macos"
   },

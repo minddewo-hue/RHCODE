@@ -6,6 +6,7 @@ import {
   getSnapshotWithRetry,
   heartbeatPingFrame,
   heartbeatPongId,
+  incomingSequenceAction,
   reconnectDelay,
   runControlCommandWithRetry,
   snapshotRequestTimeoutMs,
@@ -124,6 +125,13 @@ test("grows reconnect backoff across many drops and stays capped", () => {
   for (let index = 1; index < delays.length; index += 1) {
     assert.ok(delays[index]! >= delays[index - 1]!);
   }
+});
+
+test("classifies duplicate, contiguous, and missing event sequences", () => {
+  assert.equal(incomingSequenceAction(12, 12), "duplicate");
+  assert.equal(incomingSequenceAction(12, 9), "duplicate");
+  assert.equal(incomingSequenceAction(12, 13), "apply");
+  assert.equal(incomingSequenceAction(12, 14), "gap");
 });
 
 test("retries transient commands without changing the caller-owned request", async () => {

@@ -141,6 +141,123 @@ test("selects protocol separately for every discovered provider model", async (c
   ]);
 });
 
+test("falls back across protocols for models from a custom provider", async (context) => {
+  const routeCalls = [];
+  const upstream = http.createServer(async (request, response) => {
+    if (request.url === "/v1/models") {
+      writeJson(response, 200, { data: [{ id: "gemma-local" }] });
+      return;
+    }
+    const body = await readJson(request);
+    routeCalls.push({ path: request.url, model: body.model });
+    if (request.url === "/v1/chat/completions") {
+      writeJson(response, 200, { choices: [{ message: { role: "assistant", content: "OK" } }] });
+      return;
+    }
+    writeJson(response, 503, { error: { message: "temporarily unavailable" } });
+  });
+  await new Promise((resolve, reject) => {
+    upstream.once("error", reject);
+    upstream.listen(0, "127.0.0.1", resolve);
+  });
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-custom-protocol-fallback-"));
+  fs.writeFileSync(path.join(root, "gateway.config.json"), JSON.stringify({
+    providers: {
+      custom: {
+        base_url: `http://127.0.0.1:${address.port}/v1`,
+        protocol: "responses",
+        model_discovery: { prefix: "custom/", detect_protocol: true },
+      },
+    },
+    models: { "custom/gemma-local": { provider: "custom", upstream_model: "gemma-local" } },
+  }));
+
+  const gateway = await startEmbeddedGateway({ rootDir: root, port: 0 });
+  context.after(async () => {
+    await gateway.stop();
+    upstream.closeAllConnections();
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const response = await fetch(`${gateway.baseUrl}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "custom/gemma-local", input: "hello" }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(routeCalls.map((call) => call.path), [
+    "/v1/responses",
+    "/v1/chat/completions",
+  ]);
+});
+
+test("falls back to an equivalent discovered model from another provider", async (context) => {
+  const first = await startProtocolUpstream((request, body, response) => {
+    if (request.url === "/v1/models") return writeJson(response, 200, { data: [{ id: "gpt-5.6-luna" }] });
+    writeJson(response, 503, { error: { message: "temporarily unavailable" } });
+  });
+  const second = await startProtocolUpstream((request, body, response) => {
+    if (request.url === "/v1/models") return writeJson(response, 200, { data: [{ id: "gpt-5.6-luna" }] });
+    if (request.url === "/v1/responses") {
+      return writeJson(response, 200, { id: "resp_luna", object: "response", status: "completed", output: [] });
+    }
+    writeJson(response, 404, { error: { message: "not found" } });
+  });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-provider-fallback-"));
+  fs.writeFileSync(path.join(root, "gateway.config.json"), JSON.stringify({
+    providers: {
+      first: { base_url: `${first.baseUrl}/v1`, protocol: "chat_completions", model_discovery: { prefix: "first/", detect_protocol: true } },
+      second: { base_url: `${second.baseUrl}/v1`, protocol: "responses", model_discovery: { prefix: "second/", detect_protocol: true } },
+    },
+    models: {},
+  }));
+  const gateway = await startEmbeddedGateway({ rootDir: root, port: 0 });
+  context.after(async () => {
+    await gateway.stop();
+    await first.stop();
+    await second.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const response = await fetch(`${gateway.baseUrl}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "first/gpt-5.6-luna", input: "hello" }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.ok(first.calls.some((call) => call.path === "/v1/chat/completions"));
+  assert.ok(second.calls.some((call) => call.path === "/v1/responses"));
+});
+
+async function startProtocolUpstream(handle) {
+  const calls = [];
+  const server = http.createServer(async (request, response) => {
+    const body = request.url === "/v1/models" ? null : await readJson(request);
+    calls.push({ path: request.url, model: body?.model });
+    handle(request, body, response);
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    calls,
+    async stop() {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
 async function readJson(request) {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);

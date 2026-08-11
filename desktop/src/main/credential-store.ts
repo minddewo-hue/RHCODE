@@ -233,7 +233,10 @@ export class ProviderCredentialStore {
         model_discovery: {
           prefix: `${providerId}/`,
           owned_by: provider.name,
-          detect_protocol: provider.protocol === "auto",
+          // Custom endpoints often expose a mixed model catalog. Keep the
+          // selected protocol first, then let the gateway fall back to the
+          // other supported OpenAI-compatible protocols per model.
+          detect_protocol: true,
         },
       };
       delete runtime.providers[providerId].path;

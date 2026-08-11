@@ -264,6 +264,12 @@ export function storedSelectedModel(): string {
   return localStorage.getItem("rhzycode.selectedModel") || "";
 }
 
+export function preferredModelFromCatalog(models: ModelOption[], preferredModel: string): string {
+  return models.some((model) => model.model === preferredModel)
+    ? preferredModel
+    : models.find((model) => model.isDefault)?.model || models[0]?.model || "";
+}
+
 const reasoningEffortValues: ReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 export function modelReasoningEfforts(model: ModelOption | undefined): ReasoningEffort[] {

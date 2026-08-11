@@ -300,6 +300,17 @@ export interface ConversationRestoreResult {
   projectPaths: string[];
 }
 
+export type ExternalConversationImportSource = "codex" | "claude";
+
+export interface ExternalConversationImportResult {
+  source: ExternalConversationImportSource;
+  discoveredCount: number;
+  importedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  projectPaths: string[];
+}
+
 export interface ConversationExportItem {
   threadId: string;
   projectPath: string;
@@ -343,6 +354,7 @@ export interface RhzycodeDesktopApi {
   listExportConversations(): Promise<ConversationExportItem[]>;
   exportConversations(threadIds: string[]): Promise<ConversationBackupResult | null>;
   restoreProjectConversations(): Promise<ConversationRestoreResult | null>;
+  importExternalConversations(source: ExternalConversationImportSource): Promise<ExternalConversationImportResult>;
   startTurn(params: StartTurnParams): Promise<TurnStartResult>;
   interruptTurn(threadId: string): Promise<unknown>;
   getGatewayStatus(): Promise<GatewayStatus>;
@@ -366,6 +378,8 @@ export interface RhzycodeDesktopApi {
   getMobileAccessStatus(): Promise<MobileAccessStatus>;
   rotateMobileAccessKey(): Promise<NonNullable<MobileAccessStatus["accessKey"]>>;
   copyText(value: string): Promise<void>;
+  focusWindowContents(): Promise<void>;
+  recordPerformanceTrace(event: string, detail?: Record<string, string | number | boolean | null>): void;
   getPersistenceStatus(): Promise<PersistenceStatus>;
   getSyncStatus(): Promise<SyncStatus>;
   getSyncSnapshot(): Promise<RendererBootstrapState>;

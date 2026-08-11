@@ -48,7 +48,7 @@ export async function detectLlmProtocol(
   fetcher: typeof fetch = fetch,
 ): Promise<LlmProtocolDetection> {
   const normalized = normalizeLlmBaseUrl(input.baseUrl);
-  if (input.protocol !== "auto") {
+  if (input.protocol !== "auto" && normalized.hintedProtocol === input.protocol) {
     return {
       baseUrl: normalized.baseUrl,
       protocol: input.protocol,
@@ -59,10 +59,15 @@ export async function detectLlmProtocol(
   const baseUrls = [normalized.baseUrl];
   const parsed = new URL(normalized.baseUrl);
   if (!parsed.pathname || parsed.pathname === "/") baseUrls.push(`${normalized.baseUrl}/v1`);
-  const priority: LlmProtocol[] = ["responses", "chat_completions", "anthropic_messages"];
+  const priority: LlmProtocol[] = input.protocol === "auto"
+    ? ["responses", "chat_completions", "anthropic_messages"]
+    : [input.protocol];
   if (normalized.hintedProtocol) {
-    priority.splice(priority.indexOf(normalized.hintedProtocol), 1);
-    priority.unshift(normalized.hintedProtocol);
+    const hintedIndex = priority.indexOf(normalized.hintedProtocol);
+    if (hintedIndex >= 0) {
+      priority.splice(hintedIndex, 1);
+      priority.unshift(normalized.hintedProtocol);
+    }
   }
 
   const failures: string[] = [];
@@ -80,7 +85,11 @@ export async function detectLlmProtocol(
           signal: controller.signal,
         });
         const responseText = await response.text().catch(() => "");
-        if (isSupportedEndpoint(response.status, responseText)) {
+        if (isSupportedEndpoint(
+          response.status,
+          responseText,
+          response.headers.get("content-type") || "",
+        )) {
           return { baseUrl, protocol, endpoint };
         }
         failures.push(`${protocol}: HTTP ${response.status}`);
@@ -132,7 +141,17 @@ function protocolProbeBody(protocol: LlmProtocol): Record<string, unknown> {
   };
 }
 
-function isSupportedEndpoint(status: number, body: string): boolean {
+function isSupportedEndpoint(status: number, body: string, contentType: string): boolean {
+  if (/text\/html/i.test(contentType)) return false;
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+
   if ([400, 402, 403, 409, 422, 429].includes(status)) return true;
   if (status >= 200 && status < 400) return true;
   if (status === 404) return /model|model_not_found|not_found_error/i.test(body);

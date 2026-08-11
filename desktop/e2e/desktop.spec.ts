@@ -72,6 +72,7 @@ test.beforeAll(async () => {
       RHZYCODE_CODEX_HOME: path.join(dataDir, "codex-home"),
       RHZYCODE_GATEWAY_HOME: path.join(workspaceDir, "desktop"),
       RHZYCODE_SKIP_ENVIRONMENT_MIGRATION: "1",
+      RHZYCODE_OZONE_PLATFORM: process.platform === "linux" ? "x11" : "",
       SUB2API_API_KEY: "",
     },
     timeout: 30_000,
@@ -121,7 +122,7 @@ test("shows a complete empty state on a fresh install", async () => {
   await expect(page.locator(".settings-view input, .settings-view select, .settings-view textarea")).toHaveCount(0);
   await expect(page.getByText("Not generated", { exact: true })).toBeVisible();
   await expect(page.locator(".connection-field > div")).toHaveCSS("border-top-style", "none");
-  await expect(page.locator(".connection-field > div")).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(page.locator(".connection-field > div")).toHaveCSS("background-color", "rgb(29, 37, 55)");
   await expect(page.getByRole("button", { name: "Generate key", exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Add provider" }).click();
@@ -194,9 +195,12 @@ test("keeps the composer keyboard-editable across focus transitions", async () =
       await focusWindow.loadURL("data:text/html,<title>Focus handoff</title>");
       focusWindow.focus();
       await new Promise((resolve) => setTimeout(resolve, 100));
+      focusWindow.close();
+      mainWindow?.show();
       mainWindow?.focus();
       mainWindow?.webContents.focus();
-      focusWindow.close();
+      if (process.platform === "linux" && !mainWindow?.isFocused()) mainWindow?.emit("focus");
+      await new Promise((resolve) => setTimeout(resolve, 100));
     });
     await typeAndClearFocusedComposer(page, taskPrompt, "Typed after window reactivation");
   });
@@ -551,20 +555,13 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await expect(getThreadRow(page, "Renamed UI thread").locator(".thread-state")).toHaveClass(/completed/);
   const interruptsBeforeCompletedDelete = await ipcCalls(electronApp, "agent:turn:interrupt").then((calls) => calls.length);
   await openThreadActions(page, "Renamed UI thread");
-  await Promise.all([
-    page.waitForEvent("dialog").then((dialog) => {
-      expect(dialog.message()).toContain("Renamed UI thread");
-      return dialog.dismiss();
-    }),
-    page.getByRole("menuitem", { name: "Delete task permanently" }).click(),
-  ]);
+  await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+  await expect(page.getByRole("dialog", { name: "Delete conversation" })).toBeVisible();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(getThreadRow(page, "Renamed UI thread")).toBeVisible();
   await openThreadActions(page, "Renamed UI thread");
-  page.once("dialog", async (dialog) => {
-    expect(dialog.message()).toContain("Renamed UI thread");
-    await dialog.accept();
-  });
   await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+  await confirmThreadDeletion(page);
   await expect(getThreadRow(page, "Renamed UI thread")).toBeHidden();
   await expect.poll(() => ipcCalls(electronApp, "agent:turn:interrupt").then((calls) => calls.length)).toBe(interruptsBeforeCompletedDelete);
 
@@ -946,7 +943,9 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await page.getByRole("button", { name: "Import or export conversations" }).click();
   const transferDialog = page.getByRole("dialog", { name: "Import / Export" });
   await expect(transferDialog).toBeVisible();
-  await transferDialog.getByRole("button", { name: /^Import/ }).click();
+  await expect(transferDialog.getByRole("button", { name: /^Import from Codex/ })).toBeVisible();
+  await expect(transferDialog.getByRole("button", { name: /^Import from Claude/ })).toBeVisible();
+  await transferDialog.getByRole("button", { name: /^Import backup/ }).click();
   await expect.poll(() => ipcCalls(electronApp, "conversation:restore").then((calls) => calls.length)).toBe(1);
   await expect(transferDialog.getByText("1 restored, 0 already present", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Close Import / Export" }).click();
@@ -1190,8 +1189,8 @@ test("keeps the selected conversation and draft when deletion finishes late", as
   await setThreadDeleteDelay(electronApp, 750);
   try {
     await openThreadActions(page, sourceTitle);
-    page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+    await confirmThreadDeletion(page);
     await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete").then((calls) => calls.at(-1)?.args))
       .toEqual([sourceThreadId]);
 
@@ -1218,6 +1217,67 @@ test("keeps the selected conversation and draft when deletion finishes late", as
   }
 });
 
+test("keeps the composer usable while deleting and switching conversations repeatedly", async () => {
+  const titles = {
+    source: "Delete switch source",
+    firstTarget: "Delete switch first target",
+    secondSource: "Delete switch second source",
+    finalTarget: "Delete switch final target",
+  };
+  const threadIds = await page.evaluate(async ({ cwd, threadTitles }) => {
+    const ids: Record<string, string> = {};
+    for (const [key, title] of Object.entries(threadTitles)) {
+      const result = await window.rhzycode.startThread({ cwd });
+      await window.rhzycode.renameThread(result.thread.id, title);
+      ids[key] = result.thread.id;
+    }
+    return ids;
+  }, { cwd: projectDir, threadTitles: titles });
+
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  await getThreadRow(page, titles.source).click();
+  await expect(getThreadRow(page, titles.source).locator("..")).toHaveClass(/active/);
+
+  await setThreadDeleteDelay(electronApp, 1_000);
+  try {
+    await openThreadActions(page, titles.source);
+    await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+    await confirmThreadDeletion(page);
+    await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete").then((calls) => calls.at(-1)?.args))
+      .toEqual([threadIds.source]);
+    await expect(getThreadRow(page, titles.source)).toHaveCount(0);
+
+    await getThreadRow(page, titles.firstTarget).click();
+    const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
+    await expect(taskPrompt).toBeFocused();
+    await page.keyboard.type("Draft after first delete and switch. ");
+
+    await openThreadActions(page, titles.secondSource);
+    await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+    await confirmThreadDeletion(page);
+    await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete").then((calls) => calls.at(-1)?.args))
+      .toEqual([threadIds.secondSource]);
+    await expect(getThreadRow(page, titles.secondSource)).toHaveCount(0);
+
+    await getThreadRow(page, titles.finalTarget).click();
+    await expect(taskPrompt).toBeFocused();
+    await page.keyboard.type("Draft after second delete and switch.");
+    await expect(taskPrompt).toHaveValue("Draft after second delete and switch.");
+
+    await getThreadRow(page, titles.firstTarget).click();
+    await expect(taskPrompt).toBeFocused();
+    await expect(taskPrompt).toHaveValue("Draft after first delete and switch. ");
+
+    await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete:completed").then((calls) => calls.length))
+      .toBeGreaterThanOrEqual(2);
+    await expect(getThreadRow(page, titles.firstTarget).locator("..")).toHaveClass(/active/);
+    await expect(taskPrompt).toBeFocused();
+    await expect(taskPrompt).toHaveValue("Draft after first delete and switch. ");
+  } finally {
+    await setThreadDeleteDelay(electronApp, 0);
+  }
+});
+
 test("keeps the composer editable when deleting the current conversation slowly", async () => {
   const sourceTitle = "Slow current deletion";
   const sourceThreadId = await page.evaluate(async ({ cwd, title }) => {
@@ -1234,8 +1294,8 @@ test("keeps the composer editable when deleting the current conversation slowly"
   await setThreadDeleteDelay(electronApp, 750);
   try {
     await openThreadActions(page, sourceTitle);
-    page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+    await confirmThreadDeletion(page);
     await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete").then((calls) => calls.at(-1)?.args))
       .toEqual([sourceThreadId]);
 
@@ -1248,6 +1308,44 @@ test("keeps the composer editable when deleting the current conversation slowly"
       .then((calls) => calls.at(-1)?.args)).toEqual([sourceThreadId]);
     await expect(getThreadRow(page, sourceTitle)).toHaveCount(0);
     await expect(taskPrompt).toHaveValue("Draft entered while deleting the current conversation");
+    await expect(taskPrompt).toBeFocused();
+  } finally {
+    await setThreadDeleteDelay(electronApp, 0);
+  }
+});
+
+test("keeps model selection and composer input usable after deleting the current conversation", async () => {
+  const sourceTitle = "Delete then change model";
+  const sourceThreadId = await page.evaluate(async ({ cwd, title }) => {
+    const source = await window.rhzycode.startThread({ cwd });
+    await window.rhzycode.renameThread(source.thread.id, title);
+    return source.thread.id;
+  }, { cwd: projectDir, title: sourceTitle });
+
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  await expect(getThreadRow(page, sourceTitle)).toBeVisible();
+  await getThreadRow(page, sourceTitle).click();
+
+  await setThreadDeleteDelay(electronApp, 750);
+  try {
+    await openThreadActions(page, sourceTitle);
+    await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+    await confirmThreadDeletion(page);
+    await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete").then((calls) => calls.at(-1)?.args))
+      .toEqual([sourceThreadId]);
+
+    const modelSelect = page.getByRole("combobox", { name: "Model for next turn" });
+    await modelSelect.selectOption("ui/second");
+    await expect(modelSelect).toHaveValue("ui/second");
+
+    const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
+    await taskPrompt.fill("Draft after deleting and changing models");
+    await expect(taskPrompt).toHaveValue("Draft after deleting and changing models");
+    await expect(taskPrompt).toBeFocused();
+
+    await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete:completed")
+      .then((calls) => calls.at(-1)?.args)).toEqual([sourceThreadId]);
+    await expect(modelSelect).toHaveValue("ui/second");
     await expect(taskPrompt).toBeFocused();
   } finally {
     await setThreadDeleteDelay(electronApp, 0);
@@ -1277,15 +1375,15 @@ test("restores composer focus after deleting another conversation", async () => 
   try {
     await openThreadActions(page, sourceTitle);
     await expect(taskPrompt).toBeFocused();
-    page.once("dialog", (dialog) => dialog.dismiss());
     await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(taskPrompt).toBeFocused();
     await expect(getThreadRow(page, sourceTitle)).toBeVisible();
 
     await openThreadActions(page, sourceTitle);
     await expect(taskPrompt).toBeFocused();
-    page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+    await confirmThreadDeletion(page);
     await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete").then((calls) => calls.at(-1)?.args))
       .toEqual([sourceThreadId]);
 
@@ -1324,8 +1422,8 @@ test("restores composer focus after consecutive conversation deletions settle", 
   try {
     for (let index = 0; index < titles.length; index += 1) {
       await openThreadActions(page, titles[index]);
-      page.once("dialog", (dialog) => dialog.accept());
       await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
+      await confirmThreadDeletion(page);
       await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete").then((calls) => calls.at(-1)?.args))
         .toEqual([threadIds[index]]);
     }
@@ -1415,6 +1513,34 @@ test("shows an assistant reply delivered only as a completed item", async () => 
   });
 
   await expect(page.getByText("This reply arrived without streaming deltas.", { exact: true })).toBeVisible();
+});
+
+test("uses the last manually selected model for a new task", async () => {
+  const titles = {
+    preferred: "Manual model preference",
+    other: "Different history model",
+  };
+  await page.evaluate(async ({ cwd, titles: threadTitles }) => {
+    const preferred = await window.rhzycode.startThread({ cwd, model: "ui/model" });
+    const other = await window.rhzycode.startThread({ cwd, model: "ui/model" });
+    await window.rhzycode.renameThread(preferred.thread.id, threadTitles.preferred);
+    await window.rhzycode.renameThread(other.thread.id, threadTitles.other);
+  }, { cwd: projectDir, titles });
+
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  await getThreadRow(page, titles.preferred).click();
+  const modelSelect = page.getByRole("combobox", { name: "Model for next turn" });
+  await modelSelect.selectOption("ui/second");
+  await expect(modelSelect).toHaveValue("ui/second");
+
+  await getThreadRow(page, titles.other).click();
+  await expect(modelSelect).toHaveValue("ui/model");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("rhzycode.selectedModel")))
+    .toBe("ui/second");
+
+  await clickSelectedProjectNewTask(page);
+  await expect(page.getByText("Start a new task", { exact: true })).toBeVisible();
+  await expect(modelSelect).toHaveValue("ui/second");
 });
 
 async function pasteImage(prompt: ReturnType<Page["getByRole"]>, name: string): Promise<void> {
@@ -1577,6 +1703,10 @@ async function openThreadActions(activePage: Page, title: string): Promise<void>
   const wrapper = getThreadRow(activePage, title).locator("..");
   await wrapper.hover();
   await wrapper.getByRole("button", { name: `Thread actions for ${title}` }).click();
+}
+
+async function confirmThreadDeletion(activePage: Page): Promise<void> {
+  await activePage.getByRole("button", { name: "Permanently delete conversation" }).click();
 }
 
 function getThreadRow(activePage: Page, title: string) {

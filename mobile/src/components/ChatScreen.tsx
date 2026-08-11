@@ -38,6 +38,7 @@ import { retryGeneratedImageDownload } from "../api/generated-image-retry";
 import { colors } from "../ui/theme";
 import { TaskMenu } from "./TaskMenu";
 import {
+  assistantDisplayContent,
   buildChatEntries,
   composerInteractionState,
   conversationPageSwipeDirection,
@@ -60,7 +61,6 @@ interface ChatScreenProps {
   pendingMessages: PendingMessage[];
   connectionStatus: ConnectionStatus;
   connectionNotice: string | null;
-  refreshing: boolean;
   historyLoading: boolean;
   resolveGeneratedImage: (imageId: string) => AuthenticatedImageSource | null;
   resolveManagedImage: (fileId: string) => AuthenticatedImageSource | null;
@@ -88,7 +88,7 @@ interface ChatScreenProps {
   reasoningEfforts: RemoteReasoningEffort[];
   sandboxMode: RemoteSandboxMode;
   onNoticePress: () => void;
-  onRefresh: () => void;
+  onRefresh: () => Promise<void>;
   onDraftChange: (value: string) => void;
   onSend: () => void;
   onAttach: (source: "camera" | "library" | "file") => void;
@@ -516,6 +516,7 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
 }) {
   const listRef = activePage === "result" ? resultListRef : activityListRef;
   const [visibleCount, setVisibleCount] = useState(10);
+  const [pullRefreshing, setPullRefreshing] = useState(false);
   const didInitialScroll = useRef(false);
   const loadingOlder = useRef(false);
   const nearBottom = useRef(true);
@@ -526,6 +527,15 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
     requestAnimationFrame(() => {
       requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated }));
     });
+  };
+
+  const refreshFromPull = async () => {
+    setPullRefreshing(true);
+    try {
+      await props.onRefresh();
+    } finally {
+      setPullRefreshing(false);
+    }
   };
 
   useEffect(() => {
@@ -551,7 +561,7 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
       keyboardShouldPersistTaps="handled"
       contentContainerStyle={visibleEntries.length ? styles.listContent : styles.emptyListContent}
       refreshControl={(
-        <RefreshControl refreshing={props.refreshing} onRefresh={props.onRefresh} tintColor={colors.ink} />
+        <RefreshControl refreshing={pullRefreshing} onRefresh={refreshFromPull} tintColor={colors.ink} />
       )}
       ListEmptyComponent={<EmptyConversation hasThread={hasThread} loading={props.historyLoading} page={activePage} />}
       onContentSizeChange={() => {
@@ -725,10 +735,11 @@ function TimelineRow({ item, onDownloadGeneratedImage, onOpenFile, onShareGenera
     );
   }
   if (item.kind === "assistant") {
+    const content = assistantDisplayContent(item);
     return (
       <View style={styles.assistantRow}>
-        {!!(item.content || item.title) && (
-          <Text selectable style={styles.assistantText}>{item.content || item.title}</Text>
+        {!!content && (
+          <Text selectable style={styles.assistantText}>{content}</Text>
         )}
         {!!images.length && (
           <View style={styles.generatedImages}>
@@ -742,7 +753,6 @@ function TimelineRow({ item, onDownloadGeneratedImage, onOpenFile, onShareGenera
           </View>
         )}
         {!!regularFiles.length && <TimelineFiles files={regularFiles} onOpenFile={onOpenFile} />}
-        {item.status === "running" && <ActivityIndicator color={colors.inkMuted} size="small" style={styles.inlineSpinner} />}
         <TimelineImagePreview
           image={previewImage}
           onClose={() => setPreviewImage(null)}

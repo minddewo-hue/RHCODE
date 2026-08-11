@@ -28,8 +28,9 @@ export function sanitizeResponsesRequestBody(body, options = {}) {
     return { body, strippedCount: 0, strippedBytes: 0 };
   }
 
-  const input = sanitizeValue(body.input, maxInlineBinaryChars, stats);
-  if (stats.strippedCount === 0) {
+  const sanitizedInput = sanitizeValue(body.input, maxInlineBinaryChars, stats);
+  const input = moveSystemMessagesToFront(sanitizedInput);
+  if (stats.strippedCount === 0 && input === body.input) {
     return { body, strippedCount: 0, strippedBytes: 0 };
   }
 
@@ -38,6 +39,22 @@ export function sanitizeResponsesRequestBody(body, options = {}) {
     strippedCount: stats.strippedCount,
     strippedBytes: stats.strippedBytes,
   };
+}
+
+function moveSystemMessagesToFront(input) {
+  if (!Array.isArray(input)) return input;
+
+  const system = [];
+  const remaining = [];
+  for (const item of input) {
+    if (item?.type === "message" && (item.role === "system" || item.role === "developer")) {
+      system.push(item);
+    } else {
+      remaining.push(item);
+    }
+  }
+  if (system.length === 0 || system[0] === input[0] && system.length === 1) return input;
+  return [...system, ...remaining];
 }
 
 function sanitizeValue(value, maxInlineBinaryChars, stats) {

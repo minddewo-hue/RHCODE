@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   SecureSessionStore,
   mobileNavigationKey,
+  pendingCommandKey,
   secureConnectionKey,
   secureSessionKeys,
   type SecureStorageAdapter,
@@ -84,12 +85,14 @@ test("persists the last project and thread separately for each computer", async 
     threadId: "thread-first",
     newThreadDraft: false,
     collapsedProjectPaths: ["D:\\work\\first", "D:\\work\\shared"],
+    preferredModel: "provider/model-first",
   });
   await sessions.saveNavigation("computer-2", {
     projectPath: "D:\\work\\second",
     threadId: null,
     newThreadDraft: true,
     collapsedProjectPaths: ["D:\\work\\second"],
+    preferredModel: "provider/model-second",
   });
 
   const restored = new SecureSessionStore(storage);
@@ -98,12 +101,14 @@ test("persists the last project and thread separately for each computer", async 
     threadId: "thread-first",
     newThreadDraft: false,
     collapsedProjectPaths: ["D:\\work\\first", "D:\\work\\shared"],
+    preferredModel: "provider/model-first",
   });
   assert.deepEqual(await restored.loadNavigation("computer-2"), {
     projectPath: "D:\\work\\second",
     threadId: null,
     newThreadDraft: true,
     collapsedProjectPaths: ["D:\\work\\second"],
+    preferredModel: "provider/model-second",
   });
 });
 
@@ -120,7 +125,29 @@ test("loads older navigation and filters malformed collapsed project paths", asy
   const sessions = new SecureSessionStore(storage);
 
   assert.deepEqual((await sessions.loadNavigation("computer-old")).collapsedProjectPaths, []);
+  assert.equal((await sessions.loadNavigation("computer-old")).preferredModel, null);
   assert.deepEqual((await sessions.loadNavigation("computer-malformed")).collapsedProjectPaths, ["D:\\work\\valid"]);
+});
+
+test("persists only compact command receipts for restart-safe idempotency", async () => {
+  const storage = new MemoryStorage();
+  const sessions = new SecureSessionStore(storage);
+  await sessions.savePendingCommands("computer-1", [{
+    id: "message-request-1",
+    context: "thread:thread-1",
+    fingerprint: "a".repeat(64),
+    createdAt: new Date().toISOString(),
+    state: "uncertain",
+  }]);
+
+  assert.deepEqual(await new SecureSessionStore(storage).loadPendingCommands("computer-1"), [{
+    id: "message-request-1",
+    context: "thread:thread-1",
+    fingerprint: "a".repeat(64),
+    createdAt: JSON.parse(storage.values.get(pendingCommandKey("computer-1"))!)[0].createdAt,
+    state: "uncertain",
+  }]);
+  assert.equal(storage.values.get(pendingCommandKey("computer-1"))?.includes("message body"), false);
 });
 
 test("clears or removes only the selected computer", async () => {
@@ -135,7 +162,15 @@ test("clears or removes only the selected computer", async () => {
     threadId: "thread-2",
     newThreadDraft: false,
     collapsedProjectPaths: ["D:\\work"],
+    preferredModel: "provider/model-second",
   });
+  await sessions.savePendingCommands(secondId, [{
+    id: "message-request-2",
+    context: "thread:thread-2",
+    fingerprint: "b".repeat(64),
+    createdAt: new Date().toISOString(),
+    state: "accepted",
+  }]);
 
   const cleared = await sessions.clearAccessKey(firstId);
   assert.equal(cleared.connections.find((item) => item.id === firstId)?.accessKey, "");
@@ -146,6 +181,7 @@ test("clears or removes only the selected computer", async () => {
   assert.equal(removed.activeConnectionId, firstId);
   assert.equal(storage.values.has(secureConnectionKey(secondId)), false);
   assert.equal(storage.values.has(mobileNavigationKey(secondId)), false);
+  assert.equal(storage.values.has(pendingCommandKey(secondId)), false);
 });
 
 test("rejects connection metadata from obsolete direct-endpoint versions", async () => {

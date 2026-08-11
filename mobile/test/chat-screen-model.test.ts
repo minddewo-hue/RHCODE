@@ -6,6 +6,7 @@ import {
   type TimelineItem,
 } from "@rhzycode/protocol";
 import {
+  assistantDisplayContent,
   buildChatEntries,
   claimPendingTimelineMatches,
   composerInteractionState,
@@ -65,6 +66,24 @@ test("parses Codex composer commands without intercepting escaped or multiline p
     codexComposerCommandPrompt(parseCodexComposerCommand("/review security")!) || "",
     /Additional request: security/,
   );
+});
+
+test("hides separator-only assistant noise while a reply is running", () => {
+  assert.equal(assistantDisplayContent({
+    status: "running",
+    title: "RHZYCODE",
+    content: "----------------\n----------------\n----------------",
+  }), "");
+  assert.equal(assistantDisplayContent({
+    status: "running",
+    title: "RHZYCODE",
+    content: "----------------\nUseful reply",
+  }), "----------------\nUseful reply");
+  assert.equal(assistantDisplayContent({
+    status: "completed",
+    title: "RHZYCODE",
+    content: "----------------\n----------------\n----------------",
+  }), "----------------\n----------------\n----------------");
 });
 
 test("loads history only while an existing selected thread is opening", () => {

@@ -133,6 +133,7 @@ test("merges custom providers into a runtime config and preserves encrypted keys
   const runtime = JSON.parse(fs.readFileSync(store.getRuntimeConfigPath(), "utf8"));
   assert.equal(runtime.providers.claude.protocol, "anthropic_messages");
   assert.equal(runtime.providers.claude.base_url, "https://claude.example/v1");
+  assert.equal(runtime.providers.claude.model_discovery.detect_protocol, true);
   assert.equal(runtime.models["claude/claude-sonnet-test"].upstream_model, "claude-sonnet-test");
   assert.doesNotMatch(fs.readFileSync(storagePath, "utf8"), /claude-secret/);
   assert.equal(store.status().providers.find((provider) => provider.providerId === "claude")?.custom, true);

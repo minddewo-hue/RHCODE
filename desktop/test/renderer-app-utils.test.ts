@@ -16,6 +16,7 @@ import {
   mergeStreamingMessageDeltas,
   modelReasoningEfforts,
   notificationThreadId,
+  preferredModelFromCatalog,
   providerCredentialPresentation,
   providerDisplayName,
   reconcileProjectRegistry,
@@ -292,6 +293,33 @@ test("groups models by source and naturally sorts versions within each source", 
     { source: "Sub2API", models: ["gpt-5.4", "gpt-5.4-mini"] },
     { source: "Domestic", models: ["minimax-m2.1", "minimax-m2.7", "minimax-m3"] },
   ]);
+});
+
+test("uses the last available manual model as the next task default", () => {
+  const models = [
+    {
+      id: "provider/default",
+      model: "provider/default",
+      displayName: "Default",
+      description: "Default model",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: [],
+      isDefault: true,
+    },
+    {
+      id: "provider/manual",
+      model: "provider/manual",
+      displayName: "Manual",
+      description: "Manually selected model",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: [],
+      isDefault: false,
+    },
+  ];
+
+  assert.equal(preferredModelFromCatalog(models, "provider/manual"), "provider/manual");
+  assert.equal(preferredModelFromCatalog(models, "provider/removed"), "provider/default");
+  assert.equal(preferredModelFromCatalog([], "provider/manual"), "");
 });
 
 test("uses the configured provider name consistently", () => {

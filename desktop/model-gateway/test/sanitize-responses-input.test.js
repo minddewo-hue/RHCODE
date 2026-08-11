@@ -52,6 +52,26 @@ test("leaves small non-binary image_generation results alone", () => {
   assert.equal(sanitized.body, body);
 });
 
+test("moves Responses system and developer messages before conversation history", () => {
+  const body = {
+    model: "native/model",
+    input: [
+      { type: "message", role: "user", content: "Earlier user message" },
+      { type: "function_call", call_id: "call_1", name: "tool", arguments: "{}" },
+      { type: "message", role: "developer", content: "Developer instructions" },
+      { type: "message", role: "system", content: "System instructions" },
+      { type: "message", role: "user", content: "Current user message" },
+    ],
+  };
+
+  const sanitized = sanitizeResponsesRequestBody(body);
+  assert.deepEqual(
+    sanitized.body.input.map((item) => item.role || item.type),
+    ["developer", "system", "user", "function_call", "user"],
+  );
+  assert.equal(body.input[0].role, "user");
+});
+
 test("chat adapter converts image_generation_call without dumping base64", () => {
   const chat = responsesToChatRequest(
     {
@@ -91,4 +111,41 @@ test("chat adapter combines developer messages into the leading system message",
     { role: "user", content: "First task" },
     { role: "user", content: "Second task" },
   ]);
+});
+
+test("chat adapter preserves truncated historical tool arguments as valid JSON", () => {
+  const chat = responsesToChatRequest(
+    {
+      input: [
+        {
+          type: "function_call",
+          call_id: "call_truncated",
+          name: "shell_command",
+          arguments: '{"command":"Get-Content ',
+        },
+        {
+          type: "function_call_output",
+          call_id: "call_truncated",
+          output: "failed to parse function arguments",
+        },
+      ],
+    },
+    "chat-upstream",
+  );
+
+  const toolCall = chat.messages[0].tool_calls[0];
+  assert.deepEqual(JSON.parse(toolCall.function.arguments), {
+    _rhzy_incomplete_arguments: '{"command":"Get-Content ',
+  });
+  assert.equal(chat.messages[1].tool_call_id, "call_truncated");
+});
+
+test("chat adapter omits tool_choice when no Chat Completions tools are available", () => {
+  const chat = responsesToChatRequest(
+    { input: "Continue the task.", tool_choice: "auto" },
+    "test-model",
+  );
+
+  assert.equal(chat.tools, undefined);
+  assert.equal(chat.tool_choice, undefined);
 });

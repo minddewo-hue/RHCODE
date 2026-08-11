@@ -52,6 +52,7 @@ import type {
   ApprovalPolicy,
   ComposerAttachment,
   ConversationExportItem,
+  ExternalConversationImportSource,
   CredentialStatus,
   GatewayStatus,
   LlmProviderConfigurationInput,
@@ -71,8 +72,12 @@ import type {
 import { turnScopedItemId } from "../../shared/item-identity";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as XtermTerminal } from "@xterm/xterm";
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent } from "react";
 import "@xterm/xterm/css/xterm.css";
+import { AppModal } from "./components/AppModal";
+import { DeleteConversationDialog } from "./components/DeleteConversationDialog";
+import { useComposerFocus } from "./hooks/useComposerFocus";
+import { useInteractionTrace } from "./hooks/useInteractionTrace";
 import {
   activityFromTimeline,
   activityLabel,
@@ -94,6 +99,7 @@ import {
   mergeStreamingMessageDeltas,
   modelReasoningEfforts,
   notificationThreadId,
+  preferredModelFromCatalog,
   providerDisplayName,
   providerCredentialPresentation,
   reconcileProjectRegistry,
@@ -255,7 +261,6 @@ export function App() {
   const [userInputs, setUserInputs] = useState<UserInputRequest[]>([]);
   const [resolvingUserInputId, setResolvingUserInputId] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
-  const [composerFocusRequest, setComposerFocusRequest] = useState(0);
   const [recentProjects, setRecentProjects] = useState<string[]>(() => storedRecentProjects());
   const [forgottenProjectPaths, setForgottenProjectPaths] = useState<string[]>(() => storedForgottenProjects());
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
@@ -278,16 +283,16 @@ export function App() {
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [primaryView, setPrimaryView] = useState<"workspace" | "terminal">("workspace");
   const [dialogView, setDialogView] = useState<AppDialogView | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState<{ threadId: string; title: string } | null>(null);
   const [exportItems, setExportItems] = useState<ConversationExportItem[]>([]);
   const [selectedExportThreadIds, setSelectedExportThreadIds] = useState<Set<string>>(() => new Set());
   const [exportLoading, setExportLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
-  const [importing, setImporting] = useState(false);
+  const [importingSource, setImportingSource] = useState<"backup" | ExternalConversationImportSource | null>(null);
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const threadActionsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const conversationRef = useRef<HTMLElement | null>(null);
-  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const composerValueRef = useRef(composer);
   const attachmentsRef = useRef(attachments);
   const bootstrapStartedRef = useRef(false);
@@ -296,6 +301,7 @@ export function App() {
   const threadSearchRef = useRef<HTMLInputElement | null>(null);
   const modelSelectRef = useRef<HTMLSelectElement | null>(null);
   const selectedModelRef = useRef(selectedModel);
+  const preferredModelRef = useRef(selectedModel);
   const selectedProjectPathRef = useRef(projectPath);
   const selectedThreadIdRef = useRef<string | null>(null);
   const loadedThreadIdRef = useRef<string | null>(null);
@@ -312,6 +318,16 @@ export function App() {
   const pendingActivityDeltasRef = useRef(new Map<string, PendingActivityDelta>());
   const recentProjectsRef = useRef(recentProjects);
   const forgottenProjectPathsRef = useRef(forgottenProjectPaths);
+  const tracePerformance = useInteractionTrace(selectedThreadIdRef);
+  const {
+    composerRef,
+    ensureNativeComposerFocus,
+    focusComposer,
+  } = useComposerFocus({
+    enabled: primaryView === "workspace",
+    blocked: Boolean(dialogView || deleteConfirmation),
+    traceInteraction: tracePerformance,
+  });
 
   composerValueRef.current = composer;
   attachmentsRef.current = attachments;
@@ -357,33 +373,6 @@ export function App() {
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [dialogView]);
-
-  useLayoutEffect(() => {
-    if (composerFocusRequest === 0 || primaryView !== "workspace" || dialogView) return;
-    composerRef.current?.focus({ preventScroll: true });
-  }, [composerFocusRequest, dialogView, primaryView]);
-
-  useEffect(() => {
-    const focusComposerWhenWindowActivates = () => {
-      if (document.visibilityState !== "visible" || primaryView !== "workspace" || dialogView) return;
-      if (document.activeElement === document.body || document.activeElement === null) {
-        composerRef.current?.focus({ preventScroll: true });
-      }
-    };
-    window.addEventListener("focus", focusComposerWhenWindowActivates);
-    document.addEventListener("visibilitychange", focusComposerWhenWindowActivates);
-    return () => {
-      window.removeEventListener("focus", focusComposerWhenWindowActivates);
-      document.removeEventListener("visibilitychange", focusComposerWhenWindowActivates);
-    };
-  }, [dialogView, primaryView]);
-
-  useEffect(() => window.rhzycode.onWindowFocus(() => {
-    if (primaryView !== "workspace" || dialogView) return;
-    if (document.activeElement === document.body || document.activeElement === null) {
-      composerRef.current?.focus({ preventScroll: true });
-    }
-  }), [dialogView, primaryView]);
 
   useEffect(() => {
     const unsubscribers = [
@@ -440,12 +429,26 @@ export function App() {
     const available = (await window.rhzycode.listModels().catch(() => ({ data: [] }))).data || [];
     if (!available.length) return;
     setModels(available);
+    const preferredModel = ensurePreferredModel(available);
     setSelectedModel((current) => {
       if (available.some((model) => model.model === current)) return current;
-      const next = available.find((model) => model.isDefault)?.model || available[0]?.model || "";
-      if (next) localStorage.setItem("rhzycode.selectedModel", next);
-      return next;
+      selectedModelRef.current = preferredModel;
+      return preferredModel;
     });
+  }
+
+  function ensurePreferredModel(availableModels: ModelOption[] = models): string {
+    const nextModel = preferredModelFromCatalog(availableModels, preferredModelRef.current);
+    preferredModelRef.current = nextModel;
+    if (nextModel) localStorage.setItem("rhzycode.selectedModel", nextModel);
+    return nextModel;
+  }
+
+  function restorePreferredModel(): void {
+    const nextModel = ensurePreferredModel();
+    if (!nextModel || nextModel === selectedModelRef.current) return;
+    selectedModelRef.current = nextModel;
+    setSelectedModel(nextModel);
   }
 
   useEffect(() => {
@@ -733,11 +736,7 @@ export function App() {
     setFailedPrompt(null);
     setAttachments([]);
     lastPrompt.current = "";
-  }
-
-  function focusComposer(): void {
-    composerRef.current?.focus({ preventScroll: true });
-    setComposerFocusRequest((current) => current + 1);
+    restorePreferredModel();
   }
 
   function leaveRemovedThread(removedThreadId: string): void {
@@ -776,8 +775,8 @@ export function App() {
     lastPrompt.current = previousPrompt;
     setFailedPrompt(nextFailedPrompt);
     if (availableModels.some((entry) => entry.model === detail.thread.model)) {
+      selectedModelRef.current = detail.thread.model;
       setSelectedModel(detail.thread.model);
-      localStorage.setItem("rhzycode.selectedModel", detail.thread.model);
     }
   }
 
@@ -898,12 +897,9 @@ export function App() {
         ...current,
         ...availableThreads.filter((thread) => isActiveThreadStatus(thread.status)).map((thread) => thread.id),
       ]));
-      const storedModel = storedSelectedModel();
-      const initialModel = available.some((model) => model.model === storedModel)
-        ? storedModel
-        : available.find((model) => model.isDefault)?.model || available[0]?.model || "";
+      const initialModel = ensurePreferredModel(available);
+      selectedModelRef.current = initialModel;
       setSelectedModel(initialModel);
-      if (initialModel) localStorage.setItem("rhzycode.selectedModel", initialModel);
 
       if (!shouldRestoreWorkspace || revision !== navigationRevisionRef.current) return;
 
@@ -1046,7 +1042,7 @@ export function App() {
 
   async function restoreConversationBackup(): Promise<void> {
     closeThreadActions();
-    setImporting(true);
+    setImportingSource("backup");
     setImportStatus(null);
     try {
       const result = await window.rhzycode.restoreProjectConversations();
@@ -1061,7 +1057,31 @@ export function App() {
       upsertActivity(`conversation-restore-error-${Date.now()}`, "Conversation restore failed", message, "error");
       setImportStatus(message);
     } finally {
-      setImporting(false);
+      setImportingSource(null);
+    }
+  }
+
+  async function importExternalConversations(source: ExternalConversationImportSource): Promise<void> {
+    closeThreadActions();
+    setImportingSource(source);
+    setImportStatus(null);
+    const label = source === "codex" ? "Codex" : "Claude";
+    try {
+      const result = await window.rhzycode.importExternalConversations(source);
+      for (const importedProjectPath of result.projectPaths) rememberProject(importedProjectPath);
+      await loadThreads();
+      const detail = result.discoveredCount === 0
+        ? `No ${label} conversations found`
+        : `${result.importedCount} imported, ${result.skippedCount} already present`
+          + (result.failedCount > 0 ? `, ${result.failedCount} failed` : "");
+      upsertActivity(`conversation-import-${source}-${Date.now()}`, `${label} import complete`, detail, result.failedCount > 0 ? "error" : "done");
+      setImportStatus(detail);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      upsertActivity(`conversation-import-${source}-error-${Date.now()}`, `${label} import failed`, message, "error");
+      setImportStatus(message);
+    } finally {
+      setImportingSource(null);
     }
   }
 
@@ -1159,6 +1179,7 @@ export function App() {
 
   function changeSelectedModel(nextModel: string) {
     selectedModelRef.current = nextModel;
+    preferredModelRef.current = nextModel;
     setSelectedModel(nextModel);
     localStorage.setItem("rhzycode.selectedModel", nextModel);
     const selectedThread = selectedThreadIdRef.current;
@@ -1285,7 +1306,8 @@ export function App() {
     }
   }
 
-  async function permanentlyDeleteThread(selectedThreadId: string) {
+  function permanentlyDeleteThread(selectedThreadId: string) {
+    if (pendingThreadDeletionsRef.current.has(selectedThreadId)) return;
     const thread = threads.find((entry) => entry.id === selectedThreadId);
     if (thread && isActiveThreadStatus(thread.status)) {
       closeThreadActions();
@@ -1293,27 +1315,34 @@ export function App() {
       focusComposer();
       return;
     }
-    const confirmed = window.confirm(`Permanently delete "${thread?.title || "this thread"}" and its data from this computer?\n\nThis cannot be undone.`);
     closeThreadActions();
-    focusComposer();
-    if (!confirmed) return;
+    setDeleteConfirmation({ threadId: selectedThreadId, title: thread?.title || "this thread" });
+  }
+
+  async function confirmPermanentThreadDeletion() {
+    const confirmation = deleteConfirmation;
+    if (!confirmation || pendingThreadDeletionsRef.current.has(confirmation.threadId)) return;
+    const selectedThreadId = confirmation.threadId;
+    setDeleteConfirmation(null);
+    tracePerformance("delete-confirmed", { threadId: selectedThreadId });
     const deletingSelectedThread = selectedThreadId === selectedThreadIdRef.current;
     pendingThreadDeletionsRef.current.add(selectedThreadId);
+    threadViewCacheRef.current.delete(selectedThreadId);
+    markThreadActive(selectedThreadId, false);
+    setThreads((current) => current.filter((entry) => entry.id !== selectedThreadId));
     leaveRemovedThread(selectedThreadId);
-    if (!deletingSelectedThread) focusComposer();
+    tracePerformance("delete-optimistic-removed", { threadId: selectedThreadId });
+    if (!deletingSelectedThread) focusComposer("thread-delete");
     try {
       await window.rhzycode.deleteThread(selectedThreadId);
-      threadViewCacheRef.current.delete(selectedThreadId);
-      markThreadActive(selectedThreadId, false);
-      setThreads((current) => current.filter((entry) => entry.id !== selectedThreadId));
-      leaveRemovedThread(selectedThreadId);
+      tracePerformance("delete-ipc-completed", { threadId: selectedThreadId });
     } catch (error) {
       const message = getErrorMessage(error);
+      tracePerformance("delete-ipc-failed", { threadId: selectedThreadId });
       upsertActivity(`delete-error-${Date.now()}`, "Delete failed", message, "error");
-      window.alert(`Delete failed: ${message}`);
+      void loadThreads().catch(() => undefined);
     } finally {
       pendingThreadDeletionsRef.current.delete(selectedThreadId);
-      if (pendingThreadDeletionsRef.current.size === 0) focusComposer();
     }
   }
 
@@ -1371,6 +1400,7 @@ export function App() {
       selectedThreadIdRef.current === selectedThreadId
       && (loadedThreadIdRef.current === selectedThreadId || openingThreadIdRef.current === selectedThreadId)
     ) return;
+    tracePerformance("thread-switch-started", { threadId: selectedThreadId });
     const revision = ++navigationRevisionRef.current;
     const selectedThread = threads.find((thread) => thread.id === selectedThreadId);
     const targetProjectPath = selectedThread?.projectPath || selectedProjectPathRef.current;
@@ -1381,7 +1411,7 @@ export function App() {
     }
     if (targetProjectPath) setWorkspaceProject(targetProjectPath);
     setWorkspaceThread(selectedThreadId);
-    focusComposer();
+    focusComposer("thread-switch");
     const cached = threadViewCacheRef.current.get(selectedThreadId);
     if (cached) {
       rememberThreadView(selectedThreadId, cached);
@@ -2281,7 +2311,23 @@ export function App() {
                 setComposer(event.target.value);
               }}
               onPaste={(event) => void pasteComposerImages(event)}
+              onFocus={() => {
+                tracePerformance("composer-focus-event");
+              }}
+              onInput={(event) => tracePerformance("composer-input", {
+                length: event.currentTarget.value.length,
+                documentFocused: document.hasFocus(),
+              })}
               onKeyDown={(event) => {
+                tracePerformance("composer-keydown", {
+                  printable: event.key.length === 1,
+                  repeat: event.repeat,
+                  documentFocused: document.hasFocus(),
+                });
+                if (!document.hasFocus()) {
+                  tracePerformance("composer-keyboard-focus-recovery");
+                  ensureNativeComposerFocus("keyboard-recovery");
+                }
                 if (
                   event.key === "Enter"
                   && !event.shiftKey
@@ -2420,12 +2466,22 @@ export function App() {
       {dialogView === "transfer" && (
         <AppModal title="Import / Export" icon={<ArrowUpDown size={18} />} className="transfer-modal" onClose={() => setDialogView(null)}>
           <div className="transfer-choices">
-            <button disabled={importing} onClick={() => void restoreConversationBackup()}>
-              <span>{importing ? <RefreshCw className="spinning" size={20} /> : <Upload size={20} />}</span>
-              <strong>Import</strong>
+            <button disabled={importingSource !== null} onClick={() => void restoreConversationBackup()}>
+              <span>{importingSource === "backup" ? <RefreshCw className="spinning" size={20} /> : <Upload size={20} />}</span>
+              <strong>Import backup</strong>
               <small>Restore conversations from a backup file</small>
             </button>
-            <button disabled={importing} onClick={() => void openExportDialog()}>
+            <button disabled={importingSource !== null} onClick={() => void importExternalConversations("codex")}>
+              <span>{importingSource === "codex" ? <RefreshCw className="spinning" size={20} /> : <TerminalSquare size={20} />}</span>
+              <strong>Import from Codex</strong>
+              <small>Import local Codex conversations, skipping existing ones</small>
+            </button>
+            <button disabled={importingSource !== null} onClick={() => void importExternalConversations("claude")}>
+              <span>{importingSource === "claude" ? <RefreshCw className="spinning" size={20} /> : <Bot size={20} />}</span>
+              <strong>Import from Claude</strong>
+              <small>Convert local Claude conversations, skipping existing ones</small>
+            </button>
+            <button disabled={importingSource !== null} onClick={() => void openExportDialog()}>
               <span><Download size={20} /></span>
               <strong>Export</strong>
               <small>Select projects and conversations to back up</small>
@@ -2485,39 +2541,19 @@ export function App() {
           </div>
         </AppModal>
       )}
+      {deleteConfirmation && (
+        <DeleteConversationDialog
+          title={deleteConfirmation.title}
+          onCancel={() => setDeleteConfirmation(null)}
+          onConfirm={() => void confirmPermanentThreadDeletion()}
+        />
+      )}
       {previewImage && (
         <button className="image-preview" aria-label="Close image preview" onClick={() => setPreviewImage(null)}>
           <img src={previewImage} alt="Full size attachment" onClick={(event) => event.stopPropagation()} />
           <span><X size={20} /></span>
         </button>
       )}
-    </div>
-  );
-}
-
-function AppModal({
-  title,
-  icon,
-  className,
-  onClose,
-  children,
-}: {
-  title: string;
-  icon: ReactNode;
-  className?: string;
-  onClose: () => void;
-  children: ReactNode;
-}) {
-  const titleId = `app-modal-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
-  return (
-    <div className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section className={`app-modal ${className || ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId}>
-        <header className="app-modal-header">
-          <div>{icon}<h2 id={titleId}>{title}</h2></div>
-          <button className="icon-button compact" title={`Close ${title}`} aria-label={`Close ${title}`} onClick={onClose}><X size={16} /></button>
-        </header>
-        <div className="app-modal-body">{children}</div>
-      </section>
     </div>
   );
 }

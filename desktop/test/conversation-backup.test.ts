@@ -196,6 +196,33 @@ test("deletes an empty rollout by its thread id suffix", async (context) => {
   assert.equal(fs.existsSync(rolloutPath), false);
 });
 
+test("falls back to session metadata for a legacy rollout name", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-legacy-rollout-delete-"));
+  const codexHome = path.join(root, "home");
+  const projectPath = path.join(root, "project");
+  const rolloutPath = path.join(codexHome, "sessions", "legacy-import.jsonl");
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  writeSession(rolloutPath, "legacy-thread", projectPath, "legacy conversation");
+
+  assert.equal(await deleteConversationSessionFiles(codexHome, ["legacy-thread"]), 1);
+  assert.equal(fs.existsSync(rolloutPath), false);
+});
+
+test("refreshes the deletion index for a conversation created after an earlier deletion", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-delete-index-refresh-"));
+  const codexHome = path.join(root, "home");
+  const projectPath = path.join(root, "project");
+  const firstPath = path.join(codexHome, "sessions", "rollout-first-thread.jsonl");
+  const laterPath = path.join(codexHome, "sessions", "rollout-later-thread.jsonl");
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  writeSession(firstPath, "first-thread", projectPath, "first conversation");
+
+  assert.equal(await deleteConversationSessionFiles(codexHome, ["first-thread"]), 1);
+  writeSession(laterPath, "later-thread", projectPath, "later conversation");
+  assert.equal(await deleteConversationSessionFiles(codexHome, ["later-thread"]), 1);
+  assert.equal(fs.existsSync(laterPath), false);
+});
+
 function writeSession(filePath: string, id: string, cwd: string, text: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, [

@@ -36,8 +36,9 @@ export function responsesToChatRequest(request, upstreamModel, debugLog = () => 
     copyIfPresent(request, chat, "parallel_tool_calls");
   }
 
+  // Chat Completions providers reject tool_choice when there is no tools array.
   const toolChoice = responsesToolChoiceToChatToolChoice(request.tool_choice);
-  if (toolChoice != null) chat.tool_choice = toolChoice;
+  if (tools.length > 0 && toolChoice != null) chat.tool_choice = toolChoice;
 
   chat.messages = mergeSystemMessages(chat.messages);
 
@@ -731,9 +732,19 @@ function writeSse(res, event, payload) {
 }
 
 function normalizeArguments(value) {
-  if (typeof value === "string") return value;
-  if (value == null) return "";
-  return JSON.stringify(value);
+  const normalized = typeof value === "string"
+    ? value
+    : value == null
+      ? "{}"
+      : JSON.stringify(value);
+  try {
+    JSON.parse(normalized);
+    return normalized;
+  } catch {
+    // Chat Completions providers validate historical tool arguments. Preserve a
+    // truncated call as data instead of replaying invalid JSON into the next turn.
+    return JSON.stringify({ _rhzy_incomplete_arguments: normalized.slice(0, 16_384) });
+  }
 }
 
 function copyIfPresent(from, to, key) {

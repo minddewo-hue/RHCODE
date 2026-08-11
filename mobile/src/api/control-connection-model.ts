@@ -6,6 +6,13 @@ export const webSocketConnectTimeoutMs = 15_000;
 export const webSocketHeartbeatIntervalMs = 20_000;
 export const webSocketHeartbeatTimeoutMs = 15_000;
 
+export type IncomingSequenceAction = "apply" | "duplicate" | "gap";
+
+export function incomingSequenceAction(current: number, incoming: number): IncomingSequenceAction {
+  if (incoming <= current) return "duplicate";
+  return incoming === current + 1 ? "apply" : "gap";
+}
+
 interface SnapshotRetryOptions {
   attempts?: number;
   retryDelay?: (attempt: number) => number;

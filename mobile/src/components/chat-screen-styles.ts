@@ -56,7 +56,6 @@ export const chatScreenStyles = createThemedStyles((colors) => ({
   generatedImage: { width: "100%", height: "100%" },
   generatedImageStatus: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0, alignItems: "center", justifyContent: "center", gap: 7 },
   generatedImageError: { color: colors.inkMuted, fontSize: 11, lineHeight: 15, letterSpacing: 0 },
-  inlineSpinner: { alignSelf: "flex-start", marginTop: 8 },
   activityRow: { marginBottom: 18 },
   activityHeader: { flexDirection: "row", alignItems: "flex-start" },
   activityIcon: { width: 26, height: 26, borderRadius: 5, alignItems: "center", justifyContent: "center", marginRight: 9 },

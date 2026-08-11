@@ -11,6 +11,7 @@ const MAX_TOTAL_SESSION_BYTES = 512 * 1024 * 1024;
 const MAX_BACKUP_FILE_BYTES = 512 * 1024 * 1024;
 const MAX_BACKUP_JSON_BYTES = 768 * 1024 * 1024;
 const MAX_SESSION_PREVIEW_BYTES = 1024 * 1024;
+const MAX_SESSION_METADATA_BYTES = 64 * 1024;
 const THREAD_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 
 interface BackupSession {
@@ -74,6 +75,13 @@ interface ScannedConversationSessionRecord extends ConversationSessionRecord {
   lineageId: string;
 }
 
+interface ConversationSessionFileIndex {
+  files: string[];
+  pendingRefresh: Promise<string[]> | null;
+}
+
+const conversationSessionFileIndexes = new Map<string, ConversationSessionFileIndex>();
+
 export async function listConversationSessions(
   codexHome: string,
 ): Promise<ConversationSessionRecord[]> {
@@ -130,21 +138,56 @@ export async function deleteConversationSessionFiles(
   );
   if (threadIds.size === 0) return 0;
 
+  return deleteIndexedConversationSessionFiles(codexHome, threadIds, false);
+}
+
+async function deleteIndexedConversationSessionFiles(
+  codexHome: string,
+  threadIds: Set<string>,
+  refreshedIndex: boolean,
+): Promise<number> {
+  const filePaths = await indexedConversationSessionFiles(codexHome, refreshedIndex);
+
   let deletedCount = 0;
-  for (const directoryName of ["sessions", "archived_sessions"]) {
-    for (const filePath of await listJsonlFiles(path.join(codexHome, directoryName))) {
-      const metadata = await readSessionMetadataFile(filePath);
-      const fileName = path.basename(filePath).toLowerCase();
-      const matchesFileName = !metadata && [...threadIds].some((threadId) =>
-        fileName.endsWith(`-${threadId.toLowerCase()}.jsonl`));
-      if (!threadIds.has(metadata?.id || "") && !matchesFileName) continue;
-      try {
-        await fs.unlink(filePath);
-        deletedCount += 1;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
+  const threadIdsByLowercase = new Map([...threadIds].map((threadId) => [threadId.toLowerCase(), threadId]));
+  const unresolvedThreadIds = new Set(threadIds);
+  const unmatchedFiles: string[] = [];
+  for (const filePath of filePaths) {
+    const fileName = path.basename(filePath).toLowerCase();
+    const matchingThreadId = [...threadIdsByLowercase.entries()].find(([threadId]) =>
+      fileName.endsWith(`-${threadId}.jsonl`))?.[1];
+    if (!matchingThreadId) {
+      unmatchedFiles.push(filePath);
+      continue;
     }
+    try {
+      await fs.unlink(filePath);
+      deletedCount += 1;
+      unresolvedThreadIds.delete(matchingThreadId);
+      removeConversationSessionFileFromIndex(codexHome, filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+
+  // Standard rollout names end in their thread ID. Only inspect file contents
+  // for legacy or restored files whose name does not identify an unresolved ID.
+  if (unresolvedThreadIds.size === 0) return deletedCount;
+  for (const filePath of unmatchedFiles) {
+    const metadata = await readSessionMetadataFile(filePath);
+    if (!metadata || !unresolvedThreadIds.has(metadata.id)) continue;
+    try {
+      await fs.unlink(filePath);
+      deletedCount += 1;
+      unresolvedThreadIds.delete(metadata.id);
+      removeConversationSessionFileFromIndex(codexHome, filePath);
+      if (unresolvedThreadIds.size === 0) break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  if (unresolvedThreadIds.size > 0 && !refreshedIndex) {
+    return deletedCount + await deleteIndexedConversationSessionFiles(codexHome, unresolvedThreadIds, true);
   }
   return deletedCount;
 }
@@ -366,7 +409,7 @@ async function readSessionMetadataFile(filePath: string): Promise<SessionMetadat
   try {
     const handle = await fs.open(filePath, "r");
     try {
-      const buffer = Buffer.alloc(1024 * 1024);
+      const buffer = Buffer.alloc(MAX_SESSION_METADATA_BYTES);
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
       return readSessionMetadata(buffer.subarray(0, bytesRead));
     } finally {
@@ -529,6 +572,33 @@ function summarizeConversationTitle(value: string): string {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+async function indexedConversationSessionFiles(codexHome: string, refresh: boolean): Promise<string[]> {
+  const cacheKey = path.resolve(codexHome).toLowerCase();
+  let index = conversationSessionFileIndexes.get(cacheKey);
+  if (!index) {
+    index = { files: [], pendingRefresh: null };
+    conversationSessionFileIndexes.set(cacheKey, index);
+  }
+  if (!refresh && index.files.length > 0) return index.files;
+  if (index.pendingRefresh) return index.pendingRefresh;
+
+  index.pendingRefresh = Promise.all(["sessions", "archived_sessions"].map((directoryName) =>
+    listJsonlFiles(path.join(codexHome, directoryName)),
+  )).then((groups) => {
+    index!.files = groups.flat();
+    return index!.files;
+  }).finally(() => {
+    index!.pendingRefresh = null;
+  });
+  return index.pendingRefresh;
+}
+
+function removeConversationSessionFileFromIndex(codexHome: string, filePath: string): void {
+  const index = conversationSessionFileIndexes.get(path.resolve(codexHome).toLowerCase());
+  if (!index) return;
+  index.files = index.files.filter((indexedFilePath) => indexedFilePath !== filePath);
 }
 
 async function listJsonlFiles(root: string): Promise<string[]> {

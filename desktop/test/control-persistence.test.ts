@@ -6,7 +6,7 @@ import test from "node:test";
 import { ControlStore } from "../src/main/control-plane/app";
 import { EncryptedControlPersistence } from "../src/main/control-persistence.js";
 
-test("encrypts and restores durable control-plane state", (context) => {
+test("encrypts and restores durable control-plane state", async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-control-state-"));
   const filePath = path.join(root, "control-state.bin");
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -27,7 +27,7 @@ test("encrypts and restores durable control-plane state", (context) => {
     status: "completed",
     updatedAt: new Date().toISOString(),
   });
-  persistence.flush();
+  await persistence.flush();
 
   const encrypted = fs.readFileSync(filePath);
   assert.doesNotMatch(encrypted.toString("utf8"), /Encrypted history|D:\\secure/);
@@ -73,6 +73,29 @@ test("defers persistence until a streaming timeline item reaches a durable state
   assert.equal(restored?.snapshot.timeline[0]?.content, "complete");
   assert.equal(restored?.events.some((event) => event.type === "timeline.upserted"), false);
   persistence.detach();
+});
+
+test("persists only recent control-plane timeline activity", () => {
+  const store = new ControlStore();
+  for (let index = 0; index < 300; index += 1) {
+    store.publish({
+      type: "timeline.upserted",
+      item: {
+        id: `activity-${index}`,
+        threadId: "thread-history",
+        kind: "assistant",
+        title: "Completed activity",
+        content: `result-${index}`,
+        status: "completed",
+        createdAt: new Date(1_700_000_000_000 + index).toISOString(),
+      },
+    });
+  }
+
+  const persisted = store.exportState();
+  assert.equal(persisted.snapshot.timeline.length, 250);
+  assert.equal(persisted.snapshot.timeline[0]?.id, "activity-50");
+  assert.equal(persisted.snapshot.timeline.at(-1)?.id, "activity-299");
 });
 
 test("reports missing, partial, invalid, and unavailable restore states", (context) => {

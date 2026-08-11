@@ -5,6 +5,7 @@ export const secureSessionKeys = {
 
 const connectionKeyPrefix = "rhzycode.connectionKey.v2.";
 const navigationKeyPrefix = "rhzycode.navigation.v1.";
+const pendingCommandKeyPrefix = "rhzycode.pendingCommands.v1.";
 
 export interface SecureStorageAdapter {
   getItemAsync(key: string): Promise<string | null>;
@@ -27,11 +28,20 @@ export interface MobileNavigationState {
   threadId: string | null;
   newThreadDraft: boolean;
   collapsedProjectPaths: string[];
+  preferredModel: string | null;
 }
 
 export interface SavedConnectionInput {
   id?: string;
   accessKey: string;
+}
+
+export interface PendingCommandReceipt {
+  id: string;
+  context: string;
+  fingerprint: string;
+  createdAt: string;
+  state: "uncertain" | "accepted";
 }
 
 interface StoredConnection {
@@ -44,6 +54,10 @@ export function secureConnectionKey(id: string): string {
 
 export function mobileNavigationKey(id: string): string {
   return `${navigationKeyPrefix}${id}`;
+}
+
+export function pendingCommandKey(id: string): string {
+  return `${pendingCommandKeyPrefix}${id}`;
 }
 
 export class SecureSessionStore {
@@ -121,6 +135,9 @@ export class SecureSessionStore {
         threadId: typeof parsed.threadId === "string" ? parsed.threadId : null,
         newThreadDraft: parsed.newThreadDraft === true,
         collapsedProjectPaths: normalizeStoredPaths(parsed.collapsedProjectPaths),
+        preferredModel: typeof parsed.preferredModel === "string" && parsed.preferredModel.trim()
+          ? parsed.preferredModel
+          : null,
       };
     } catch {
       return emptyNavigationState();
@@ -129,6 +146,51 @@ export class SecureSessionStore {
 
   async saveNavigation(id: string, state: MobileNavigationState): Promise<void> {
     await this.storage.setItemAsync(mobileNavigationKey(id), JSON.stringify(state));
+  }
+
+  async loadPendingCommands(id: string): Promise<PendingCommandReceipt[]> {
+    const value = await this.storage.getItemAsync(pendingCommandKey(id));
+    if (!value) return [];
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      const cutoff = Date.now() - 24 * 60 * 60_000;
+      return parsed.flatMap((entry) => {
+        if (!entry || typeof entry !== "object") return [];
+        const candidate = entry as Partial<PendingCommandReceipt>;
+        const createdAt = typeof candidate.createdAt === "string" ? Date.parse(candidate.createdAt) : NaN;
+        if (
+          typeof candidate.id !== "string"
+          || candidate.id.length < 8
+          || candidate.id.length > 200
+          || typeof candidate.context !== "string"
+          || candidate.context.length > 32_768
+          || typeof candidate.fingerprint !== "string"
+          || !/^[a-f0-9]{64}$/i.test(candidate.fingerprint)
+          || !Number.isFinite(createdAt)
+          || createdAt < cutoff
+          || (candidate.state !== "uncertain" && candidate.state !== "accepted")
+        ) return [];
+        return [{
+          id: candidate.id,
+          context: candidate.context,
+          fingerprint: candidate.fingerprint.toLowerCase(),
+          createdAt: candidate.createdAt!,
+          state: candidate.state,
+        }];
+      }).slice(-8);
+    } catch {
+      return [];
+    }
+  }
+
+  async savePendingCommands(id: string, receipts: PendingCommandReceipt[]): Promise<void> {
+    const normalized = receipts.slice(-8);
+    if (!normalized.length) {
+      await this.storage.deleteItemAsync(pendingCommandKey(id));
+      return;
+    }
+    await this.storage.setItemAsync(pendingCommandKey(id), JSON.stringify(normalized));
   }
 
   async removeConnection(id: string): Promise<MobileSessionState> {
@@ -141,6 +203,7 @@ export class SecureSessionStore {
       this.writeConnectionMetadata(connections),
       this.storage.deleteItemAsync(secureConnectionKey(id)),
       this.storage.deleteItemAsync(mobileNavigationKey(id)),
+      this.storage.deleteItemAsync(pendingCommandKey(id)),
       activeConnectionId
         ? this.storage.setItemAsync(secureSessionKeys.activeConnectionId, activeConnectionId)
         : this.storage.deleteItemAsync(secureSessionKeys.activeConnectionId),
@@ -155,7 +218,13 @@ export class SecureSessionStore {
 }
 
 function emptyNavigationState(): MobileNavigationState {
-  return { projectPath: null, threadId: null, newThreadDraft: false, collapsedProjectPaths: [] };
+  return {
+    projectPath: null,
+    threadId: null,
+    newThreadDraft: false,
+    collapsedProjectPaths: [],
+    preferredModel: null,
+  };
 }
 
 function normalizeStoredPaths(value: unknown): string[] {

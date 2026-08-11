@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { RemoteModelOption } from "@rhzycode/protocol";
-import { groupRemoteModels, remoteModelReasoningEfforts } from "../src/components/model-picker-model";
+import {
+  groupRemoteModels,
+  preferredRemoteModel,
+  remoteModelReasoningEfforts,
+} from "../src/components/model-picker-model";
 
 function model(modelId: string, displayName: string, extra: Partial<RemoteModelOption> = {}): RemoteModelOption {
   return {
@@ -54,4 +58,15 @@ test("uses only reasoning efforts declared by the desktop", () => {
     "Plain model",
     { reasoningEfforts: [] },
   )), []);
+});
+
+test("uses the last available manual model as the next conversation default", () => {
+  const models = [
+    model("provider/default", "Default", { isDefault: true }),
+    model("provider/manual", "Manual"),
+  ];
+
+  assert.equal(preferredRemoteModel(models, "provider/manual"), "provider/manual");
+  assert.equal(preferredRemoteModel(models, "provider/removed"), "provider/default");
+  assert.equal(preferredRemoteModel([], "provider/manual"), "");
 });

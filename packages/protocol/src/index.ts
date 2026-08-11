@@ -56,6 +56,8 @@ export type ConversationFile = z.infer<typeof conversationFileSchema>;
 
 export const timelineItemSchema = z.object({
   id: z.string().min(1),
+  logicalId: z.string().min(1).max(500).optional(),
+  turnId: z.string().min(1).max(500).optional(),
   threadId: z.string().min(1),
   clientMessageId: z.string().min(8).max(200).optional(),
   kind: z.enum(["user", "assistant", "command", "file_change", "notice"]),
@@ -174,8 +176,15 @@ export function mergeDuplicateTimelineItems(current: TimelineItem, incoming: Tim
 export function dedupeTimelineItems(items: TimelineItem[]): TimelineItem[] {
   if (items.length < 2) return items.slice();
 
-  const byThread = new Map<string, TimelineItem[]>();
+  const byIdentity = new Map<string, TimelineItem>();
   for (const item of items) {
+    const key = `${item.threadId}\u0000${item.logicalId || item.id}`;
+    const current = byIdentity.get(key);
+    byIdentity.set(key, current ? mergeDuplicateTimelineItems(current, item) : item);
+  }
+
+  const byThread = new Map<string, TimelineItem[]>();
+  for (const item of byIdentity.values()) {
     const list = byThread.get(item.threadId);
     if (list) list.push(item);
     else byThread.set(item.threadId, [item]);
@@ -627,8 +636,18 @@ export const controlSnapshotSchema = z.object({
   approvals: z.array(approvalRequestSchema),
   userInputs: z.array(userInputRequestSchema),
   lastSequence: z.number().int().nonnegative(),
+  streamId: z.string().min(8).max(200).optional(),
+  earliestReplaySequence: z.number().int().nonnegative().optional(),
 });
 export type ControlSnapshot = z.infer<typeof controlSnapshotSchema>;
+
+export const controlSyncFrameSchema = z.object({
+  type: z.literal("control.sync"),
+  streamId: z.string().min(8).max(200),
+  lastSequence: z.number().int().nonnegative(),
+  earliestReplaySequence: z.number().int().nonnegative(),
+});
+export type ControlSyncFrame = z.infer<typeof controlSyncFrameSchema>;
 
 export const codexComposerCommandNames = [
   "clear",

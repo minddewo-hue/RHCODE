@@ -57,6 +57,14 @@ function remoteContext(): RemoteCommandContext {
   };
 }
 
+async function waitFor(condition: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (condition()) return;
+    await delay(10);
+  }
+  throw new Error(`Timed out waiting for ${label}.`);
+}
+
 test("restores desktop threads without reviving active RPC states", () => {
   const store = new ControlStore();
   store.upsertThread({
@@ -630,7 +638,40 @@ test("permanently deletes a thread rollout from disk", async (context) => {
 
   await runtime.deleteThread("thread-1");
 
+  await waitFor(() => !fs.existsSync(rolloutPath), "thread rollout deletion");
   assert.equal(fs.existsSync(rolloutPath), false);
+});
+
+test("keeps a thread rollout until App Server index cleanup settles", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-thread-delete-pending-"));
+  const codexHome = path.join(root, "home");
+  const { runtime, internals, store } = createRuntimeHarness(codexHome);
+  const rolloutPath = path.join(codexHome, "sessions", "rollout-thread-1.jsonl");
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+  fs.writeFileSync(rolloutPath, `${JSON.stringify({
+    type: "session_meta",
+    payload: { id: "thread-1", cwd: path.resolve(".") },
+  })}\n`, "utf8");
+
+  let cleanupRequested = false;
+  let finishCleanup: (() => void) | undefined;
+  runtime.agent.request = async (method) => {
+    assert.equal(method, "thread/delete");
+    cleanupRequested = true;
+    return new Promise<never>((resolve) => {
+      finishCleanup = resolve;
+    });
+  };
+
+  await runtime.deleteThread("thread-1");
+
+  assert.equal(cleanupRequested, true);
+  assert.equal(fs.existsSync(rolloutPath), true);
+  assert.equal(internals.threads.has("thread-1"), false);
+  assert.equal(store.snapshot().threads.some((thread) => thread.id === "thread-1"), false);
+  finishCleanup?.({} as never);
+  await waitFor(() => !fs.existsSync(rolloutPath), "thread rollout deletion after index cleanup");
 });
 
 test("permanently deletes every project conversation but keeps source files", async (context) => {

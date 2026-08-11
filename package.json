@@ -31,6 +31,8 @@
     "build": "npm run build --workspace @rhzycode/protocol && npm run build --workspace @rhzycode/desktop",
     "pack:desktop": "npm run pack:win --workspace @rhzycode/desktop",
     "dist:desktop": "npm run dist:win --workspace @rhzycode/desktop",
+    "pack:linux": "npm run pack:linux --workspace @rhzycode/desktop",
+    "dist:linux": "npm run dist:linux --workspace @rhzycode/desktop",
     "pack:mac": "npm run pack:mac --workspace @rhzycode/desktop",
     "dist:mac": "npm run dist:mac --workspace @rhzycode/desktop",
     "typecheck": "npm run typecheck --workspaces --if-present",

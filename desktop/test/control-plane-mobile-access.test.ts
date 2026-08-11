@@ -48,7 +48,12 @@ test("authenticates event replay with the persistent key subprotocol", async () 
     `${address.url.replace(/^http/, "ws")}/v1/events?after=${after}`,
     ["rhzycode.v1", `rhzycode.auth.${accessKey.key}`],
   );
+  const syncMessage = waitForSocket(socket, "message");
   await waitForSocket(socket, "open");
+  const sync = JSON.parse(String((await syncMessage as MessageEvent).data));
+  assert.equal(sync.type, "control.sync");
+  assert.equal(sync.lastSequence, after);
+  assert.equal(typeof sync.streamId, "string");
   const message = waitForSocket(socket, "message");
   controlPlane.store.upsertThread({
     id: "thread-ws",

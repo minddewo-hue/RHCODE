@@ -7,6 +7,7 @@ import { turnScopedItemId } from "../shared/item-identity";
 import { findRolloutPath, loadRolloutGeneratedImages } from "./generated-image-rollout";
 
 const MAX_ROLLOUT_BYTES = 256 * 1024 * 1024;
+const PARSE_YIELD_INTERVAL = 256;
 
 interface TimedMessage {
   message: ConversationMessage;
@@ -56,7 +57,10 @@ export async function loadLocalRolloutThread(
 
   const records: ParsedRolloutRecord[] = [];
   let order = 0;
-  for (const line of contents.split(/\r?\n/)) {
+  const lines = contents.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    if (index > 0 && index % PARSE_YIELD_INTERVAL === 0) await yieldToEventLoop();
+    const line = lines[index]!;
     order += 1;
     if (!line) continue;
     let record: Record<string, unknown>;
@@ -74,6 +78,10 @@ export async function loadLocalRolloutThread(
     });
   }
 
+  const rolloutUploadedImages = records.flatMap((record) => (
+    record.type === "response_item" ? uploadedImagesFromMessage(record.payload) : []
+  ));
+  const displayManagedFiles = reconcileRolloutUploadedImages(managedFiles, rolloutUploadedImages);
   const hiddenCompactionMessages = compactionMessageOrders(records);
   const responseMessages: TimedMessage[] = [];
   const materializedArtifacts: ManagedFileRecord[] = [];
@@ -87,7 +95,7 @@ export async function loadLocalRolloutThread(
       const content = extractResponseMessageText(payload);
       if (!content || hiddenCompactionMessages.has(record.order) || (role === "user" && isInjectedContext(content))) continue;
       const uploadedFiles = role === "user"
-        ? managedFiles.filter((file) => file.source === "upload" && file.turnId === turnId)
+        ? displayManagedFiles.filter((file) => file.source === "upload" && file.turnId === turnId)
         : [];
       if (role === "assistant" && options.materializeArtifacts) {
         materializedArtifacts.push(...options.materializeArtifacts(turnId, content));
@@ -111,8 +119,8 @@ export async function loadLocalRolloutThread(
   }
 
   const messages = responseMessages;
-  attachGeneratedManagedFiles(messages, [...managedFiles, ...materializedArtifacts]);
-  for (const image of loadRolloutGeneratedImages(codexHome, thread.id)) {
+  attachGeneratedManagedFiles(messages, [...displayManagedFiles, ...materializedArtifacts]);
+  for (const image of loadRolloutGeneratedImages(codexHome, thread.id, contents)) {
     messages.push({
       message: {
         id: turnScopedItemId(image.turnId, image.id),
@@ -151,7 +159,10 @@ export async function loadRolloutUploadedImages(
   }
 
   const images: RolloutUploadedImage[] = [];
-  for (const line of contents.split(/\r?\n/)) {
+  const lines = contents.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    if (index > 0 && index % PARSE_YIELD_INTERVAL === 0) await yieldToEventLoop();
+    const line = lines[index]!;
     if (!line) continue;
     let record: Record<string, unknown>;
     try {
@@ -160,22 +171,29 @@ export async function loadRolloutUploadedImages(
       continue;
     }
     if (record.type !== "response_item") continue;
-    const payload = asRecord(record.payload);
-    if (payload.type !== "message" || payload.role !== "user" || !Array.isArray(payload.content)) continue;
-    const turnId = messageTurnId(payload);
-    payload.content.forEach((entry, index) => {
-      const item = asRecord(entry);
-      if (item.type !== "input_image") return;
-      const dataUrl = stringValue(item.image_url);
-      if (!dataUrl.startsWith("data:image/")) return;
-      images.push({
-        turnId,
-        name: rolloutImageName(payload.content as unknown[], index),
-        dataUrl,
-      });
-    });
+    images.push(...uploadedImagesFromMessage(asRecord(record.payload)));
   }
   return images;
+}
+
+function uploadedImagesFromMessage(payload: Record<string, unknown>): RolloutUploadedImage[] {
+  if (payload.type !== "message" || payload.role !== "user" || !Array.isArray(payload.content)) return [];
+  const turnId = messageTurnId(payload);
+  return payload.content.flatMap((entry, index) => {
+    const item = asRecord(entry);
+    if (item.type !== "input_image") return [];
+    const dataUrl = stringValue(item.image_url);
+    if (!dataUrl.startsWith("data:image/")) return [];
+    return [{
+      turnId,
+      name: rolloutImageName(payload.content as unknown[], index),
+      dataUrl,
+    }];
+  });
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 export function reconcileRolloutUploadedImages(

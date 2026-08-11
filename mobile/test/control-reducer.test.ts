@@ -505,6 +505,56 @@ test("collapses provisional user rows after history catch-up while keeping inten
   assert.equal(merged.timeline[1]?.clientMessageId, "pending-2");
 });
 
+test("a new server stream replaces state from the previous process", () => {
+  const merged = mergeControlSnapshot({
+    ...emptyControlSnapshot,
+    streamId: "stream-old",
+    threads: [thread],
+    timeline: [timeline],
+    lastSequence: 80,
+  }, {
+    ...emptyControlSnapshot,
+    streamId: "stream-new",
+    lastSequence: 4,
+  });
+
+  assert.equal(merged.streamId, "stream-new");
+  assert.equal(merged.lastSequence, 4);
+  assert.deepEqual(merged.threads, []);
+  assert.deepEqual(merged.timeline, []);
+});
+
+test("stable logical ids collapse live and historical ids without content guessing", () => {
+  const live = {
+    ...timeline,
+    id: "assistant-live",
+    logicalId: "turn-1:assistant",
+    status: "running" as const,
+    content: "partial",
+  };
+  const historical = {
+    ...live,
+    id: "turn-1::assistant-history",
+    turnId: "turn-1",
+    status: "completed" as const,
+    content: "completely different final content",
+  };
+  const state = applyAgentEvent({
+    ...emptyControlSnapshot,
+    threads: [thread],
+    timeline: [live],
+    lastSequence: 1,
+  }, {
+    type: "timeline.upserted",
+    sequence: 2,
+    item: historical,
+  });
+
+  assert.equal(state.timeline.length, 1);
+  assert.equal(state.timeline[0]?.id, historical.id);
+  assert.equal(state.timeline[0]?.status, "completed");
+});
+
 test("collapses desktop runtime user rows without client ids one-to-one", () => {
   const liveFirst = {
     ...timeline,

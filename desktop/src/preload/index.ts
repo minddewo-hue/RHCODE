@@ -52,6 +52,7 @@ const api: RhzycodeDesktopApi = {
   listExportConversations: () => ipcRenderer.invoke("conversation:export-list"),
   exportConversations: (threadIds: string[]) => ipcRenderer.invoke("conversation:export", threadIds),
   restoreProjectConversations: () => ipcRenderer.invoke("conversation:restore"),
+  importExternalConversations: (source) => ipcRenderer.invoke("conversation:import-external", source),
   startTurn: (params: { threadId: string; text: string; model?: string; approvalPolicy?: "on-request" | "untrusted" | "never"; sandboxMode?: "read-only" | "workspace-write" | "danger-full-access"; reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"; attachments?: Array<{ path: string; name: string; kind: "file" | "image"; size: number }> }) =>
     ipcRenderer.invoke("agent:turn:start", params),
   interruptTurn: (threadId: string) => ipcRenderer.invoke("agent:turn:interrupt", threadId),
@@ -78,6 +79,8 @@ const api: RhzycodeDesktopApi = {
   getMobileAccessStatus: () => ipcRenderer.invoke("mobile-access:status"),
   rotateMobileAccessKey: () => ipcRenderer.invoke("mobile-access:key:rotate"),
   copyText: (value: string) => ipcRenderer.invoke("clipboard:write", value),
+  focusWindowContents: () => ipcRenderer.invoke("window:focus-contents"),
+  recordPerformanceTrace: (event, detail) => ipcRenderer.send("diagnostic:performance", event, detail),
   getPersistenceStatus: () => ipcRenderer.invoke("storage:status"),
   getSyncStatus: () => ipcRenderer.invoke("sync:status"),
   getSyncSnapshot: () => ipcRenderer.invoke("sync:snapshot"),

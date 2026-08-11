@@ -17,21 +17,25 @@ export interface RolloutGeneratedImage {
   image: StoredGeneratedImage;
 }
 
+const rolloutPathsByCodexHome = new Map<string, Map<string, string>>();
+
 export function loadRolloutGeneratedImages(
   codexHome: string,
   threadId: string,
+  rolloutContents?: string,
 ): RolloutGeneratedImage[] {
   if (!THREAD_ID_PATTERN.test(threadId)) return [];
-  const rolloutPath = findRolloutPath(codexHome, threadId);
-  if (!rolloutPath) return [];
-
-  let contents: string;
-  try {
-    const stats = fs.statSync(rolloutPath);
-    if (!stats.isFile() || stats.size <= 0 || stats.size > MAX_ROLLOUT_BYTES) return [];
-    contents = fs.readFileSync(rolloutPath, "utf8");
-  } catch {
-    return [];
+  let contents = rolloutContents;
+  if (contents === undefined) {
+    const rolloutPath = findRolloutPath(codexHome, threadId);
+    if (!rolloutPath) return [];
+    try {
+      const stats = fs.statSync(rolloutPath);
+      if (!stats.isFile() || stats.size <= 0 || stats.size > MAX_ROLLOUT_BYTES) return [];
+      contents = fs.readFileSync(rolloutPath, "utf8");
+    } catch {
+      return [];
+    }
   }
 
   const outputDirectory = path.join(codexHome, "generated_images");
@@ -64,6 +68,23 @@ export function loadRolloutGeneratedImages(
 }
 
 export function findRolloutPath(codexHome: string, threadId: string): string | null {
+  if (!THREAD_ID_PATTERN.test(threadId)) return null;
+  const cacheKey = path.resolve(codexHome).toLowerCase();
+  const normalizedThreadId = threadId.toLowerCase();
+  let paths = rolloutPathsByCodexHome.get(cacheKey);
+  if (!paths) {
+    paths = new Map();
+    rolloutPathsByCodexHome.set(cacheKey, paths);
+  }
+  const cachedPath = paths.get(normalizedThreadId);
+  if (cachedPath) {
+    try {
+      if (fs.statSync(cachedPath).isFile()) return cachedPath;
+    } catch {
+      paths.delete(normalizedThreadId);
+    }
+  }
+
   const suffix = `-${threadId}.jsonl`.toLowerCase();
   for (const directoryName of ["sessions", "archived_sessions"]) {
     const root = path.join(codexHome, directoryName);
@@ -85,7 +106,10 @@ export function findRolloutPath(codexHome: string, threadId: string): string | n
         }
         if (!entry.isFile()) continue;
         visitedFiles += 1;
-        if (entry.name.toLowerCase().endsWith(suffix)) return entryPath;
+        if (entry.name.toLowerCase().endsWith(suffix)) {
+          paths.set(normalizedThreadId, entryPath);
+          return entryPath;
+        }
       }
     }
   }

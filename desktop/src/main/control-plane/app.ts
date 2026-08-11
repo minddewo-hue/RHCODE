@@ -174,6 +174,8 @@ interface CachedCommand {
 class CommandReplayCache {
   private readonly entries = new Map<string, CachedCommand>();
 
+  constructor(private readonly store: ControlStore) {}
+
   async execute<T>(
     clientId: string,
     idempotencyKey: string,
@@ -187,15 +189,31 @@ class CommandReplayCache {
       if (existing.fingerprint !== fingerprint) throw new ControlCommandError("conflict");
       return existing.promise as Promise<T>;
     }
+    const persisted = this.store.getCommandReplay(cacheKey);
+    if (persisted) {
+      if (persisted.fingerprint !== fingerprint) throw new ControlCommandError("conflict");
+      return persisted.result as T;
+    }
 
     const promise = operation();
+    const expiresAt = Date.now() + 24 * 60 * 60_000;
     this.entries.set(cacheKey, {
       fingerprint,
-      expiresAt: Date.now() + 24 * 60 * 60_000,
+      expiresAt,
       promise,
     });
     try {
-      return await promise;
+      const result = await promise;
+      this.store.saveCommandReplay({
+        key: cacheKey,
+        fingerprint,
+        expiresAt,
+        result,
+        ...(turnClientMessageId(idempotencyKey)
+          ? { clientMessageId: turnClientMessageId(idempotencyKey) }
+          : {}),
+      });
+      return result;
     } catch (error) {
       this.entries.delete(cacheKey);
       throw error;
@@ -222,7 +240,7 @@ export async function createControlPlane(options: ControlPlaneOptions = {}): Pro
   const store = options.store || new ControlStore();
   const mobileAccess = options.mobileAccess;
   const commands = options.commands;
-  const commandReplay = new CommandReplayCache();
+  const commandReplay = new CommandReplayCache(store);
   const sockets = new Map<TrackedSocket, string | null>();
 
   await app.register(cors, { origin: true });
@@ -761,6 +779,7 @@ export async function createControlPlane(options: ControlPlaneOptions = {}): Pro
       .object({ after: z.coerce.number().int().nonnegative().default(0) })
       .safeParse(request.query);
     const after = query.success ? query.data.after : 0;
+    socket.send(JSON.stringify(store.syncMetadata()));
     for (const event of store.listEvents(after)) socket.send(JSON.stringify(event));
     socket.on("message", (raw: { toString(): string }) => {
       try {
@@ -826,7 +845,11 @@ export async function createControlPlane(options: ControlPlaneOptions = {}): Pro
   };
 }
 
-export { ControlStore, type ControlStoreState } from "./store.js";
+export {
+  ControlStore,
+  type ControlStoreState,
+  type PersistedCommandReplay,
+} from "./store.js";
 export {
   MobileAccessManager,
   normalizeMobileAccessState,

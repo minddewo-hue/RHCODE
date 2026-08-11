@@ -1,5 +1,6 @@
 import {
   agentEventSchema,
+  controlSyncFrameSchema,
   controlSnapshotSchema,
   remoteArchivedThreadListResultSchema,
   remoteModelListResultSchema,
@@ -14,6 +15,7 @@ import {
   remoteUserInputSubmitResultSchema,
   type AgentEvent,
   type ControlSnapshot,
+  type ControlSyncFrame,
   type RemoteArchivedThreadListResult,
   type RemoteApprovalPolicy,
   type RemoteModelListResult,
@@ -68,6 +70,8 @@ export interface EventSocketDescriptor {
   url: string;
   protocols: ["rhzycode.v1", string];
 }
+
+export type ControlSocketFrame = AgentEvent | ControlSyncFrame;
 
 export interface AuthenticatedImageSource {
   uri: string;
@@ -369,6 +373,22 @@ export class ControlClient {
     const result = agentEventSchema.safeParse(decoded);
     if (!result.success) throw invalidResponse("控制服务发送了无效事件。");
     return result.data;
+  }
+
+  parseSocketFrame(value: unknown): ControlSocketFrame {
+    let decoded: unknown = value;
+    if (typeof value === "string") {
+      try {
+        decoded = JSON.parse(value);
+      } catch {
+        throw invalidResponse("The control service sent an unreadable event frame.");
+      }
+    }
+    const sync = controlSyncFrameSchema.safeParse(decoded);
+    if (sync.success) return sync.data;
+    const event = agentEventSchema.safeParse(decoded);
+    if (event.success) return event.data;
+    throw invalidResponse("The control service sent an invalid event frame.");
   }
 
   private authorizedHeaders(json = false): Record<string, string> {

@@ -18,6 +18,7 @@ export async function startEmbeddedGateway(options) {
   const config = loadGatewayConfig({ configPath });
   const contextConfig = loadModelContextConfig(rootDir, options.contextConfigPath);
   await discoverProviderModels(config, options.discoveryTimeoutMs ?? 5000, fetchImpl);
+  addDiscoveredModelProviderFallbacks(config);
   addAutomaticModelProtocolRoutes(config, contextConfig);
   if (config.models.size === 0) {
     throw new Error(
@@ -167,6 +168,7 @@ async function discoverProviderModels(config, timeoutMs, fetchImpl) {
           preOutputRetries: provider.preOutputRetries,
           maxBufferedStreamBytes: 8 * 1024 * 1024,
           runtimeInstructions: null,
+          discovered: true,
           routes: [{
             key: `${provider.id}\u0000${upstreamModel}\u0000${provider.protocol}`,
             provider,
@@ -183,6 +185,22 @@ async function discoverProviderModels(config, timeoutMs, fetchImpl) {
       clearTimeout(timeout);
     }
   }));
+}
+
+function addDiscoveredModelProviderFallbacks(config) {
+  const discovered = [...config.models.values()].filter((model) => model.discovered);
+  for (const model of discovered) {
+    const existingRouteKeys = new Set(model.routes.map((route) => route.key));
+    for (const candidate of discovered) {
+      if (candidate === model) continue;
+      for (const route of candidate.routes) {
+        if (!model.routes.some((current) => current.upstreamModel === route.upstreamModel)) continue;
+        if (existingRouteKeys.has(route.key)) continue;
+        model.routes.push({ ...route });
+        existingRouteKeys.add(route.key);
+      }
+    }
+  }
 }
 
 function discoveredPositiveInteger(item, keys) {

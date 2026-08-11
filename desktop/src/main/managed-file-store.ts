@@ -44,6 +44,7 @@ export class ManagedFileStore {
   private readonly filesDirectory: string;
   private readonly indexPath: string;
   private records: ManagedFileRecord[];
+  private validCache = new Map<string, boolean>();
 
   constructor(private readonly directory: string) {
     this.filesDirectory = path.join(directory, "files");

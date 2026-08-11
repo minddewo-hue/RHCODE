@@ -40,7 +40,8 @@ try {
     cwd: desktopDir,
     env: {
       ...environment,
-      RHZYCODE_GATEWAY_HOME: path.join(workspaceDir, "desktop"),
+      RHZYCODE_GATEWAY_HOME: process.env.RHZYCODE_TASK_GATEWAY_HOME
+        || path.join(workspaceDir, "desktop"),
       RHZYCODE_USER_DATA_DIR: automationUserData,
       RHZYCODE_CODEX_HOME: path.join(automationUserData, "codex-home"),
       RHZYCODE_SKIP_ENVIRONMENT_MIGRATION: "1",

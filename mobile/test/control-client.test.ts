@@ -79,6 +79,17 @@ test("verifies a long-lived KEY before saving and validates events at runtime", 
     sequence: 8,
     threadId: "thread-1",
   })).sequence, 8);
+  assert.deepEqual(client.parseSocketFrame(JSON.stringify({
+    type: "control.sync",
+    streamId: "stream-test-1",
+    lastSequence: 8,
+    earliestReplaySequence: 3,
+  })), {
+    type: "control.sync",
+    streamId: "stream-test-1",
+    lastSequence: 8,
+    earliestReplaySequence: 3,
+  });
   assert.throws(() => client.parseEvent('{"type":"unknown"}'), isCode("invalid_response"));
 });
 

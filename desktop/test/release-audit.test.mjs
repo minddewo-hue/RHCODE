@@ -102,3 +102,34 @@ test("audits the unpacked macOS application layout", async (context) => {
   assert.equal(result.manifest.arch, "arm64");
   assert.equal(result.manifest.artifacts.some((artifact) => artifact.path.endsWith("Contents/MacOS/RHZYCODE")), true);
 });
+
+test("audits the unpacked Linux application layout", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-linux-release-audit-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const desktopDir = path.join(root, "desktop");
+  const source = path.join(root, "source");
+  const unpacked = path.join(desktopDir, "release", "linux-unpacked");
+  const resources = path.join(unpacked, "resources");
+  fs.mkdirSync(source, { recursive: true });
+  fs.mkdirSync(resources, { recursive: true });
+  fs.writeFileSync(path.join(desktopDir, "package.json"), "{\"dependencies\":{}}\n");
+  fs.writeFileSync(path.join(source, "index.js"), "console.log('clean');\n");
+  fs.writeFileSync(path.join(unpacked, "rhzycode"), "test executable");
+  fs.writeFileSync(path.join(desktopDir, "release", "RHZYCODE-0.1.0-x64.AppImage"), "appimage");
+  fs.writeFileSync(path.join(desktopDir, "release", "RHZYCODE-0.1.0-x64.deb"), "deb");
+  await createPackage(source, path.join(resources, "app.asar"));
+
+  const result = auditRelease({
+    desktopDir,
+    version: "0.1.0-test",
+    electronVersion: "test-electron",
+    codexVersion: "test-codex",
+    platform: "linux",
+    arch: "x64",
+  });
+  assert.equal(result.manifest.platform, "linux");
+  assert.equal(result.manifest.updateConfigured, false);
+  assert.equal(result.manifest.artifacts.some((artifact) => artifact.path === "linux-unpacked/rhzycode"), true);
+  assert.equal(result.manifest.artifacts.some((artifact) => artifact.path.endsWith(".AppImage")), true);
+  assert.equal(result.manifest.artifacts.some((artifact) => artifact.path.endsWith(".deb")), true);
+});

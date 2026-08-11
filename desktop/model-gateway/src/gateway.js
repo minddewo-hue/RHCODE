@@ -275,13 +275,13 @@ async function handleResponses({
             streamed: true,
           }),
         onError: (error) =>
-          log(config, "error", {
-            event: "stream_interrupted",
-            request_id: requestId,
-            turn_id: turnId,
-            provider: selected.route.provider.id,
-            public_model: model.id,
-            message: sanitizeMessage(error?.message || String(error)),
+          logStreamTermination({
+            selected,
+            config,
+            model,
+            requestId,
+            turnId,
+            error,
           }),
       });
     } finally {
@@ -503,8 +503,11 @@ async function selectUpstream({
         recordSuccess(route, state, upstream.response.status);
         return { ...upstream, route, body: responseBody, responseRequest, gammaState };
       } catch (error) {
+        const downstreamDisconnected = upstream?.wasDownstreamDisconnected?.()
+          || isDownstreamDisconnected(error);
         upstream?.cleanup();
         upstream = null;
+        if (downstreamDisconnected) throw downstreamDisconnectedError(error);
         if (state.activeRequests.get(requestId)?.interrupted) {
           throw requestInterruptedError();
         }
@@ -868,9 +871,14 @@ async function fetchRoute({
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   timeout.unref?.();
   const abort = () => controller.abort();
+  let downstreamDisconnected = false;
+  const abortForDownstream = () => {
+    downstreamDisconnected = true;
+    controller.abort();
+  };
   if (activeRequest) activeRequest.abort = abort;
-  req.once("aborted", abort);
-  res.once("close", abort);
+  req.once("aborted", abortForDownstream);
+  res.once("close", abortForDownstream);
 
   const headers = {
     "Content-Type": "application/json",
@@ -888,8 +896,8 @@ async function fetchRoute({
 
   const cleanup = () => {
     clearTimeout(timeout);
-    req.off("aborted", abort);
-    res.off("close", abort);
+    req.off("aborted", abortForDownstream);
+    res.off("close", abortForDownstream);
     if (activeRequest?.abort === abort) activeRequest.abort = null;
   };
 
@@ -904,10 +912,12 @@ async function fetchRoute({
       response,
       cleanup,
       abort,
+      wasDownstreamDisconnected: () => downstreamDisconnected,
       streamIdleTimeoutMs: provider.streamIdleTimeoutMs || config.streamIdleTimeoutMs,
     };
   } catch (error) {
     cleanup();
+    if (downstreamDisconnected) throw downstreamDisconnectedError(error);
     throw error;
   }
 }
@@ -948,6 +958,14 @@ function upstreamTimeoutError(message) {
 
 function requestInterruptedError() {
   return new HttpError(499, "The request was interrupted.", "request_interrupted");
+}
+
+function downstreamDisconnectedError(cause) {
+  return new HttpError(499, "The downstream client disconnected.", "client_disconnected", { cause });
+}
+
+function isDownstreamDisconnected(error) {
+  return error instanceof HttpError && error.code === "client_disconnected";
 }
 
 function isUpstreamTimeout(error) {
@@ -1078,18 +1096,34 @@ async function pipeNativeResponsesStream({
       streamed: true,
     });
   } catch (error) {
-    log(config, "error", {
-      event: "stream_interrupted",
-      request_id: requestId,
-      turn_id: turnId,
-      provider: selected.route.provider.id,
-      public_model: model.id,
-      message: sanitizeMessage(error?.message || String(error)),
+    logStreamTermination({
+      selected,
+      config,
+      model,
+      requestId,
+      turnId,
+      error,
     });
-    res.destroy(error instanceof Error ? error : undefined);
+    if (!selected.wasDownstreamDisconnected?.()) {
+      res.destroy(error instanceof Error ? error : undefined);
+    }
   } finally {
     selected.cleanup();
   }
+}
+
+function logStreamTermination({ selected, config, model, requestId, turnId, error }) {
+  const downstreamDisconnected = selected.wasDownstreamDisconnected?.() === true;
+  log(config, downstreamDisconnected ? "debug" : "error", {
+    event: downstreamDisconnected ? "downstream_disconnected" : "stream_interrupted",
+    request_id: requestId,
+    turn_id: turnId,
+    provider: selected.route.provider.id,
+    public_model: model.id,
+    message: downstreamDisconnected
+      ? undefined
+      : sanitizeMessage(error?.message || String(error)),
+  });
 }
 
 function routesForRequest(model, previousResponseId, state, config) {
@@ -1121,14 +1155,7 @@ function routesForRequest(model, previousResponseId, state, config) {
 
 function availableRoutes(routes, state) {
   const now = Date.now();
-  const available = routes.filter((route) => (state.circuits.get(route.key)?.openUntil || 0) <= now);
-  if (available.length > 0) return available;
-
-  return [...routes].sort(
-    (a, b) =>
-      (state.circuits.get(a.key)?.openUntil || 0) -
-      (state.circuits.get(b.key)?.openUntil || 0),
-  );
+  return routes.filter((route) => (state.circuits.get(route.key)?.openUntil || 0) <= now);
 }
 
 function recordFailure(route, state, config, status) {
@@ -1388,9 +1415,9 @@ function isRetryableStatus(status) {
 }
 
 function isProtocolRouteMismatch(status, body) {
-  if (![400, 404, 405, 422].includes(status)) return false;
+  if (![400, 403, 404, 405, 422].includes(status)) return false;
   const message = body.toString("utf8", 0, Math.min(body.length, 4096));
-  return /request_not_supported_by_route|unsupported[^\n]{0,80}route|route[^\n]{0,80}not[^\n]{0,40}support/i.test(message);
+  return /request_not_supported_by_route|unsupported[^\n]{0,80}route|route[^\n]{0,80}not[^\n]{0,40}support|does not allow \/v1\/(responses|chat\/completions|messages) dispatch/i.test(message);
 }
 
 function logProtocolFallback(config, requestId, model, route, status) {

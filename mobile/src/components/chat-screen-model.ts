@@ -176,6 +176,18 @@ export function needsThreadHistoryCatchUp(options: {
   return options.error !== undefined && Boolean(options.isRetryableError?.(options.error));
 }
 
+export function assistantDisplayContent(
+  item: Pick<TimelineItem, "content" | "title" | "status">,
+): string {
+  const content = item.content || item.title;
+  if (item.status !== "running") return content;
+
+  const lines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const isSeparatorNoise = lines.length >= 3
+    && lines.every((line) => line.length >= 8 && /^[-=_.~]+$/.test(line));
+  return isSeparatorNoise ? "" : content;
+}
+
 /** Keep softly polling while the selected thread history is still incomplete. */
 export function shouldContinueThreadHistorySoftRetry(options: {
   online: boolean;

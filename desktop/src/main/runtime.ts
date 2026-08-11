@@ -258,6 +258,7 @@ export class DesktopRuntime extends EventEmitter {
   private remoteAttachments = new Map<string, string[]>();
   private loadedThreadIds = new Set<string>();
   private threadLoadPromises = new Map<string, Promise<ThreadDetail>>();
+  private pendingThreadStorageDeletions = new Set<string>();
   private threadDetailCache = new Map<string, ThreadDetail>();
   private publishedGeneratedImageIds = new Set<string>();
   private publishedManagedFileIds = new Set<string>();
@@ -649,7 +650,7 @@ export class DesktopRuntime extends EventEmitter {
     }
     const listedServerThreads = (response.data || []).flatMap((serverThread) => {
       const threadId = serverThread.id;
-      if (!threadId) return [];
+      if (!threadId || this.pendingThreadStorageDeletions.has(threadId)) return [];
       const summary = toThreadSummary(
         serverThread,
         this.threads.get(threadId)?.model || "previous",
@@ -670,8 +671,10 @@ export class DesktopRuntime extends EventEmitter {
     for (const duplicateThreadId of duplicateThreadIds) this.removeRuntimeThread(duplicateThreadId);
     const serverThreads = listedServerThreads.filter((thread) => !duplicateThreadIds.has(thread.id));
     const serverThreadIds = new Set(serverThreads.map((thread) => thread.id));
-    const diskSessions = conversationListing.sessions
-      .filter((session) => session.archived === Boolean(options.archived));
+    const diskSessions = conversationListing.sessions.filter((session) => (
+      session.archived === Boolean(options.archived)
+      && !this.pendingThreadStorageDeletions.has(session.threadId)
+    ));
     const searchTerm = options.searchTerm?.trim().toLowerCase();
     const matchesOptions = (thread: ThreadSummary) => (
       (!options.cwd || comparablePath(thread.projectPath) === comparablePath(options.cwd))
@@ -712,6 +715,8 @@ export class DesktopRuntime extends EventEmitter {
       (this.controlPlane?.store.snapshot().timeline || []).map((item) => item.threadId),
     );
     const emptyLocalThreads = [...this.threads.values()].filter((thread) =>
+      !this.pendingThreadStorageDeletions.has(thread.id)
+      &&
       !serverThreadIds.has(thread.id)
       && !diskThreadIds.has(thread.id)
       && thread.status === "idle"
@@ -757,10 +762,26 @@ export class DesktopRuntime extends EventEmitter {
     else if (this.pendingTurnStarts.has(threadId)) {
       throw new Error("Wait for the task to finish starting, then delete the conversation again.");
     }
-    await this.requestPermanentThreadDeletion(threadId, true);
-    await deleteConversationSessionFiles(this.codexHome, [threadId]);
+
+    if (this.pendingThreadStorageDeletions.has(threadId)) return;
+    this.pendingThreadStorageDeletions.add(threadId);
     this.managedFiles.removeThread(threadId);
     this.removeRuntimeThread(threadId, removalSequence);
+    // Keep the rollout until App Server has finished resolving its state-db
+    // entry, otherwise thread/delete can observe a stale local path.
+    void this.deleteThreadStorageAfterIndexCleanup(threadId);
+  }
+
+  private async deleteThreadStorageAfterIndexCleanup(threadId: string): Promise<void> {
+    try {
+      await this.requestPermanentThreadDeletion(threadId, true);
+      await deleteConversationSessionFiles(this.codexHome, [threadId]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit("agent:diagnostic", `Local deletion cleanup failed for ${threadId}: ${message}`);
+    } finally {
+      this.pendingThreadStorageDeletions.delete(threadId);
+    }
   }
 
   private async requestPermanentThreadDeletion(threadId: string, allowDiskFallback = false): Promise<void> {
@@ -842,7 +863,10 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   private async loadLocalThreadDetail(thread: ThreadSummary): Promise<ThreadDetail | null> {
-    const managedFiles = await this.loadManagedThreadFiles(thread.id);
+    // Reopening a history should not scan the whole rollout twice before the
+    // renderer can regain keyboard focus. Existing managed files are enough
+    // for display; the full uploaded-image reconciliation runs on resume.
+    const managedFiles = this.managedFiles.listThread(thread.id);
     return loadLocalRolloutThread(this.codexHome, thread, managedFiles, {
       materializeArtifacts: (turnId, content) => resolveArtifactPaths(thread.projectPath, [content])
         .flatMap((filePath) => {
@@ -1105,7 +1129,9 @@ export class DesktopRuntime extends EventEmitter {
     const turnId = this.activeTurns.get(threadId);
     if (!turnId) throw new Error("No active turn is available to interrupt.");
     this.clearGatewayFailure(turnId);
-    const interruptRequest = this.agent.request("turn/interrupt", { threadId, turnId });
+    // A stale App Server turn must not leave deletion or task controls waiting
+    // for the client's default 60-second RPC timeout.
+    const interruptRequest = this.agent.request("turn/interrupt", { threadId, turnId }, 5_000);
     this.gateway.interruptTurn(turnId);
     const response = await interruptRequest;
     this.activeTurns.delete(threadId);
@@ -1795,7 +1821,11 @@ export class DesktopRuntime extends EventEmitter {
         }
       }
       const timelineById = new Map<string, (typeof detail.timeline)[number]>();
-      for (const item of [...detail.timeline, ...remoteMessageTimeline(detail)]) {
+      for (const item of [...detail.timeline, ...remoteMessageTimeline(
+        detail,
+        (turnId) => this.turnClientMessageIds.get(turnId)
+          || this.controlPlane?.store.clientMessageIdForTurn(turnId),
+      )]) {
         const current = timelineById.get(item.id);
         timelineById.set(item.id, current ? preferTimelineItem(current, item) : item);
       }
@@ -2500,20 +2530,30 @@ function countVisibleRole(detail: ThreadDetail, role: ConversationMessage["role"
   )).length;
 }
 
-function remoteMessageTimeline(detail: ThreadDetail): TimelineItem[] {
+function remoteMessageTimeline(
+  detail: ThreadDetail,
+  clientMessageIdForTurn: (turnId: string) => string | undefined = () => undefined,
+): TimelineItem[] {
   const finalTimestamp = Date.parse(detail.thread.updatedAt);
   const messages = detail.messages.filter(isVisibleHistoryMessage);
   const baseTimestamp = Number.isFinite(finalTimestamp)
     ? finalTimestamp - Math.max(0, messages.length - 1)
     : Date.now();
   return messages.map((message, index) => {
+    const turnId = timelineItemTurnId(message.id);
+    const clientMessageId = message.role === "user" && turnId
+      ? clientMessageIdForTurn(turnId)
+      : undefined;
     const files = message.files?.map(({ path: _path, ...file }) => file);
     const images = message.images
       ?.filter((image) => image.generated)
       .map((image) => ({ id: image.name, name: image.name, generated: true as const }));
     return {
       id: message.id,
+      logicalId: clientMessageId ? `client-message:${clientMessageId}` : message.id,
+      ...(turnId ? { turnId } : {}),
       threadId: detail.thread.id,
+      ...(clientMessageId ? { clientMessageId } : {}),
       kind: message.role,
       status: "completed" as const,
       title: message.role === "user" ? "You" : "RHZYCODE",
@@ -2523,6 +2563,11 @@ function remoteMessageTimeline(detail: ThreadDetail): TimelineItem[] {
       createdAt: new Date(baseTimestamp + index).toISOString(),
     };
   });
+}
+
+function timelineItemTurnId(itemId: string): string | null {
+  const separator = itemId.indexOf("::");
+  return separator > 0 ? itemId.slice(0, separator) : null;
 }
 
 function managedFileReference(record: ManagedFileRecord, includePath = false): ConversationFile {

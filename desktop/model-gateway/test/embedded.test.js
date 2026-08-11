@@ -118,6 +118,80 @@ test("uses the injected fetch implementation for upstream requests", async (cont
   );
 });
 
+test("does not report a downstream stream cancellation as an upstream interruption", async (context) => {
+  const upstream = http.createServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [] }));
+      return;
+    }
+    for await (const _chunk of request) {
+      // Consume the request before starting the response stream.
+    }
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(
+      'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_cancel","object":"response","status":"in_progress"}}\n\n',
+    );
+  });
+  await new Promise((resolve, reject) => {
+    upstream.once("error", reject);
+    upstream.listen(0, "127.0.0.1", resolve);
+  });
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-downstream-cancel-"));
+  fs.writeFileSync(path.join(rootDir, "gateway.config.json"), JSON.stringify({
+    providers: {
+      local: {
+        base_url: `http://127.0.0.1:${address.port}/v1`,
+        protocol: "responses",
+      },
+    },
+    models: {
+      "local/test": { provider: "local", upstream_model: "test" },
+    },
+  }));
+  const logEvents = [];
+  const gateway = await startEmbeddedGateway({
+    rootDir,
+    port: 0,
+    onLog: (event) => logEvents.push(event),
+  });
+  context.after(async () => {
+    await gateway.stop();
+    upstream.closeAllConnections();
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  const response = await fetch(`${gateway.baseUrl}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "local/test",
+      stream: true,
+      input: "run a tool",
+      client_metadata: { turn_id: "turn-client-cancel" },
+    }),
+  });
+  const reader = response.body.getReader();
+  const first = await reader.read();
+  assert.equal(first.done, false);
+  await reader.cancel();
+
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (logEvents.some((event) => event.event === "downstream_disconnected")) break;
+    await delay(10);
+  }
+  assert.equal(
+    logEvents.some((event) => event.event === "downstream_disconnected"
+      && event.turn_id === "turn-client-cancel"),
+    true,
+  );
+  assert.equal(logEvents.some((event) => event.event === "stream_interrupted"), false);
+});
+
 test("reroutes image-model compaction through the thread's selected text model", async (context) => {
   let upstreamBody = null;
   const upstream = http.createServer(async (request, response) => {

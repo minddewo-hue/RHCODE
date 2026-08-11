@@ -454,6 +454,7 @@ test("multi-model gateway integration", async (t) => {
           upstream_model: "limited-upstream",
           capabilities: { parallel_tool_calls: false },
         },
+        "single-fail/model": { provider: "primary", upstream_model: "single-fail-upstream" },
         "timeout/model": {
           provider: "slow",
           upstream_model: "same-model",
@@ -484,6 +485,7 @@ test("multi-model gateway integration", async (t) => {
             "sticky/*",
             "chat/*",
             "limited/*",
+            "single-fail/*",
             "timeout/*",
             "broken/*",
             "idle/*",
@@ -988,6 +990,24 @@ test("multi-model gateway integration", async (t) => {
     assert.equal((await response.json()).id, "resp_backup");
     assert.ok(calls.some((entry) => entry.path === "/failing/v1/responses"));
     assert.ok(calls.some((entry) => entry.path === "/backup/v1/responses"));
+  });
+
+  await t.test("does not retry a single-route model while its circuit is open", async () => {
+    const before = calls.filter((entry) => entry.path === "/primary/v1/responses").length;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await gatewayFetch(baseUrl, "/v1/responses", {
+        body: { model: "single-fail/model", input: "error-500" },
+      });
+      assert.equal(response.status, 500);
+    }
+
+    const blocked = await gatewayFetch(baseUrl, "/v1/responses", {
+      body: { model: "single-fail/model", input: "error-500" },
+    });
+    assert.equal(blocked.status, 502);
+    assert.equal((await blocked.json()).error.code, "upstream_unavailable");
+    const after = calls.filter((entry) => entry.path === "/primary/v1/responses").length;
+    assert.equal(after - before, 2);
   });
 
   await t.test("fails over after a first-byte timeout", async () => {

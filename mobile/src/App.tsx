@@ -50,7 +50,6 @@ import {
   openThreadHistoryRetryDelayMs,
   openThreadHistorySoftRetryDelayMs,
   reconcilePendingMessages,
-  shouldCatchUpActiveThread,
   shouldContinueThreadHistorySoftRetry,
   shouldKeepSelectedThread,
   shouldOpenThreadHistory,
@@ -58,12 +57,17 @@ import {
   shouldResetOpenedThreadHistory,
   shouldRetryOpenThreadHistory,
 } from "./components/chat-screen-model";
-import { remoteModelReasoningEfforts } from "./components/model-picker-model";
+import { preferredRemoteModel, remoteModelReasoningEfforts } from "./components/model-picker-model";
 import { ModelPickerSheet } from "./components/ModelPickerSheet";
 import { ProjectPickerSheet, ThreadActionsSheet } from "./components/TaskSheets";
 import { describeControlError, useControlPlane } from "./hooks/use-control-plane";
 import { createNativeSecureSessionStore } from "./storage/native-secure-session";
-import type { MobileSession, MobileSessionState, SecureSessionStore } from "./storage/secure-session";
+import type {
+  MobileSession,
+  MobileSessionState,
+  PendingCommandReceipt,
+  SecureSessionStore,
+} from "./storage/secure-session";
 import { isRegisteredProject, isSameProjectPath, registeredProjectPaths, resolveNewThreadProjectPath } from "./state/project-list";
 import { colors, createThemedStyles, loadThemeMode, saveThemeMode, setActiveThemeMode, type ThemeMode } from "./ui/theme";
 import { defaultUpdateManifestUrl } from "./platform/update/mobile-update";
@@ -88,6 +92,20 @@ function imageMimeType(name: string): string {
   if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
   if (extension === "svg") return "image/svg+xml";
   return `image/${extension || "png"}`;
+}
+
+async function pendingCommandFingerprint(input: {
+  text: string;
+  attachments: RemoteTurnAttachment[];
+  model: string;
+  approvalPolicy: RemoteApprovalPolicy;
+  sandboxMode: RemoteSandboxMode;
+  reasoningEffort: RemoteReasoningEffort | null;
+}): Promise<string> {
+  return Crypto.digestStringAsync(
+    Crypto.CryptoDigestAlgorithm.SHA256,
+    JSON.stringify(input),
+  );
 }
 
 interface ThreadActionTarget {
@@ -134,6 +152,8 @@ function AppContent() {
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<RemoteTurnAttachment[]>([]);
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
+  const [pendingCommandReceipts, setPendingCommandReceipts] = useState<PendingCommandReceipt[]>([]);
+  const [pendingReceiptsReady, setPendingReceiptsReady] = useState(false);
   const [sending, setSending] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
   const [inputBusyId, setInputBusyId] = useState<string | null>(null);
@@ -144,6 +164,7 @@ function AppContent() {
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [models, setModels] = useState<RemoteModelOption[]>([]);
   const [selectedModel, setSelectedModel] = useState("");
+  const [preferredModel, setPreferredModel] = useState("");
   const [approvalPolicy, setApprovalPolicy] = useState<RemoteApprovalPolicy>("never");
   const [sandboxMode, setSandboxMode] = useState<RemoteSandboxMode>("danger-full-access");
   const [reasoningEffort, setReasoningEffort] = useState<RemoteReasoningEffort>("high");
@@ -171,12 +192,12 @@ function AppContent() {
   });
   const modelsLoadingRef = useRef(false);
   const modelSelectionContext = useRef("");
+  const preferredModelRef = useRef("");
   const navigationSessionIdRef = useRef<string | null>(null);
   const openedThreadHistoryRef = useRef<string | null>(null);
   const sparseHistoryAttemptsRef = useRef(new Map<string, number>());
   const threadsNeedingHistoryCatchUpRef = useRef(new Set<string>());
   const connectionStatusRef = useRef<string | null>(null);
-  const turnCatchUpTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
   const sendInFlightRef = useRef(false);
   const session = useMemo(
     () => sessionState.connections.find((connection) => connection.id === sessionState.activeConnectionId) || null,
@@ -283,20 +304,35 @@ function AppContent() {
     setProjectsLoaded(false);
     setModels([]);
     setSelectedModel("");
+    setPreferredModel("");
+    preferredModelRef.current = "";
     setModelPickerVisible(false);
     setModelsError(null);
     modelSelectionContext.current = "";
     setArchivedThreads([]);
     setPendingMessages([]);
+    setPendingCommandReceipts([]);
+    setPendingReceiptsReady(false);
     setDraft("");
     setThreadAction(null);
     if (session?.id) {
+      void sessionStore.loadPendingCommands(session.id).then((receipts) => {
+        if (!active) return;
+        setPendingCommandReceipts(receipts);
+        setPendingReceiptsReady(true);
+      }).catch(() => {
+        if (active) setPendingReceiptsReady(true);
+      });
       void sessionStore.loadNavigation(session.id).then((navigation) => {
         if (!active) return;
         setSelectedProjectPath(navigation.projectPath);
         setSelectedThreadId(navigation.threadId);
         setNewThreadDraft(navigation.newThreadDraft);
         setCollapsedProjectPaths(navigation.collapsedProjectPaths);
+        const restoredPreferredModel = navigation.preferredModel || "";
+        preferredModelRef.current = restoredPreferredModel;
+        setPreferredModel(restoredPreferredModel);
+        setSelectedModel(restoredPreferredModel);
         navigationSessionIdRef.current = session.id;
         setNavigationReady(true);
       }).catch(() => {
@@ -307,9 +343,23 @@ function AppContent() {
       });
     } else {
       setNavigationReady(true);
+      setPendingReceiptsReady(true);
     }
     return () => { active = false; };
   }, [session?.id, sessionStore]);
+
+  useEffect(() => {
+    if (!pendingReceiptsReady || !session?.id) return;
+    void sessionStore.savePendingCommands(session.id, pendingCommandReceipts);
+  }, [pendingCommandReceipts, pendingReceiptsReady, session?.id, sessionStore]);
+
+  useEffect(() => {
+    const acknowledged = new Set(control.snapshot.timeline.flatMap((item) => (
+      item.clientMessageId ? [item.clientMessageId] : []
+    )));
+    if (!acknowledged.size) return;
+    setPendingCommandReceipts((current) => current.filter((receipt) => !acknowledged.has(receipt.id)));
+  }, [control.snapshot.timeline]);
 
   useEffect(() => {
     if (!navigationReady || !session?.id || navigationSessionIdRef.current !== session.id) return;
@@ -318,8 +368,9 @@ function AppContent() {
       threadId: selectedThreadId,
       newThreadDraft,
       collapsedProjectPaths,
+      preferredModel: preferredModel || null,
     });
-  }, [collapsedProjectPaths, navigationReady, newThreadDraft, selectedProjectPath, selectedThreadId, session?.id, sessionStore]);
+  }, [collapsedProjectPaths, navigationReady, newThreadDraft, preferredModel, selectedProjectPath, selectedThreadId, session?.id, sessionStore]);
 
   const loadProjects = useCallback(async () => {
     if (!taskClient) return;
@@ -353,11 +404,12 @@ function AppContent() {
     try {
       const result = await taskClient.listModels();
       setModels(result.models);
+      const nextPreferredModel = preferredRemoteModel(result.models, preferredModelRef.current);
+      preferredModelRef.current = nextPreferredModel;
+      setPreferredModel(nextPreferredModel);
       setSelectedModel((current) => {
         if (result.models.some((model) => model.model === current)) return current;
-        return result.models.find((model) => model.isDefault)?.model
-          || result.models[0]?.model
-          || "";
+        return nextPreferredModel;
       });
     } catch (error) {
       setModelsError(describeControlError(error));
@@ -404,9 +456,7 @@ function AppContent() {
     setSelectedModel((current) => {
       if (!contextChanged && models.some((model) => model.model === current)) return current;
       return models.find((model) => model.model === threadModel)?.model
-        || models.find((model) => model.isDefault)?.model
-        || models[0]?.model
-        || "";
+        || preferredRemoteModel(models, preferredModelRef.current);
     });
   }, [modelCatalogKey, selectedThreadId, session?.id]);
 
@@ -588,23 +638,6 @@ function AppContent() {
     }
   }, [control.status]);
 
-  useEffect(() => () => {
-    for (const timer of turnCatchUpTimersRef.current) clearTimeout(timer);
-    turnCatchUpTimersRef.current = [];
-  }, []);
-
-  useEffect(() => {
-    if (!selectedThreadId || !shouldCatchUpActiveThread({
-      online: control.status === "online",
-      threadStatus: selectedThread?.status,
-    })) return undefined;
-    // Snapshot catch-up covers AI stream frames lost while the socket flaps on weak networks.
-    const timer = setInterval(() => {
-      void control.refresh();
-    }, 3_500);
-    return () => clearInterval(timer);
-  }, [control.refresh, control.status, selectedThread?.status, selectedThreadId]);
-
   useEffect(() => {
     if (!projectsLoaded || !selectedProjectPath || isRegisteredProject(selectedProjectPath, recentProjects)) return;
     setSelectedProjectPath(null);
@@ -680,6 +713,12 @@ function AppContent() {
     setDraft("");
     setAttachments([]);
     setProjectPickerVisible(false);
+  }, []);
+
+  const selectPreferredModel = useCallback((model: string) => {
+    preferredModelRef.current = model;
+    setPreferredModel(model);
+    setSelectedModel(model);
   }, []);
 
   const openNewThread = useCallback((requestedProjectPath?: string) => {
@@ -763,7 +802,7 @@ function AppContent() {
       if (command.args) {
         const target = models.find((model) => model.model === command.args)
           || models.find((model) => model.displayName.toLocaleLowerCase().includes(command.args.toLocaleLowerCase()));
-        if (target) setSelectedModel(target.model);
+        if (target) selectPreferredModel(target.model);
         else Alert.alert("未找到模型", command.args);
       } else {
         setModelPickerVisible(true);
@@ -806,7 +845,7 @@ function AppContent() {
 
     Alert.alert("暂不支持", `已识别 /${command.name}，但手机版暂未提供此操作。`);
     return null;
-  }, [approvalPolicy, attachments.length, control, models, openNewThread, sandboxMode, selectedModel, selectedProjectPath, selectedThreadId, taskClient]);
+  }, [approvalPolicy, attachments.length, control, models, openNewThread, sandboxMode, selectPreferredModel, selectedModel, selectedProjectPath, selectedThreadId, taskClient]);
 
   const sendMessage = useCallback(async () => {
     let content = draft.trim();
@@ -822,21 +861,63 @@ function AppContent() {
       || (!content && !attachments.length)
       || sending
       || sendInFlightRef.current
+      || !pendingReceiptsReady
       || selectedIsArchived
     ) return;
     const submittedAttachments = attachments;
     const submittedText = content || "Review the attached files.";
+    sendInFlightRef.current = true;
+    setSending(true);
     const retryPending = selectedThreadId ? findRetryablePendingMessage(pendingMessages, {
       threadId: selectedThreadId,
       content: submittedText,
       attachments: submittedAttachments,
     }) : null;
-    const id = retryPending?.id || Crypto.randomUUID();
+    const receiptContext = selectedThreadId
+      ? `thread:${selectedThreadId}`
+      : `project:${selectedProjectPath || ""}`;
+    let fingerprint: string;
+    try {
+      fingerprint = await pendingCommandFingerprint({
+        text: submittedText,
+        attachments: submittedAttachments,
+        model: selectedModel,
+        approvalPolicy,
+        sandboxMode,
+        reasoningEffort: reasoningEfforts.length ? reasoningEffort : null,
+      });
+    } catch (error) {
+      sendInFlightRef.current = false;
+      setSending(false);
+      Alert.alert("无法准备发送请求", error instanceof Error ? error.message : String(error));
+      return;
+    }
+    const persistedReceipt = pendingCommandReceipts
+      .filter((receipt) => (
+        receipt.state === "uncertain"
+        && receipt.context === receiptContext
+        && receipt.fingerprint === fingerprint
+      ))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    const id = retryPending?.id || persistedReceipt?.id || Crypto.randomUUID();
     let targetThreadId = selectedThreadId;
     let pendingAdded = false;
-    sendInFlightRef.current = true;
-    setSending(true);
     try {
+      const receipt: PendingCommandReceipt = {
+        id,
+        context: receiptContext,
+        fingerprint,
+        createdAt: persistedReceipt?.createdAt || retryPending?.createdAt || new Date().toISOString(),
+        state: "uncertain",
+      };
+      const nextReceipts = [
+        ...pendingCommandReceipts.filter((current) => current.id !== id),
+        receipt,
+      ].slice(-8);
+      setPendingCommandReceipts(nextReceipts);
+      if (session?.id) await sessionStore.savePendingCommands(session.id, nextReceipts);
+      let activeReceipts = nextReceipts;
+
       if (!targetThreadId) {
         const result = await runControlCommandWithRetry(() => taskClient.startThread({
           projectPath: selectedProjectPath!,
@@ -847,6 +928,13 @@ function AppContent() {
         targetThreadId = result.threadId;
         setSelectedThreadId(targetThreadId);
         setNewThreadDraft(false);
+        const threadContext = `thread:${targetThreadId}`;
+        const threadReceipts = nextReceipts.map((entry) => (
+          entry.id === id ? { ...entry, context: threadContext } : entry
+        ));
+        setPendingCommandReceipts(threadReceipts);
+        if (session?.id) await sessionStore.savePendingCommands(session.id, threadReceipts);
+        activeReceipts = threadReceipts;
       }
 
       const pending: PendingMessage = {
@@ -891,14 +979,18 @@ function AppContent() {
       setPendingMessages((current) => current.map((message) => (
         message.id === id ? { ...message, state: "sent" } : message
       )));
-      // Prefer live events over a blocking snapshot refresh on weak networks,
-      // then schedule short catch-up polls in case stream frames were dropped.
-      void control.refresh();
-      for (const timer of turnCatchUpTimersRef.current) clearTimeout(timer);
-      turnCatchUpTimersRef.current = [2_000, 6_000, 14_000].map((delay) => setTimeout(() => {
-        void control.refresh();
-      }, delay));
+      const acceptedReceipts = activeReceipts.map((receipt) => (
+        receipt.id === id ? { ...receipt, state: "accepted" as const } : receipt
+      ));
+      setPendingCommandReceipts(acceptedReceipts);
+      if (session?.id) await sessionStore.savePendingCommands(session.id, acceptedReceipts);
+      // The ordered event stream is the normal catch-up path. A single snapshot
+      // is enough when the socket is offline; concurrent refresh bursts can race.
+      if (control.status !== "online") void control.refresh();
     } catch (error) {
+      if (!isRetryableConnectionError(error)) {
+        setPendingCommandReceipts((current) => current.filter((receipt) => receipt.id !== id));
+      }
       if (pendingAdded) {
         if (targetThreadId) threadsNeedingHistoryCatchUpRef.current.add(targetThreadId);
         setPendingMessages((current) => current.map((message) => (
@@ -914,7 +1006,7 @@ function AppContent() {
       sendInFlightRef.current = false;
       setSending(false);
     }
-  }, [approvalPolicy, attachments, control, draft, executeComposerCommand, newThreadDraft, pendingMessages, reasoningEffort, reasoningEfforts, rejectCredentials, sandboxMode, selectedIsArchived, selectedModel, selectedProjectPath, selectedThreadId, sending, session, taskClient]);
+  }, [approvalPolicy, attachments, control, draft, executeComposerCommand, newThreadDraft, pendingCommandReceipts, pendingMessages, pendingReceiptsReady, reasoningEffort, reasoningEfforts, rejectCredentials, sandboxMode, selectedIsArchived, selectedModel, selectedProjectPath, selectedThreadId, sending, session, sessionStore, taskClient]);
 
   const addPickedAttachments = useCallback(async (picked: PickedAttachment[]) => {
     const available = Math.max(0, 20 - attachments.length);
@@ -1343,7 +1435,7 @@ function AppContent() {
         onOpenFile={openConversationFile}
         onDownloadGeneratedImage={downloadGeneratedImage}
         onShareGeneratedImage={shareGeneratedImage}
-        onRefresh={() => void control.refresh()}
+        onRefresh={control.refresh}
         onSend={() => void sendMessage()}
         onRemoveAttachment={(index) => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
         onReasoningEffortChange={setReasoningEffort}
@@ -1352,7 +1444,6 @@ function AppContent() {
         pendingMessages={pendingMessages}
         modelPickerEnabled={Boolean(taskClient && control.status === "online")}
         newThreadDraft={newThreadDraft && Boolean(selectedProjectPath)}
-        refreshing={control.refreshing}
         resolveGeneratedImage={(imageId) => taskClient?.generatedImageSource(imageId) || null}
         resolveManagedImage={(fileId) => {
           if (!taskClient) return null;
@@ -1429,7 +1520,7 @@ function AppContent() {
         onClose={() => setModelPickerVisible(false)}
         onRefresh={() => void loadModels()}
         onSelect={(model) => {
-          setSelectedModel(model);
+          selectPreferredModel(model);
           setModelPickerVisible(false);
           if (taskClient && selectedThreadId) {
             void taskClient.setThreadModel(selectedThreadId, model)

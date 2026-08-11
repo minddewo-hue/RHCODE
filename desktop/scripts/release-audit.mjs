@@ -28,14 +28,16 @@ export function auditRelease({
 }) {
   const releaseDir = path.join(desktopDir, "release");
   const macAppBundle = platform === "darwin" ? findMacAppBundle(releaseDir) : null;
-  const unpackedDir = platform === "darwin" ? macAppBundle : path.join(releaseDir, "win-unpacked");
+  const unpackedDir = platform === "darwin"
+    ? macAppBundle
+    : path.join(releaseDir, platform === "linux" ? "linux-unpacked" : "win-unpacked");
   const resourcesDir = platform === "darwin"
     ? path.join(unpackedDir || "", "Contents", "Resources")
     : path.join(unpackedDir, "resources");
   const asarPath = path.join(resourcesDir, "app.asar");
   const unpackedExecutable = platform === "darwin"
     ? path.join(unpackedDir || "", "Contents", "MacOS", "RHZYCODE")
-    : path.join(unpackedDir, "RHZYCODE.exe");
+    : path.join(unpackedDir, platform === "linux" ? "rhzycode" : "RHZYCODE.exe");
   if (!fs.existsSync(asarPath) || !fs.existsSync(unpackedExecutable)) {
     throw new Error(`Release audit could not find the unpacked ${platform} application, app.asar, and executable.`);
   }
@@ -80,7 +82,9 @@ export function auditRelease({
       const extension = path.extname(filePath).toLowerCase();
       const releaseExtensions = platform === "darwin"
         ? new Set([".dmg", ".zip", ".blockmap", ".yml"])
-        : new Set([".exe", ".blockmap", ".yml"]);
+        : platform === "linux"
+          ? new Set([".appimage", ".deb", ".blockmap", ".yml"])
+          : new Set([".exe", ".blockmap", ".yml"]);
       return path.dirname(filePath) === releaseDir && releaseExtensions.has(extension);
     }) : []),
   ]);
@@ -101,11 +105,13 @@ export function auditRelease({
   if (signingRequired) {
     if (platform === "darwin") {
       verifyMacCodeSignature(unpackedDir);
-    } else {
+    } else if (platform === "win32") {
       const invalidSignatures = artifacts.filter((artifact) => artifact.authenticode && artifact.authenticode !== "Valid");
       if (invalidSignatures.length > 0) {
         throw new Error(`Required Authenticode validation failed: ${invalidSignatures.map((value) => value.path).join(", ")}`);
       }
+    } else {
+      throw new Error("Release signing validation is not supported for Linux releases.");
     }
   }
 
@@ -225,7 +231,7 @@ if (isMain) {
     electronVersion: packageJson.devDependencies.electron,
     codexVersion,
     signingRequired: process.env.RHZYCODE_REQUIRE_SIGNING === "1",
-    platform: process.platform === "darwin" ? "darwin" : "win32",
+    platform: process.platform === "darwin" ? "darwin" : process.platform === "linux" ? "linux" : "win32",
     arch: process.arch === "arm64" ? "arm64" : "x64",
   });
   console.log(`Release audit passed: ${result.manifestPath}`);

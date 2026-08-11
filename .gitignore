@@ -26,6 +26,10 @@ Desktop.ini
 
 # Runtime logs, diagnostics, and local scratch data
 /logs/
+/.tmp-*
+/canary.txt
+/config.json
+/snake.py
 
 # Local credentials and generated gateway state
 .env

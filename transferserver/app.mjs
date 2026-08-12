@@ -49,7 +49,10 @@ export async function createTransferServer(options = {}) {
     if (!limiter.allow(`global:${digestText(request.ip)}`, 600)) return sendRateLimited(reply);
     const isWebSocket = String(request.headers.upgrade || "").toLowerCase() === "websocket";
     const origin = String(request.headers.origin || "");
-    if (isWebSocket && origin && !allowedOrigins.has(origin)) {
+    // React Native/Expo WebSocket clients send local or app-scheme Origins.
+    // Keep rejecting arbitrary browser origins while allowing native clients
+    // to establish the authenticated event stream.
+    if (isWebSocket && origin && !isAllowedWebSocketOrigin(origin, allowedOrigins)) {
       return reply.code(403).send({ error: "origin_not_allowed" });
     }
     if (!requireTls || request.url === "/health") return;
@@ -136,6 +139,18 @@ function normalizedOrigins(value) {
 
 function normalizedHosts(value) {
   return new Set(listValues(value).map((entry) => entry.toLowerCase()));
+}
+
+function isAllowedWebSocketOrigin(origin, allowedOrigins) {
+  if (allowedOrigins.has(origin)) return true;
+  try {
+    const url = new URL(origin);
+    if (url.protocol === "exp:" || url.protocol === "exps:") return true;
+    return (url.protocol === "http:" || url.protocol === "https:")
+      && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]");
+  } catch {
+    return false;
+  }
 }
 
 function listValues(value) {

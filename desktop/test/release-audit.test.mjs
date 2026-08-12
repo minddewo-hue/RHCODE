@@ -6,6 +6,17 @@ import test from "node:test";
 import { createPackage } from "@electron/asar";
 import { auditRelease } from "../scripts/release-audit.mjs";
 
+test("configures the Windows uninstaller to remove RHZYCODE user data", () => {
+  const packageScript = fs.readFileSync(
+    path.resolve(import.meta.dirname, "../scripts/package-release.mjs"),
+    "utf8",
+  );
+  assert.match(
+    packageScript,
+    /nsis\s*:\s*\{[\s\S]*?deleteAppDataOnUninstall\s*:\s*true[\s\S]*?\}/,
+  );
+});
+
 test("audits a clean release and rejects sensitive ASAR or resource files", async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-release-audit-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));

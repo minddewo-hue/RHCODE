@@ -156,6 +156,7 @@ const artifacts = await build({
       allowToChangeInstallationDirectory: true,
       createDesktopShortcut: true,
       createStartMenuShortcut: true,
+      deleteAppDataOnUninstall: true,
     },
     mac: {
       category: "public.app-category.developer-tools",

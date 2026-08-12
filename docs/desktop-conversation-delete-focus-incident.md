@@ -2,6 +2,8 @@
 
 本文记录 RHZYCODE 桌面端在连续执行“删除对话 -> 切换对话”后，输入框长时间不能输入的问题。后续遇到输入框高亮但没有光标、点击后仍不能输入、重启后暂时恢复等现象时，应先按本文检查，不要只依赖 DOM 或 IPC 自动化测试。
 
+> 2026-08-11 后续调整：已移除输入框自动聚焦、窗口激活焦点恢复、删除/切换后的焦点恢复，以及模型下拉框自动聚焦和按会话自动改选模型。现在由用户的鼠标点击决定活动控件；输入框始终可编辑，历史加载只限制发送，不限制输入。
+
 ## 结论
 
 根因不是 `thread/delete` 执行慢，也不是对话数据量本身，而是删除线程时调用了 renderer 中的 `window.confirm`。
@@ -118,10 +120,8 @@ Windows 鼠标点击
   - `confirmPermanentThreadDeletion` 执行乐观删除和后台 IPC。
 - `desktop/src/renderer/src/components/AppModal.tsx`
   - 通用 renderer 模态框。
-- `desktop/src/renderer/src/components/DeleteConversationDialog.tsx`
-  - `Delete conversation` 的确认内容和操作按钮。
-- `desktop/src/renderer/src/hooks/useComposerFocus.ts`
-  - DOM 与 Electron 原生焦点恢复生命周期。
+- `desktop/src/renderer/src/components/DeleteConfirmationDialog.tsx`
+  - 对话与项目删除共用的应用内确认框。
 - `desktop/src/renderer/src/hooks/useInteractionTrace.ts`
   - 删除、切换和输入焦点的统一诊断事件。
 - `desktop/src/renderer/src/styles.css`
@@ -144,16 +144,11 @@ Windows 鼠标点击
 
 因此，侧边栏响应时间不再取决于真实历史文件大小或 App Server 清理时间。
 
-### 原生焦点恢复作为防御措施
+### 不再自动管理输入焦点
 
-`window:focus-contents` IPC 会在 main 中同时调用：
+后续真实数据测试仍发现连续删除后偶发不能输入，因此删除了 `useComposerFocus`、`window:focus-contents`、`window:focused` 和所有删除/切换后的 `focus()` 调用。删除确认按钮也不再使用 `autoFocus`。
 
-```ts
-mainWindow.focus();
-mainWindow.webContents.focus();
-```
-
-并在下一个事件循环再次执行。renderer 在窗口重新激活且 `document.hasFocus()` 为假时也会请求恢复。它是窗口切换、菜单等场景的防御措施，但不是线程删除修复的主要机制；主要机制仍是避免打开原生确认框。
+模型下拉框只接受用户直接选择。打开历史会话不再根据 `thread.model` 自动改选当前模型，`/model` 无参数时也不再自动聚焦或打开模型下拉框。这样删除、会话加载和模型同步都不会改变当前活动控件。
 
 ## 验证结果
 
@@ -163,7 +158,7 @@ mainWindow.webContents.focus();
 npm run typecheck --workspace @rhzycode/desktop
 npm run build --workspace @rhzycode/desktop
 Push-Location desktop
-npx playwright test --config=playwright.config.ts --grep "keeps the composer usable while deleting and switching conversations repeatedly|restores composer focus after consecutive conversation deletions settle|restores composer focus after deleting another conversation|keeps the composer editable when deleting the current conversation slowly"
+npx playwright test --config=playwright.config.ts --ignore-snapshots
 Pop-Location
 ```
 

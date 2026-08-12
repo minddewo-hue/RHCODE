@@ -378,7 +378,6 @@ export interface RhzycodeDesktopApi {
   getMobileAccessStatus(): Promise<MobileAccessStatus>;
   rotateMobileAccessKey(): Promise<NonNullable<MobileAccessStatus["accessKey"]>>;
   copyText(value: string): Promise<void>;
-  focusWindowContents(): Promise<void>;
   recordPerformanceTrace(event: string, detail?: Record<string, string | number | boolean | null>): void;
   getPersistenceStatus(): Promise<PersistenceStatus>;
   getSyncStatus(): Promise<SyncStatus>;
@@ -390,7 +389,6 @@ export interface RhzycodeDesktopApi {
   writeTerminal(processId: string, data: string): Promise<unknown>;
   resizeTerminal(processId: string, cols: number, rows: number): Promise<unknown>;
   stopTerminal(processId: string): Promise<unknown>;
-  onWindowFocus(listener: () => void): Unsubscribe;
   onAgentStatus(listener: (status: AgentStatus) => void): Unsubscribe;
   onTaskActivity(listener: (status: TaskActivityStatus) => void): Unsubscribe;
   onAgentMessage(listener: (message: RpcNotification) => void): Unsubscribe;

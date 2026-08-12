@@ -75,8 +75,7 @@ import { Terminal as XtermTerminal } from "@xterm/xterm";
 import { memo, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent } from "react";
 import "@xterm/xterm/css/xterm.css";
 import { AppModal } from "./components/AppModal";
-import { DeleteConversationDialog } from "./components/DeleteConversationDialog";
-import { useComposerFocus } from "./hooks/useComposerFocus";
+import { DeleteConfirmationDialog } from "./components/DeleteConfirmationDialog";
 import { useInteractionTrace } from "./hooks/useInteractionTrace";
 import {
   activityFromTimeline,
@@ -145,6 +144,9 @@ interface ThreadViewSnapshot {
 const MAX_CACHED_THREAD_VIEWS = 10;
 
 type AppDialogView = "settings" | "skills" | "transfer" | "export";
+type DeleteConfirmation =
+  | { type: "conversation"; threadId: string; title: string }
+  | { type: "project"; path: string; name: string };
 type ThemeMode = "light" | "dark";
 type ThemePreset = "forest" | "studio" | "glass" | "noir" | "rose" | "ocean";
 const THEME_PRESETS: Array<{ id: ThemePreset; label: string }> = [
@@ -283,7 +285,7 @@ export function App() {
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [primaryView, setPrimaryView] = useState<"workspace" | "terminal">("workspace");
   const [dialogView, setDialogView] = useState<AppDialogView | null>(null);
-  const [deleteConfirmation, setDeleteConfirmation] = useState<{ threadId: string; title: string } | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
   const [exportItems, setExportItems] = useState<ConversationExportItem[]>([]);
   const [selectedExportThreadIds, setSelectedExportThreadIds] = useState<Set<string>>(() => new Set());
   const [exportLoading, setExportLoading] = useState(false);
@@ -299,7 +301,7 @@ export function App() {
   const bootstrapCompleteRef = useRef(false);
   const bootstrapComposerTouchedRef = useRef(false);
   const threadSearchRef = useRef<HTMLInputElement | null>(null);
-  const modelSelectRef = useRef<HTMLSelectElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const selectedModelRef = useRef(selectedModel);
   const preferredModelRef = useRef(selectedModel);
   const selectedProjectPathRef = useRef(projectPath);
@@ -319,15 +321,6 @@ export function App() {
   const recentProjectsRef = useRef(recentProjects);
   const forgottenProjectPathsRef = useRef(forgottenProjectPaths);
   const tracePerformance = useInteractionTrace(selectedThreadIdRef);
-  const {
-    composerRef,
-    ensureNativeComposerFocus,
-    focusComposer,
-  } = useComposerFocus({
-    enabled: primaryView === "workspace",
-    blocked: Boolean(dialogView || deleteConfirmation),
-    traceInteraction: tracePerformance,
-  });
 
   composerValueRef.current = composer;
   attachmentsRef.current = attachments;
@@ -442,13 +435,6 @@ export function App() {
     preferredModelRef.current = nextModel;
     if (nextModel) localStorage.setItem("rhzycode.selectedModel", nextModel);
     return nextModel;
-  }
-
-  function restorePreferredModel(): void {
-    const nextModel = ensurePreferredModel();
-    if (!nextModel || nextModel === selectedModelRef.current) return;
-    selectedModelRef.current = nextModel;
-    setSelectedModel(nextModel);
   }
 
   useEffect(() => {
@@ -736,7 +722,6 @@ export function App() {
     setFailedPrompt(null);
     setAttachments([]);
     lastPrompt.current = "";
-    restorePreferredModel();
   }
 
   function leaveRemovedThread(removedThreadId: string): void {
@@ -744,10 +729,9 @@ export function App() {
     navigationRevisionRef.current += 1;
     composerDraftsRef.current.delete(composerDraftKey(selectedProjectPathRef.current, removedThreadId));
     resetConversation();
-    focusComposer();
   }
 
-  function applyThreadDetail(detail: ThreadDetail, availableModels: ModelOption[] = models): void {
+  function applyThreadDetail(detail: ThreadDetail): void {
     discardPendingStreamingUpdates();
     const changedThread = selectedThreadIdRef.current !== detail.thread.id
       || !isSameProjectPath(selectedProjectPathRef.current, detail.thread.projectPath);
@@ -774,16 +758,11 @@ export function App() {
     markThreadActive(detail.thread.id, active);
     lastPrompt.current = previousPrompt;
     setFailedPrompt(nextFailedPrompt);
-    if (availableModels.some((entry) => entry.model === detail.thread.model)) {
-      selectedModelRef.current = detail.thread.model;
-      setSelectedModel(detail.thread.model);
-    }
   }
 
   async function loadThreadDetail(
     selectedThreadId: string,
     revision: number,
-    availableModels: ModelOption[] = models,
     skipIfBootstrapComposerTouched = false,
   ): Promise<void> {
     openingThreadIdRef.current = selectedThreadId;
@@ -793,7 +772,7 @@ export function App() {
       const detail = await window.rhzycode.openThread(selectedThreadId);
       if (revision !== navigationRevisionRef.current) return;
       if (skipIfBootstrapComposerTouched && bootstrapComposerTouchedRef.current) return;
-      applyThreadDetail(detail, availableModels);
+      applyThreadDetail(detail);
     } catch (error) {
       if (revision === navigationRevisionRef.current) {
         upsertActivity(`history-error-${Date.now()}`, "Thread unavailable", getErrorMessage(error), "error");
@@ -908,7 +887,7 @@ export function App() {
       const preferredThread = projectThreads.find((thread) => thread.id === preferredThreadId)
         || projectThreads[0];
       if (preferredThread) {
-        await loadThreadDetail(preferredThread.id, revision, available, initialBootstrap);
+        await loadThreadDetail(preferredThread.id, revision, initialBootstrap);
       } else if (
         revision === navigationRevisionRef.current
         && !(initialBootstrap && bootstrapComposerTouchedRef.current)
@@ -977,13 +956,16 @@ export function App() {
     void window.rhzycode.rememberProject(path).catch(() => undefined);
   }
 
-  async function removeProject(path: string): Promise<void> {
-    const name = basename(path);
-    if (!window.confirm(
-      `Permanently delete "${name}" from RHZYCODE and delete all of its conversations from this computer?\n\nThe project source files in ${path} will not be deleted. This cannot be undone.`,
-    )) return;
-
+  function removeProject(path: string): void {
     closeThreadActions();
+    setDeleteConfirmation({ type: "project", path, name: basename(path) });
+  }
+
+  async function confirmProjectDeletion(): Promise<void> {
+    const confirmation = deleteConfirmation;
+    if (!confirmation || confirmation.type !== "project") return;
+    const { path } = confirmation;
+    setDeleteConfirmation(null);
     try {
       const result = await window.rhzycode.deleteProject(path);
       setThreads((current) => current.filter((thread) => !isSameProjectPath(thread.projectPath, path)));
@@ -1162,7 +1144,6 @@ export function App() {
     saveComposerDraft();
     composerDraftsRef.current.delete(composerDraftKey(selectedProjectPathRef.current, null));
     resetConversation();
-    focusComposer();
   }
 
   function startNewTaskInProject(path: string) {
@@ -1174,7 +1155,6 @@ export function App() {
     rememberProject(path);
     composerDraftsRef.current.delete(composerDraftKey(path, null));
     resetConversation();
-    focusComposer();
   }
 
   function changeSelectedModel(nextModel: string) {
@@ -1312,27 +1292,24 @@ export function App() {
     if (thread && isActiveThreadStatus(thread.status)) {
       closeThreadActions();
       window.alert("Stop the running task before deleting it.");
-      focusComposer();
       return;
     }
     closeThreadActions();
-    setDeleteConfirmation({ threadId: selectedThreadId, title: thread?.title || "this thread" });
+    setDeleteConfirmation({ type: "conversation", threadId: selectedThreadId, title: thread?.title || "this thread" });
   }
 
   async function confirmPermanentThreadDeletion() {
     const confirmation = deleteConfirmation;
-    if (!confirmation || pendingThreadDeletionsRef.current.has(confirmation.threadId)) return;
+    if (!confirmation || confirmation.type !== "conversation" || pendingThreadDeletionsRef.current.has(confirmation.threadId)) return;
     const selectedThreadId = confirmation.threadId;
     setDeleteConfirmation(null);
     tracePerformance("delete-confirmed", { threadId: selectedThreadId });
-    const deletingSelectedThread = selectedThreadId === selectedThreadIdRef.current;
     pendingThreadDeletionsRef.current.add(selectedThreadId);
     threadViewCacheRef.current.delete(selectedThreadId);
     markThreadActive(selectedThreadId, false);
     setThreads((current) => current.filter((entry) => entry.id !== selectedThreadId));
     leaveRemovedThread(selectedThreadId);
     tracePerformance("delete-optimistic-removed", { threadId: selectedThreadId });
-    if (!deletingSelectedThread) focusComposer("thread-delete");
     try {
       await window.rhzycode.deleteThread(selectedThreadId);
       tracePerformance("delete-ipc-completed", { threadId: selectedThreadId });
@@ -1411,7 +1388,6 @@ export function App() {
     }
     if (targetProjectPath) setWorkspaceProject(targetProjectPath);
     setWorkspaceThread(selectedThreadId);
-    focusComposer("thread-switch");
     const cached = threadViewCacheRef.current.get(selectedThreadId);
     if (cached) {
       rememberThreadView(selectedThreadId, cached);
@@ -1466,11 +1442,6 @@ export function App() {
           || models.find((model) => model.displayName.toLocaleLowerCase().includes(command.args.toLocaleLowerCase()));
         if (target) changeSelectedModel(target.model);
         else window.alert(`Model not found: ${command.args}`);
-      } else {
-        window.requestAnimationFrame(() => {
-          modelSelectRef.current?.focus();
-          modelSelectRef.current?.showPicker?.();
-        });
       }
       return null;
     }
@@ -2166,7 +2137,7 @@ export function App() {
                       title={`Permanently delete ${group.name} conversations`}
                       onClick={(event) => {
                         event.stopPropagation();
-                        void removeProject(group.path);
+                        removeProject(group.path);
                       }}
                     >
                       <Trash2 size={13} />
@@ -2231,7 +2202,7 @@ export function App() {
           <div className="header-actions">
             <label className="model-select" title="Model for the next turn">
               <Bot size={15} />
-              <select ref={modelSelectRef} value={selectedModel} onChange={(event) => changeSelectedModel(event.target.value)} disabled={!models.length} aria-label="Model for next turn">
+              <select value={selectedModel} onChange={(event) => changeSelectedModel(event.target.value)} disabled={!models.length} aria-label="Model for next turn">
                 {!models.length && <option value="">Loading models</option>}
                 {modelGroups.map((group) => (
                   <optgroup key={group.key} label={group.source}>
@@ -2304,7 +2275,6 @@ export function App() {
             )}
             <textarea
               ref={composerRef}
-              autoFocus
               value={composer}
               onChange={(event) => {
                 markBootstrapComposerTouched();
@@ -2324,10 +2294,6 @@ export function App() {
                   repeat: event.repeat,
                   documentFocused: document.hasFocus(),
                 });
-                if (!document.hasFocus()) {
-                  tracePerformance("composer-keyboard-focus-recovery");
-                  ensureNativeComposerFocus("keyboard-recovery");
-                }
                 if (
                   event.key === "Enter"
                   && !event.shiftKey
@@ -2541,12 +2507,27 @@ export function App() {
           </div>
         </AppModal>
       )}
-      {deleteConfirmation && (
-        <DeleteConversationDialog
-          title={deleteConfirmation.title}
+      {deleteConfirmation?.type === "conversation" && (
+        <DeleteConfirmationDialog
+          title="Delete conversation"
+          confirmLabel="Permanently delete conversation"
           onCancel={() => setDeleteConfirmation(null)}
           onConfirm={() => void confirmPermanentThreadDeletion()}
-        />
+        >
+          <p>Permanently delete <strong>{deleteConfirmation.title}</strong> and its data from this computer?</p>
+          <p>This cannot be undone.</p>
+        </DeleteConfirmationDialog>
+      )}
+      {deleteConfirmation?.type === "project" && (
+        <DeleteConfirmationDialog
+          title="Delete project"
+          confirmLabel="Permanently delete project"
+          onCancel={() => setDeleteConfirmation(null)}
+          onConfirm={() => void confirmProjectDeletion()}
+        >
+          <p>Permanently delete <strong>{deleteConfirmation.name}</strong> from RHZYCODE and delete all of its conversations from this computer?</p>
+          <p>The project source files in <strong>{deleteConfirmation.path}</strong> will not be deleted. This cannot be undone.</p>
+        </DeleteConfirmationDialog>
       )}
       {previewImage && (
         <button className="image-preview" aria-label="Close image preview" onClick={() => setPreviewImage(null)}>

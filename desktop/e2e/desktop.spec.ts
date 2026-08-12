@@ -138,12 +138,13 @@ test("shows a complete empty state on a fresh install", async () => {
   await page.getByRole("button", { name: "Close Settings" }).click();
 });
 
-test("keeps the composer focused and editable when starting blank tasks", async () => {
+test("keeps the composer mouse-editable when starting blank tasks", async () => {
   await page.getByRole("button", { name: "Open project folder" }).click();
   const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
   for (let index = 0; index < 12; index += 1) {
     await clickSelectedProjectNewTask(page);
-    await expect(taskPrompt).toBeFocused();
+    await expect(taskPrompt).toBeEditable();
+    await taskPrompt.click();
     await page.keyboard.type(`responsive-${index}`);
     await expect(taskPrompt).toHaveValue(`responsive-${index}`);
   }
@@ -152,7 +153,7 @@ test("keeps the composer focused and editable when starting blank tasks", async 
   expect(rendererErrors.filter((message) => /same key|maximum update depth/i.test(message))).toEqual([]);
 });
 
-test("keeps the composer keyboard-editable across focus transitions", async () => {
+test("keeps the composer mouse-editable across focus transitions", async () => {
   const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
 
   await test.step("after closing a modal with Escape", async () => {
@@ -161,14 +162,14 @@ test("keeps the composer keyboard-editable across focus transitions", async () =
     await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog", { name: "Settings" })).toHaveCount(0);
-    await typeAndClearFocusedComposer(page, taskPrompt, "Typed after closing settings");
+    await typeAndClearComposer(page, taskPrompt, "Typed after closing settings");
   });
 
   await test.step("after returning from the terminal", async () => {
     await page.getByRole("button", { name: "Terminal", exact: true }).click();
     await expect(taskPrompt).toHaveCount(0);
     await page.getByRole("button", { name: "Workspace", exact: true }).click();
-    await typeAndClearFocusedComposer(page, taskPrompt, "Typed after returning from terminal");
+    await typeAndClearComposer(page, taskPrompt, "Typed after returning from terminal");
   });
 
   await test.step("after sidebar search held focus", async () => {
@@ -176,7 +177,7 @@ test("keeps the composer keyboard-editable across focus transitions", async () =
     await search.focus();
     await expect(search).toBeFocused();
     await clickSelectedProjectNewTask(page);
-    await typeAndClearFocusedComposer(page, taskPrompt, "Typed after sidebar search");
+    await typeAndClearComposer(page, taskPrompt, "Typed after sidebar search");
   });
 
   await test.step("after the Electron window is reactivated", async () => {
@@ -202,12 +203,12 @@ test("keeps the composer keyboard-editable across focus transitions", async () =
       if (process.platform === "linux" && !mainWindow?.isFocused()) mainWindow?.emit("focus");
       await new Promise((resolve) => setTimeout(resolve, 100));
     });
-    await typeAndClearFocusedComposer(page, taskPrompt, "Typed after window reactivation");
+    await typeAndClearComposer(page, taskPrompt, "Typed after window reactivation");
   });
 
   await test.step("with Chinese and multiline input", async () => {
     await clickSelectedProjectNewTask(page);
-    await expect(taskPrompt).toBeFocused();
+    await taskPrompt.click();
     await page.keyboard.insertText("中文输入测试");
     await page.keyboard.press("Shift+Enter");
     await page.keyboard.insertText("第二行");
@@ -556,7 +557,12 @@ test("supports core desktop workflows at the minimum window size", async () => {
   const interruptsBeforeCompletedDelete = await ipcCalls(electronApp, "agent:turn:interrupt").then((calls) => calls.length);
   await openThreadActions(page, "Renamed UI thread");
   await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
-  await expect(page.getByRole("dialog", { name: "Delete conversation" })).toBeVisible();
+  const deleteConversationDialog = page.getByRole("dialog", { name: "Delete conversation" });
+  await expect(deleteConversationDialog).toBeVisible();
+  await expect(deleteConversationDialog.locator(".modal-actions button")).toHaveText([
+    "Permanently delete conversation",
+    "Cancel",
+  ]);
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(getThreadRow(page, "Renamed UI thread")).toBeVisible();
   await openThreadActions(page, "Renamed UI thread");
@@ -795,7 +801,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
 
   await modelSelect.selectOption("ui/second");
   await clickSelectedProjectNewTask(page);
-  await expect(taskPrompt).toBeFocused();
+  await expect(taskPrompt).toBeEditable();
   await taskPrompt.fill("Run concurrent second task");
   await page.getByRole("button", { name: "Send" }).click();
   await expect.poll(() => ipcCalls(electronApp, "agent:turn:start").then((calls) => calls.length)).toBe(2);
@@ -851,7 +857,7 @@ test("supports core desktop workflows at the minimum window size", async () => {
   )?.model)).toBe("ui/model");
   await page.locator(".send-button.stop").click();
   await clickSelectedProjectNewTask(page);
-  await expect(taskPrompt).toBeFocused();
+  await expect(taskPrompt).toBeEditable();
   await expect(taskPrompt).toHaveValue("");
   await expect(page.locator(".attachment-list")).toHaveCount(0);
   await expect(page.locator(".message-list")).toHaveCount(0);
@@ -951,8 +957,19 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await page.getByRole("button", { name: "Close Import / Export" }).click();
 
   await emptyProjectGroup.hover();
-  page.once("dialog", (dialog) => dialog.accept());
   await emptyProjectGroup.getByRole("button", { name: "Permanently delete project empty-project" }).click();
+  const deleteProjectDialog = page.getByRole("dialog", { name: "Delete project" });
+  await expect(deleteProjectDialog).toBeVisible();
+  await expect(deleteProjectDialog.locator(".modal-actions button")).toHaveText([
+    "Permanently delete project",
+    "Cancel",
+  ]);
+  await deleteProjectDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(emptyProjectGroup).toBeVisible();
+  await expect.poll(() => ipcCalls(electronApp, "project:delete").then((calls) => calls.length)).toBe(0);
+  await emptyProjectGroup.hover();
+  await emptyProjectGroup.getByRole("button", { name: "Permanently delete project empty-project" }).click();
+  await deleteProjectDialog.getByRole("button", { name: "Permanently delete project", exact: true }).click();
   await expect(emptyProjectGroup).toHaveCount(0);
   await expect.poll(() => ipcCalls(electronApp, "project:delete").then((calls) => calls.at(-1)?.args)).toEqual([emptyProjectDir]);
   await page.reload();
@@ -1036,7 +1053,7 @@ test("renders sent and received images at their natural aspect ratio with contex
   await page.locator(".conversation").screenshot({ path: testInfo.outputPath("image-aspect-layout.png") });
 });
 
-test("keeps a new task focused while the agent is still starting", async () => {
+test("keeps a new task mouse-editable while the agent is still starting", async () => {
   const threadCallsBeforeReload = await ipcCalls(electronApp, "agent:threads").then((calls) => calls.length);
   const openCallsBeforeReload = await ipcCalls(electronApp, "agent:thread:open").then((calls) => calls.length);
   await page.evaluate(async (selectedProject) => {
@@ -1053,7 +1070,7 @@ test("keeps a new task focused while the agent is still starting", async () => {
     await page.locator(".app-shell").waitFor();
     const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
     await clickSelectedProjectNewTask(page);
-    await expect(taskPrompt).toBeFocused();
+    await taskPrompt.click();
     await page.keyboard.type("Typed before the agent finished starting");
     await expect(page.locator(".send-button")).toHaveAttribute("title", "Starting agent");
     await expect(page.locator(".send-button")).toBeDisabled();
@@ -1064,7 +1081,7 @@ test("keeps a new task focused while the agent is still starting", async () => {
     expect(await ipcCalls(electronApp, "agent:thread:open").then((calls) => calls.length))
       .toBe(openCallsBeforeReload);
     await expect(taskPrompt).toHaveValue("Typed before the agent finished starting");
-    await expect(taskPrompt).toBeFocused();
+    await expect(taskPrompt).toBeEditable();
   } finally {
     await setAgentConnectDelay(electronApp, 0);
   }
@@ -1125,12 +1142,12 @@ test("shows a cached conversation immediately while a slow resume refreshes it",
     .toBeVisible({ timeout: 200 });
   await expect(page.getByText("Start a new task", { exact: true })).toHaveCount(0);
   await expect(page.locator(".conversation-refresh")).toBeVisible();
-  await expect(taskPrompt).toBeFocused();
+  await taskPrompt.click();
   await page.keyboard.type("Draft typed while conversation refreshes");
   await expect(taskPrompt).toHaveValue("Draft typed while conversation refreshes");
   await expect(page.locator(".conversation-refresh")).toHaveCount(0, { timeout: 4_000 });
   await expect(taskPrompt).toHaveValue("Draft typed while conversation refreshes");
-  await expect(taskPrompt).toBeFocused();
+  await expect(taskPrompt).toBeEditable();
   await taskPrompt.fill("");
   await setThreadOpenDelay(electronApp, 0);
 });
@@ -1154,14 +1171,14 @@ test("keeps a new task editable when a stale conversation open finishes", async 
     await clickSelectedProjectNewTask(page);
 
     const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
-    await expect(taskPrompt).toBeFocused();
+    await taskPrompt.click();
     await page.keyboard.type("Immediate input in the replacement task");
     await expect(taskPrompt).toHaveValue("Immediate input in the replacement task");
 
     await expect.poll(() => ipcCalls(electronApp, "agent:thread:open:completed").then((calls) => calls.length))
       .toBe(completedBefore + 1);
     await expect(taskPrompt).toHaveValue("Immediate input in the replacement task");
-    await expect(taskPrompt).toBeFocused();
+    await expect(taskPrompt).toBeEditable();
     await expect(page.getByText("Start a new task", { exact: true })).toBeVisible();
     await taskPrompt.fill("");
   } finally {
@@ -1204,14 +1221,14 @@ test("keeps the selected conversation and draft when deletion finishes late", as
     await getThreadRow(page, targetTitle).click();
     const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
     await expect(getThreadRow(page, targetTitle).locator("..")).toHaveClass(/active/);
-    await expect(taskPrompt).toBeFocused();
+    await expect(taskPrompt).toBeEditable();
     await taskPrompt.fill("Draft entered while the previous deletion is finishing");
 
     await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete:completed")
       .then((calls) => calls.at(-1)?.args)).toEqual([sourceThreadId]);
     await expect(getThreadRow(page, targetTitle).locator("..")).toHaveClass(/active/);
     await expect(taskPrompt).toHaveValue("Draft entered while the previous deletion is finishing");
-    await expect(taskPrompt).toBeFocused();
+    await expect(taskPrompt).toBeEditable();
   } finally {
     await setThreadDeleteDelay(electronApp, 0);
   }
@@ -1249,7 +1266,7 @@ test("keeps the composer usable while deleting and switching conversations repea
 
     await getThreadRow(page, titles.firstTarget).click();
     const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
-    await expect(taskPrompt).toBeFocused();
+    await taskPrompt.click();
     await page.keyboard.type("Draft after first delete and switch. ");
 
     await openThreadActions(page, titles.secondSource);
@@ -1260,18 +1277,18 @@ test("keeps the composer usable while deleting and switching conversations repea
     await expect(getThreadRow(page, titles.secondSource)).toHaveCount(0);
 
     await getThreadRow(page, titles.finalTarget).click();
-    await expect(taskPrompt).toBeFocused();
+    await taskPrompt.click();
     await page.keyboard.type("Draft after second delete and switch.");
     await expect(taskPrompt).toHaveValue("Draft after second delete and switch.");
 
     await getThreadRow(page, titles.firstTarget).click();
-    await expect(taskPrompt).toBeFocused();
+    await expect(taskPrompt).toBeEditable();
     await expect(taskPrompt).toHaveValue("Draft after first delete and switch. ");
 
     await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete:completed").then((calls) => calls.length))
       .toBeGreaterThanOrEqual(2);
     await expect(getThreadRow(page, titles.firstTarget).locator("..")).toHaveClass(/active/);
-    await expect(taskPrompt).toBeFocused();
+    await expect(taskPrompt).toBeEditable();
     await expect(taskPrompt).toHaveValue("Draft after first delete and switch. ");
   } finally {
     await setThreadDeleteDelay(electronApp, 0);
@@ -1288,7 +1305,10 @@ test("keeps the composer editable when deleting the current conversation slowly"
 
   await page.getByRole("button", { name: "Open project folder" }).click();
   await expect(getThreadRow(page, sourceTitle)).toBeVisible();
+  const modelSelect = page.getByRole("combobox", { name: "Model for next turn" });
+  await modelSelect.selectOption("ui/second");
   await getThreadRow(page, sourceTitle).click();
+  await expect(modelSelect).toHaveValue("ui/second");
   await expect(getThreadRow(page, sourceTitle).locator("..")).toHaveClass(/active/);
 
   await setThreadDeleteDelay(electronApp, 750);
@@ -1300,7 +1320,7 @@ test("keeps the composer editable when deleting the current conversation slowly"
       .toEqual([sourceThreadId]);
 
     const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
-    await expect(taskPrompt).toBeFocused();
+    await expect(taskPrompt).toBeEditable();
     await taskPrompt.fill("Draft entered while deleting the current conversation");
     await expect(taskPrompt).toHaveValue("Draft entered while deleting the current conversation");
 
@@ -1308,7 +1328,7 @@ test("keeps the composer editable when deleting the current conversation slowly"
       .then((calls) => calls.at(-1)?.args)).toEqual([sourceThreadId]);
     await expect(getThreadRow(page, sourceTitle)).toHaveCount(0);
     await expect(taskPrompt).toHaveValue("Draft entered while deleting the current conversation");
-    await expect(taskPrompt).toBeFocused();
+    await expect(taskPrompt).toBeEditable();
   } finally {
     await setThreadDeleteDelay(electronApp, 0);
   }
@@ -1324,6 +1344,7 @@ test("keeps model selection and composer input usable after deleting the current
 
   await page.getByRole("button", { name: "Open project folder" }).click();
   await expect(getThreadRow(page, sourceTitle)).toBeVisible();
+  const modelSelect = page.getByRole("combobox", { name: "Model for next turn" });
   await getThreadRow(page, sourceTitle).click();
 
   await setThreadDeleteDelay(electronApp, 750);
@@ -1334,9 +1355,8 @@ test("keeps model selection and composer input usable after deleting the current
     await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete").then((calls) => calls.at(-1)?.args))
       .toEqual([sourceThreadId]);
 
-    const modelSelect = page.getByRole("combobox", { name: "Model for next turn" });
-    await modelSelect.selectOption("ui/second");
-    await expect(modelSelect).toHaveValue("ui/second");
+    await modelSelect.selectOption("ui/model");
+    await expect(modelSelect).toHaveValue("ui/model");
 
     const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
     await taskPrompt.fill("Draft after deleting and changing models");
@@ -1345,14 +1365,14 @@ test("keeps model selection and composer input usable after deleting the current
 
     await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete:completed")
       .then((calls) => calls.at(-1)?.args)).toEqual([sourceThreadId]);
-    await expect(modelSelect).toHaveValue("ui/second");
-    await expect(taskPrompt).toBeFocused();
+    await expect(modelSelect).toHaveValue("ui/model");
+    await expect(taskPrompt).toBeEditable();
   } finally {
     await setThreadDeleteDelay(electronApp, 0);
   }
 });
 
-test("restores composer focus after deleting another conversation", async () => {
+test("keeps the composer mouse-editable after deleting another conversation", async () => {
   const sourceTitle = "Delete other conversation";
   const targetTitle = "Keep selected conversation";
   const sourceThreadId = await page.evaluate(async ({ cwd, sourceTitle, targetTitle }) => {
@@ -1377,18 +1397,17 @@ test("restores composer focus after deleting another conversation", async () => 
     await expect(taskPrompt).toBeFocused();
     await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
-    await expect(taskPrompt).toBeFocused();
+    await expect(taskPrompt).toBeEditable();
     await expect(getThreadRow(page, sourceTitle)).toBeVisible();
 
     await openThreadActions(page, sourceTitle);
-    await expect(taskPrompt).toBeFocused();
     await page.getByRole("menuitem", { name: "Delete task permanently" }).click();
     await confirmThreadDeletion(page);
     await expect.poll(() => ipcCalls(electronApp, "agent:thread:delete").then((calls) => calls.at(-1)?.args))
       .toEqual([sourceThreadId]);
 
     await expect(getThreadRow(page, targetTitle).locator("..")).toHaveClass(/active/);
-    await expect(taskPrompt).toBeFocused();
+    await taskPrompt.click();
     await page.keyboard.type("Immediate draft after deleting another conversation");
     await expect(taskPrompt).toHaveValue("Immediate draft after deleting another conversation");
 
@@ -1401,7 +1420,7 @@ test("restores composer focus after deleting another conversation", async () => 
   }
 });
 
-test("restores composer focus after consecutive conversation deletions settle", async () => {
+test("keeps the composer mouse-editable after consecutive conversation deletions settle", async () => {
   const titles = ["Consecutive delete one", "Consecutive delete two", "Consecutive delete three"];
   const threadIds = await page.evaluate(async ({ cwd, titles: selectedTitles }) => {
     const ids: string[] = [];
@@ -1433,7 +1452,8 @@ test("restores composer focus after consecutive conversation deletions settle", 
     for (const title of titles) await expect(getThreadRow(page, title)).toHaveCount(0);
 
     const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
-    await expect(taskPrompt).toBeFocused();
+    await expect(taskPrompt).toBeEditable();
+    await taskPrompt.click();
     await page.keyboard.type("Composer works after consecutive deletions");
     await expect(taskPrompt).toHaveValue("Composer works after consecutive deletions");
   } finally {
@@ -1461,7 +1481,7 @@ test("creates the first conversation after returning to an empty project", async
   const taskPrompt = page.getByRole("textbox", { name: "Task prompt" });
   await expect(page.locator(".project-group.selected .project-group-main strong")).toHaveText("empty-project");
   await expect(page.getByText("Start a new task", { exact: true })).toBeVisible();
-  await expect(taskPrompt).toBeFocused();
+  await expect(taskPrompt).toBeEditable();
   await taskPrompt.fill("First task in the empty project");
   await page.getByRole("button", { name: "Send" }).click();
 
@@ -1534,7 +1554,7 @@ test("uses the last manually selected model for a new task", async () => {
   await expect(modelSelect).toHaveValue("ui/second");
 
   await getThreadRow(page, titles.other).click();
-  await expect(modelSelect).toHaveValue("ui/model");
+  await expect(modelSelect).toHaveValue("ui/second");
   await expect.poll(() => page.evaluate(() => localStorage.getItem("rhzycode.selectedModel")))
     .toBe("ui/second");
 
@@ -1680,9 +1700,13 @@ async function assertChatMessageLayout(activePage: Page): Promise<void> {
   const layout = await activePage.evaluate(() => {
     const user = document.querySelector<HTMLElement>(".message.user .message-content")!;
     const assistant = document.querySelector<HTMLElement>(".message.assistant .message-content")!;
+    const themeProbe = document.createElement("span");
+    themeProbe.style.cssText = "position:fixed;visibility:hidden;background:var(--accent-fill,var(--accent));color:var(--on-accent)";
+    document.body.append(themeProbe);
+    const themeStyle = getComputedStyle(themeProbe);
     const userBounds = user.getBoundingClientRect();
     const assistantBounds = assistant.getBoundingClientRect();
-    return {
+    const result = {
       userLeft: userBounds.left,
       userRight: userBounds.right,
       assistantLeft: assistantBounds.left,
@@ -1690,13 +1714,17 @@ async function assertChatMessageLayout(activePage: Page): Promise<void> {
       userBackground: getComputedStyle(user).backgroundColor,
       userBorderStyle: getComputedStyle(user).borderTopStyle,
       userColor: getComputedStyle(user).color,
+      expectedUserBackground: themeStyle.backgroundColor,
+      expectedUserColor: themeStyle.color,
     };
+    themeProbe.remove();
+    return result;
   });
   expect(layout.userLeft).toBeGreaterThan(layout.assistantLeft);
   expect(layout.userRight).toBeGreaterThan(layout.assistantRight - 2);
-  expect(layout.userBackground).toBe("rgb(144, 221, 101)");
+  expect(layout.userBackground).toBe(layout.expectedUserBackground);
   expect(layout.userBorderStyle).toBe("none");
-  expect(layout.userColor).toBe("rgb(17, 17, 17)");
+  expect(layout.userColor).toBe(layout.expectedUserColor);
 }
 
 async function openThreadActions(activePage: Page, title: string): Promise<void> {
@@ -1723,7 +1751,9 @@ async function clickSelectedProjectNewTask(activePage: Page): Promise<void> {
   await getSelectedProjectNewTask(activePage).click();
 }
 
-async function typeAndClearFocusedComposer(activePage: Page, composer: Locator, text: string): Promise<void> {
+async function typeAndClearComposer(activePage: Page, composer: Locator, text: string): Promise<void> {
+  await expect(composer).toBeEditable();
+  await composer.click();
   await expect(composer).toBeFocused();
   await activePage.keyboard.type(text);
   await expect(composer).toHaveValue(text);

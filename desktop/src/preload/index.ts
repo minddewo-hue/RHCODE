@@ -79,7 +79,6 @@ const api: RhzycodeDesktopApi = {
   getMobileAccessStatus: () => ipcRenderer.invoke("mobile-access:status"),
   rotateMobileAccessKey: () => ipcRenderer.invoke("mobile-access:key:rotate"),
   copyText: (value: string) => ipcRenderer.invoke("clipboard:write", value),
-  focusWindowContents: () => ipcRenderer.invoke("window:focus-contents"),
   recordPerformanceTrace: (event, detail) => ipcRenderer.send("diagnostic:performance", event, detail),
   getPersistenceStatus: () => ipcRenderer.invoke("storage:status"),
   getSyncStatus: () => ipcRenderer.invoke("sync:status"),
@@ -96,11 +95,6 @@ const api: RhzycodeDesktopApi = {
   resizeTerminal: (processId: string, cols: number, rows: number) =>
     ipcRenderer.invoke("terminal:resize", processId, cols, rows),
   stopTerminal: (processId: string) => ipcRenderer.invoke("terminal:stop", processId),
-  onWindowFocus: (listener) => {
-    const handler = () => listener();
-    ipcRenderer.on("window:focused", handler);
-    return () => ipcRenderer.removeListener("window:focused", handler);
-  },
   onAgentStatus: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, status: AgentStatus) => listener(status);
     ipcRenderer.on("agent:status", handler);

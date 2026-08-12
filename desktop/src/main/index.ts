@@ -151,7 +151,6 @@ function createWindow(): BrowserWindow {
     if (!mainWindow) return;
     mainWindow.flashFrame(false);
     mainWindow.webContents.focus();
-    mainWindow.webContents.send("window:focused");
   });
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -397,20 +396,6 @@ function registerIpc(
   ipcMain.handle("storage:status", () => getPersistenceStatus());
   ipcMain.handle("clipboard:write", (_event, value: unknown) => {
     clipboard.writeText(validateClipboardText(value));
-  });
-  ipcMain.handle("window:focus-contents", async () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    const restoreFocus = () => {
-      // DOM focus alone does not restore the native keyboard/caret target when
-      // a menu or confirmation dialog has just released the renderer window.
-      mainWindow?.focus();
-      mainWindow?.webContents.focus();
-    };
-    restoreFocus();
-    // Electron's synchronous confirmation dialog releases native focus after
-    // its click handler returns. Re-apply it on the following event-loop turn.
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    restoreFocus();
   });
   ipcMain.on("diagnostic:performance", (_event, event: unknown, detail: unknown) => {
     if (typeof event !== "string" || !/^[a-z0-9:_-]{1,80}$/i.test(event)) return;

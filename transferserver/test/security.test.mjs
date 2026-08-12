@@ -95,6 +95,27 @@ test("rejects browser-origin WebSocket connections unless explicitly allowed", a
   assert.equal(statusCode, 403);
 });
 
+test("allows native app WebSocket origins for the authenticated event stream", async (context) => {
+  const { app } = await createTransferServer({ requireTls: false });
+  await app.listen({ host: "127.0.0.1", port: 0 });
+  context.after(() => app.close());
+  const address = app.server.address();
+  assert.ok(address && typeof address === "object");
+
+  const origin = await new Promise((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/v1/relay/desktop`, {
+      headers: { Authorization: `Bearer ${firstKey}`, Origin: "exp://127.0.0.1:8081" },
+    });
+    socket.once("open", () => {
+      socket.close();
+      resolve("open");
+    });
+    socket.once("unexpected-response", (_request, response) => resolve(response.statusCode));
+    socket.once("error", reject);
+  });
+  assert.equal(origin, "open");
+});
+
 test("rate limits repeated authentication failures", async (context) => {
   const { app } = await createTransferServer({ requireTls: false });
   context.after(() => app.close());

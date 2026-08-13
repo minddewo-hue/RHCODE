@@ -29,6 +29,9 @@ export function responsesToChatRequest(request, upstreamModel, debugLog = () => 
   }
 
   if (request.max_output_tokens != null) chat.max_tokens = request.max_output_tokens;
+  if (typeof request.reasoning?.effort === "string") {
+    chat.reasoning_effort = request.reasoning.effort;
+  }
 
   const tools = responsesToolsToChatTools(request.tools || []);
   if (tools.length > 0) {

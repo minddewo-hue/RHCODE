@@ -714,7 +714,7 @@ test("multi-model gateway integration", async (t) => {
     assert.equal(call.body.messages[0].content[1].image_url.detail, "low");
   });
 
-  await t.test("drops Responses-only reasoning, namespaces, and web search on Chat routes", async () => {
+  await t.test("maps reasoning effort and drops Responses-only fields on Chat routes", async () => {
     const response = await gatewayFetch(baseUrl, "/v1/responses", {
       body: {
         model: "chat/model",
@@ -740,6 +740,7 @@ test("multi-model gateway integration", async (t) => {
     assert.equal(call.body.tools.length, 1);
     assert.equal(call.body.tools[0].function.name, "weather");
     assert.equal(call.body.reasoning, undefined);
+    assert.equal(call.body.reasoning_effort, "medium");
   });
 
   await t.test("converts Chat Completions SSE in Responses event order", async () => {

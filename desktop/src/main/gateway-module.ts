@@ -167,7 +167,8 @@ export class GatewayModule extends EventEmitter {
           ? `\n\n# Model Runtime Rules\n${model.runtimeInstructions}`
           : "";
         entry.base_instructions = `You are Codex, a coding agent powered by ${model.upstreamModel} through the Codex CLI. The active model ID is ${model.id}. If asked which model is active, answer with this model ID and do not claim to be an OpenAI GPT model.${remainder}${runtimeInstructions}`;
-        clearReasoningOptions(entry);
+        entry.supports_reasoning_summaries = false;
+        entry.default_reasoning_summary = "none";
         entry.support_verbosity = false;
         entry.default_verbosity = null;
         entry.supports_parallel_tool_calls = model.capabilities.parallel_tool_calls !== false;

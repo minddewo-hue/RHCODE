@@ -81,7 +81,11 @@ cp "$SOURCE_ROOT/desktop/gateway.config.json" "$GATEWAY_ROOT/gateway.config.json
 cp "$SOURCE_ROOT/desktop/codex-model-catalog.json" "$GATEWAY_ROOT/codex-model-catalog.json"
 cp "$SOURCE_ROOT/desktop/model-context-windows.json" "$GATEWAY_ROOT/model-context-windows.json"
 
-mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
+USER_ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
+USER_ICON_PATH="$USER_ICON_DIR/rhzycode.png"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" "$USER_ICON_DIR"
+cp "$SOURCE_ROOT/desktop/build/icon.png" "$USER_ICON_PATH"
+chmod 644 "$USER_ICON_PATH"
 cat > "$HOME/.local/bin/rhzycode" <<EOF
 #!/usr/bin/env bash
 set -a
@@ -102,11 +106,13 @@ Comment=Cross-platform coding agent
 Exec=$HOME/.local/bin/rhzycode %U
 Terminal=false
 Type=Application
-Icon=rhzycode
+Icon=$USER_ICON_PATH
 Categories=Development;
 StartupNotify=true
+StartupWMClass=rhzycode
 EOF
 chmod 644 "$HOME/.local/share/applications/rhzycode.desktop"
+gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
 printf '[6/6] Installation complete.\n'

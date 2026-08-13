@@ -84,6 +84,11 @@ test("writes configured runtime and maximum contexts to the Codex catalog", asyn
         provider: "provider-2",
         upstream_model: "gpt-5.4",
       },
+      "provider-2/gpt-5.5-chat": {
+        provider: "provider-2",
+        upstream_model: "gpt-5.5",
+        protocol: "chat_completions",
+      },
     },
   }));
 
@@ -114,4 +119,12 @@ test("writes configured runtime and maximum contexts to the Codex catalog", asyn
     (gpt?.supported_reasoning_levels as Array<{ effort: string }>).map((option) => option.effort),
     ["low", "medium", "high", "xhigh"],
   );
+  const chatGpt = catalog.models.find((model) => model.slug === "provider-2/gpt-5.5-chat");
+  assert.equal(chatGpt?.default_reasoning_level, "medium");
+  assert.deepEqual(
+    (chatGpt?.supported_reasoning_levels as Array<{ effort: string }>).map((option) => option.effort),
+    ["low", "medium", "high", "xhigh"],
+  );
+  assert.equal(chatGpt?.supports_reasoning_summaries, false);
+  assert.equal(chatGpt?.default_reasoning_summary, "none");
 });

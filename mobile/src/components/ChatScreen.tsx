@@ -517,16 +517,56 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
   const listRef = activePage === "result" ? resultListRef : activityListRef;
   const [visibleCount, setVisibleCount] = useState(10);
   const [pullRefreshing, setPullRefreshing] = useState(false);
+  const [isNearBottom, setIsNearBottom] = useState(true);
+  const [unreadUpdates, setUnreadUpdates] = useState(0);
+  const [currentUserTurn, setCurrentUserTurn] = useState(0);
   const didInitialScroll = useRef(false);
   const loadingOlder = useRef(false);
   const nearBottom = useRef(true);
   const previousEntryCount = useRef(entries.length);
   const visibleEntries = useMemo(() => entries.slice(-visibleCount), [entries, visibleCount]);
+  const userEntryIds = useMemo(() => entries.flatMap((entry) => (
+    (entry.type === "timeline" && entry.item.kind === "user") || entry.type === "pending" ? [entry.id] : []
+  )), [entries]);
+  const userEntryIdsRef = useRef(userEntryIds);
+  userEntryIdsRef.current = userEntryIds;
+  const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: Array<{ item: ChatEntry }> }) => {
+    const ids = userEntryIdsRef.current;
+    const firstVisibleUserId = viewableItems
+      .map(({ item }) => item.id)
+      .filter((id) => ids.includes(id))
+      .at(0);
+    if (firstVisibleUserId === undefined) return;
+    setCurrentUserTurn(Math.max(0, ids.indexOf(firstVisibleUserId)));
+  }).current;
 
   const scrollToLatest = (animated: boolean) => {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated }));
     });
+  };
+
+  const scrollToUserTurn = (direction: -1 | 1) => {
+    if (!userEntryIds.length) return;
+    const nextTurn = Math.max(0, Math.min(userEntryIds.length - 1, currentUserTurn + direction));
+    const targetEntryIndex = entries.findIndex((entry) => entry.id === userEntryIds[nextTurn]);
+    const requiredVisibleCount = entries.length - targetEntryIndex;
+    nearBottom.current = false;
+    setIsNearBottom(false);
+    setCurrentUserTurn(nextTurn);
+    setVisibleCount((count) => Math.max(count, requiredVisibleCount));
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const visibleIndex = Math.max(0, targetEntryIndex - Math.max(0, entries.length - Math.max(visibleCount, requiredVisibleCount)));
+      listRef.current?.scrollToIndex({ animated: true, index: visibleIndex, viewPosition: 0.08 });
+    }));
+  };
+
+  const returnToLatest = () => {
+    nearBottom.current = true;
+    setIsNearBottom(true);
+    setUnreadUpdates(0);
+    setCurrentUserTurn(Math.max(0, userEntryIds.length - 1));
+    scrollToLatest(true);
   };
 
   const refreshFromPull = async () => {
@@ -543,16 +583,13 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
     didInitialScroll.current = false;
     loadingOlder.current = false;
     nearBottom.current = true;
+    setIsNearBottom(true);
+    setUnreadUpdates(0);
     previousEntryCount.current = entries.length;
   }, [activePage, props.selectedThreadId]);
 
-  useEffect(() => {
-    if (!visible || activePage !== "activity" || !entries.length) return;
-    nearBottom.current = true;
-    scrollToLatest(didInitialScroll.current);
-  }, [activePage, entries.length, visible]);
-
   return (
+    <View style={styles.conversationListWrap}>
     <FlatList
       ref={listRef}
       data={visibleEntries}
@@ -569,8 +606,10 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
         if (!didInitialScroll.current) {
           didInitialScroll.current = true;
           scrollToLatest(false);
-        } else if (entries.length > previousEntryCount.current && ((activePage === "activity" && visible) || nearBottom.current)) {
+        } else if (entries.length > previousEntryCount.current && nearBottom.current) {
           scrollToLatest(true);
+        } else if (entries.length > previousEntryCount.current) {
+          setUnreadUpdates((count) => Math.min(99, count + entries.length - previousEntryCount.current));
         }
         previousEntryCount.current = entries.length;
         loadingOlder.current = false;
@@ -584,6 +623,8 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
       onScroll={(event) => {
         const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
         nearBottom.current = contentSize.height - layoutMeasurement.height - contentOffset.y < 80;
+        setIsNearBottom(nearBottom.current);
+        if (nearBottom.current) setUnreadUpdates(0);
         if (contentOffset.y <= 24 && visibleCount < entries.length && !loadingOlder.current) {
           loadingOlder.current = true;
           setVisibleCount((count) => Math.min(entries.length, count + 10));
@@ -591,6 +632,10 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
       }}
       maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
       scrollEventThrottle={100}
+      onScrollToIndexFailed={({ index, averageItemLength }) => {
+        listRef.current?.scrollToOffset({ animated: true, offset: Math.max(0, index * averageItemLength) });
+      }}
+      onViewableItemsChanged={onViewableItemsChanged}
       renderItem={({ item }) => {
         if (item.type === "timeline") {
           return (
@@ -625,6 +670,26 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
         );
       }}
     />
+    {!!userEntryIds.length && (
+      <View pointerEvents="box-none" style={styles.conversationNavigation}>
+        <View style={styles.turnNavigation}>
+          <Pressable accessibilityLabel="上一轮对话" hitSlop={6} onPress={() => scrollToUserTurn(-1)} style={({ pressed }) => [styles.turnNavigationButton, pressed && styles.iconPressed]}>
+            <Feather color={colors.ink} name="chevron-up" size={20} />
+          </Pressable>
+          <Text style={styles.turnNavigationText}>{Math.min(currentUserTurn + 1, userEntryIds.length)}/{userEntryIds.length}</Text>
+          <Pressable accessibilityLabel="下一轮对话" hitSlop={6} onPress={() => scrollToUserTurn(1)} style={({ pressed }) => [styles.turnNavigationButton, pressed && styles.iconPressed]}>
+            <Feather color={colors.ink} name="chevron-down" size={20} />
+          </Pressable>
+        </View>
+        {!isNearBottom && (
+          <Pressable accessibilityLabel="回到最新内容" onPress={returnToLatest} style={({ pressed }) => [styles.latestButton, pressed && styles.latestButtonPressed]}>
+            <Feather color={colors.onSolid} name="arrow-down" size={18} />
+            <Text style={styles.latestButtonText}>{unreadUpdates ? `${unreadUpdates} 条新内容` : "回到最新"}</Text>
+          </Pressable>
+        )}
+      </View>
+    )}
+    </View>
   );
 }
 

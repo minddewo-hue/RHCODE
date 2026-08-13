@@ -7,6 +7,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   CircleStop,
   Copy,
   Download,
@@ -256,6 +257,9 @@ export function App() {
   const [renameValue, setRenameValue] = useState("");
   const [openingThreadId, setOpeningThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [conversationNearBottom, setConversationNearBottom] = useState(true);
+  const [unreadConversationUpdates, setUnreadConversationUpdates] = useState(0);
+  const [currentConversationTurn, setCurrentConversationTurn] = useState(0);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [activities, setActivities] = useState<ActivityEntry[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
@@ -310,6 +314,7 @@ export function App() {
   const openingThreadIdRef = useRef<string | null>(null);
   const navigationRevisionRef = useRef(0);
   const followConversationRef = useRef(true);
+  const previousConversationMessageCountRef = useRef(0);
   const lastPrompt = useRef("");
   const composerDraftsRef = useRef(new Map<string, ComposerDraft>());
   const threadViewCacheRef = useRef(new Map<string, ThreadViewSnapshot>());
@@ -356,6 +361,14 @@ export function App() {
   useEffect(() => {
     selectedThreadIdRef.current = threadId;
     if (projectPath && threadId) storeLastThread(projectPath, threadId);
+  }, [projectPath, threadId]);
+
+  useEffect(() => {
+    followConversationRef.current = true;
+    previousConversationMessageCountRef.current = 0;
+    setConversationNearBottom(true);
+    setUnreadConversationUpdates(0);
+    setCurrentConversationTurn(0);
   }, [projectPath, threadId]);
 
   useEffect(() => {
@@ -438,13 +451,70 @@ export function App() {
   }
 
   useEffect(() => {
-    if (!followConversationRef.current) return;
+    if (!followConversationRef.current) {
+      if (messages.length > previousConversationMessageCountRef.current) {
+        setUnreadConversationUpdates((count) => Math.min(99, count + messages.length - previousConversationMessageCountRef.current));
+      }
+      previousConversationMessageCountRef.current = messages.length;
+      return;
+    }
+    previousConversationMessageCountRef.current = messages.length;
     const frame = requestAnimationFrame(() => {
       const conversation = conversationRef.current;
       if (conversation) conversation.scrollTop = conversation.scrollHeight;
     });
     return () => cancelAnimationFrame(frame);
   }, [messages]);
+
+  function conversationTurnElements(): HTMLElement[] {
+    return Array.from(conversationRef.current?.querySelectorAll<HTMLElement>('[data-message-role="user"]') || []);
+  }
+
+  function updateCurrentConversationTurn(container: HTMLElement): void {
+    const turns = conversationTurnElements();
+    if (!turns.length) {
+      setCurrentConversationTurn(0);
+      return;
+    }
+    const marker = container.getBoundingClientRect().top + Math.min(120, container.clientHeight * 0.25);
+    let index = 0;
+    turns.forEach((turn, turnIndex) => {
+      if (turn.getBoundingClientRect().top <= marker) index = turnIndex;
+    });
+    setCurrentConversationTurn(index);
+  }
+
+  function scrollToConversationTurn(direction: -1 | 1): void {
+    const turns = conversationTurnElements();
+    if (!turns.length) return;
+    const nextIndex = Math.max(0, Math.min(turns.length - 1, currentConversationTurn + direction));
+    followConversationRef.current = false;
+    setConversationNearBottom(false);
+    setCurrentConversationTurn(nextIndex);
+    turns[nextIndex]?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function scrollToConversationLatest(): void {
+    const conversation = conversationRef.current;
+    if (!conversation) return;
+    followConversationRef.current = true;
+    setConversationNearBottom(true);
+    setUnreadConversationUpdates(0);
+    setCurrentConversationTurn(Math.max(0, messages.filter((message) => message.role === "user").length - 1));
+    conversation.scrollTo({ top: conversation.scrollHeight, behavior: "smooth" });
+  }
+
+  useEffect(() => {
+    const navigateConversation = (event: KeyboardEvent) => {
+      if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.matches("input, textarea, select, [contenteditable=true]")) return;
+      event.preventDefault();
+      scrollToConversationTurn(event.key === "ArrowUp" ? -1 : 1);
+    };
+    window.addEventListener("keydown", navigateConversation);
+    return () => window.removeEventListener("keydown", navigateConversation);
+  }, [currentConversationTurn, messages]);
 
   useEffect(() => {
     const preventFileNavigation = (event: DragEvent) => {
@@ -2221,8 +2291,11 @@ export function App() {
           ref={conversationRef}
           onScroll={(event) => {
             const element = event.currentTarget;
-            followConversationRef.current =
-              element.scrollHeight - element.scrollTop - element.clientHeight <= 48;
+            const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight <= 64;
+            followConversationRef.current = nearBottom;
+            setConversationNearBottom(nearBottom);
+            if (nearBottom) setUnreadConversationUpdates(0);
+            updateCurrentConversationTurn(element);
           }}
         >
           {isOpeningSelectedThread && messages.length > 0 && (
@@ -2249,6 +2322,26 @@ export function App() {
             </div>
           )}
         </section>
+
+        {messages.length > 0 && (
+          <div className="conversation-navigation" aria-label="Conversation navigation">
+            <div className="conversation-turn-navigation">
+              <button type="button" title="Previous question (Alt+Up)" aria-label="Previous question" onClick={() => scrollToConversationTurn(-1)}>
+                <ChevronUp size={17} />
+              </button>
+              <span>{Math.min(currentConversationTurn + 1, Math.max(1, messages.filter((message) => message.role === "user").length))}/{Math.max(1, messages.filter((message) => message.role === "user").length)}</span>
+              <button type="button" title="Next question (Alt+Down)" aria-label="Next question" onClick={() => scrollToConversationTurn(1)}>
+                <ChevronDown size={17} />
+              </button>
+            </div>
+            {!conversationNearBottom && (
+              <button type="button" className="conversation-latest" onClick={scrollToConversationLatest}>
+                <ChevronDown size={17} />
+                <span>{unreadConversationUpdates ? `${unreadConversationUpdates} new` : "Latest"}</span>
+              </button>
+            )}
+          </div>
+        )}
 
         <div className="composer-wrap">
           <div
@@ -2565,7 +2658,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   onOpenImage: (source: string) => void;
 }) {
   return (
-    <article className={`message ${message.role}`}>
+    <article className={`message ${message.role}`} data-message-role={message.role}>
       <div className="message-body">
         {message.streaming && <div className="message-author"><span className="streaming-label">Streaming</span></div>}
         <div className="message-content">
@@ -3165,10 +3258,10 @@ function SkillsView() {
         <span>{visibleSkills.length} of {status.skills.length}</span>
         <span>{status.skills.filter((skill) => skill.enabled).length} enabled</span>
       </div>
-      {notice && <p className="skills-notice">{notice}</p>}
-      {error && <p className="gateway-error">{error}</p>}
+      {notice && <p className="skills-message skills-notice">{notice}</p>}
+      {error && <p className="skills-message skills-error">{error}</p>}
       {status.errors.map((skillError) => (
-        <p className="gateway-error" key={`${skillError.path}-${skillError.message}`} title={skillError.path}>{skillError.message}</p>
+        <p className="skills-message skills-error" key={`${skillError.path}-${skillError.message}`} title={skillError.path}>{skillError.message}</p>
       ))}
       <div className="skill-list" aria-busy={loading}>
         {!loading && visibleSkills.length === 0 && (

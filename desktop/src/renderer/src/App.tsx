@@ -17,6 +17,7 @@ import {
   House,
   Image as ImageIcon,
   KeyRound,
+  ListTree,
   Moon,
   MoreHorizontal,
   Paperclip,
@@ -73,7 +74,7 @@ import type {
 import { turnScopedItemId } from "../../shared/item-identity";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as XtermTerminal } from "@xterm/xterm";
-import { memo, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import "@xterm/xterm/css/xterm.css";
 import { AppModal } from "./components/AppModal";
 import { DeleteConfirmationDialog } from "./components/DeleteConfirmationDialog";
@@ -260,6 +261,7 @@ export function App() {
   const [conversationNearBottom, setConversationNearBottom] = useState(true);
   const [unreadConversationUpdates, setUnreadConversationUpdates] = useState(0);
   const [currentConversationTurn, setCurrentConversationTurn] = useState(0);
+  const [conversationOutlineSearch, setConversationOutlineSearch] = useState("");
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [activities, setActivities] = useState<ActivityEntry[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
@@ -287,6 +289,7 @@ export function App() {
   });
   const [taskToast, setTaskToast] = useState<{ tone: "success" | "error" | "warning" | "info"; message: string } | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  const [rightPanelView, setRightPanelView] = useState<"activity" | "outline">("activity");
   const [primaryView, setPrimaryView] = useState<"workspace" | "terminal">("workspace");
   const [dialogView, setDialogView] = useState<AppDialogView | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
@@ -299,6 +302,8 @@ export function App() {
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const threadActionsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const conversationRef = useRef<HTMLElement | null>(null);
+  const conversationOutlineCurrentRef = useRef<HTMLButtonElement | null>(null);
+  const restoreActivityPanelAfterOutlineRef = useRef(true);
   const composerValueRef = useRef(composer);
   const attachmentsRef = useRef(attachments);
   const bootstrapStartedRef = useRef(false);
@@ -369,6 +374,8 @@ export function App() {
     setConversationNearBottom(true);
     setUnreadConversationUpdates(0);
     setCurrentConversationTurn(0);
+    setRightPanelView("activity");
+    setConversationOutlineSearch("");
   }, [projectPath, threadId]);
 
   useEffect(() => {
@@ -494,6 +501,27 @@ export function App() {
     turns[nextIndex]?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  function scrollToConversationTurnIndex(index: number): void {
+    const turns = conversationTurnElements();
+    const target = turns[index];
+    if (!target) return;
+    followConversationRef.current = false;
+    setConversationNearBottom(false);
+    setCurrentConversationTurn(index);
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function openConversationOutline(): void {
+    restoreActivityPanelAfterOutlineRef.current = rightPanelOpen && rightPanelView === "activity";
+    setRightPanelView("outline");
+    setRightPanelOpen(true);
+  }
+
+  function closeConversationOutline(): void {
+    setRightPanelView("activity");
+    setRightPanelOpen(restoreActivityPanelAfterOutlineRef.current);
+  }
+
   function scrollToConversationLatest(): void {
     const conversation = conversationRef.current;
     if (!conversation) return;
@@ -515,6 +543,26 @@ export function App() {
     window.addEventListener("keydown", navigateConversation);
     return () => window.removeEventListener("keydown", navigateConversation);
   }, [currentConversationTurn, messages]);
+
+  const conversationOutline = useMemo(() => messages
+    .filter((message) => message.role === "user")
+    .map((message, index) => ({
+      id: message.id,
+      index,
+      summary: conversationOutlineSummary(message.content, message.files?.map((file) => file.name)),
+    })), [messages]);
+  const filteredConversationOutline = useMemo(() => {
+    const query = conversationOutlineSearch.trim().toLocaleLowerCase();
+    return query
+      ? conversationOutline.filter((entry) => entry.summary.toLocaleLowerCase().includes(query))
+      : conversationOutline;
+  }, [conversationOutline, conversationOutlineSearch]);
+
+  useEffect(() => {
+    if (!rightPanelOpen || rightPanelView !== "outline") return;
+    const frame = requestAnimationFrame(() => conversationOutlineCurrentRef.current?.scrollIntoView({ block: "nearest" }));
+    return () => cancelAnimationFrame(frame);
+  }, [rightPanelOpen, rightPanelView, currentConversationTurn, filteredConversationOutline]);
 
   useEffect(() => {
     const preventFileNavigation = (event: DragEvent) => {
@@ -2034,6 +2082,7 @@ export function App() {
         ...current.filter((approval) => approval.id !== event.approval.id),
       ]);
       setRightPanelOpen(true);
+      setRightPanelView("activity");
       upsertActivity(
         `sync-${event.sequence}`,
         event.approval.title,
@@ -2056,6 +2105,7 @@ export function App() {
         ...current.filter((request) => request.id !== event.request.id),
       ]);
       setRightPanelOpen(true);
+      setRightPanelView("activity");
       upsertActivity(
         `sync-${event.sequence}`,
         "Input requested",
@@ -2114,11 +2164,18 @@ export function App() {
         </button>
         <div className="rail-actions">
           <button
-            className={`${rightPanelOpen ? "panel-open" : ""} ${approvals.length + userInputs.length > 0 ? "attention" : ""}`}
+            className={`${rightPanelOpen && rightPanelView === "activity" ? "panel-open" : ""} ${approvals.length + userInputs.length > 0 ? "attention" : ""}`}
             title={approvals.length + userInputs.length > 0 ? `${approvals.length + userInputs.length} request${approvals.length + userInputs.length === 1 ? "" : "s"} need attention` : "Activity"}
             aria-label="Activity"
-            aria-pressed={rightPanelOpen}
-            onClick={() => setRightPanelOpen((value) => !value)}
+            aria-pressed={rightPanelOpen && rightPanelView === "activity"}
+            onClick={() => {
+              if (rightPanelOpen && rightPanelView === "activity") {
+                setRightPanelOpen(false);
+                return;
+              }
+              setRightPanelView("activity");
+              setRightPanelOpen(true);
+            }}
           >
             <Activity className={running ? "activity-wave-running" : ""} size={20} />
             <span className="rail-label">活动</span>
@@ -2281,23 +2338,42 @@ export function App() {
                 ))}
               </select>
             </label>
+            {conversationOutline.length > 1 && (
+              <button
+                type="button"
+                className={`icon-button conversation-outline-toggle ${rightPanelOpen && rightPanelView === "outline" ? "selected" : ""}`}
+                title="Conversation outline"
+                aria-label="Conversation outline"
+                aria-expanded={rightPanelOpen && rightPanelView === "outline"}
+                onClick={() => {
+                  if (rightPanelOpen && rightPanelView === "outline") {
+                    closeConversationOutline();
+                    return;
+                  }
+                  openConversationOutline();
+                }}
+              >
+                <ListTree size={17} />
+              </button>
+            )}
           </div>
         </header>
 
-        <section
-          key={`${projectPath}\u0000${threadId || "new"}`}
-          className="conversation"
-          aria-live="polite"
-          ref={conversationRef}
-          onScroll={(event) => {
-            const element = event.currentTarget;
-            const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight <= 64;
-            followConversationRef.current = nearBottom;
-            setConversationNearBottom(nearBottom);
-            if (nearBottom) setUnreadConversationUpdates(0);
-            updateCurrentConversationTurn(element);
-          }}
-        >
+        <div className="conversation-shell">
+          <section
+            key={`${projectPath}\u0000${threadId || "new"}`}
+            className="conversation"
+            aria-live="polite"
+            ref={conversationRef}
+            onScroll={(event) => {
+              const element = event.currentTarget;
+              const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight <= 64;
+              followConversationRef.current = nearBottom;
+              setConversationNearBottom(nearBottom);
+              if (nearBottom) setUnreadConversationUpdates(0);
+              updateCurrentConversationTurn(element);
+            }}
+          >
           {isOpeningSelectedThread && messages.length > 0 && (
             <div className="conversation-refresh" role="progressbar" aria-label="Refreshing conversation" />
           )}
@@ -2321,27 +2397,15 @@ export function App() {
               ))}
             </div>
           )}
-        </section>
+          </section>
 
-        {messages.length > 0 && (
-          <div className="conversation-navigation" aria-label="Conversation navigation">
-            <div className="conversation-turn-navigation">
-              <button type="button" title="Previous question (Alt+Up)" aria-label="Previous question" onClick={() => scrollToConversationTurn(-1)}>
-                <ChevronUp size={17} />
-              </button>
-              <span>{Math.min(currentConversationTurn + 1, Math.max(1, messages.filter((message) => message.role === "user").length))}/{Math.max(1, messages.filter((message) => message.role === "user").length)}</span>
-              <button type="button" title="Next question (Alt+Down)" aria-label="Next question" onClick={() => scrollToConversationTurn(1)}>
-                <ChevronDown size={17} />
-              </button>
-            </div>
-            {!conversationNearBottom && (
-              <button type="button" className="conversation-latest" onClick={scrollToConversationLatest}>
-                <ChevronDown size={17} />
-                <span>{unreadConversationUpdates ? `${unreadConversationUpdates} new` : "Latest"}</span>
-              </button>
-            )}
-          </div>
-        )}
+          {!conversationNearBottom && messages.length > 0 && (
+            <button type="button" className="conversation-latest" title="Back to latest" aria-label="Back to latest" onClick={scrollToConversationLatest}>
+              <ChevronDown size={19} />
+              {unreadConversationUpdates > 0 && <span>{Math.min(unreadConversationUpdates, 99)}</span>}
+            </button>
+          )}
+        </div>
 
         <div className="composer-wrap">
           <div
@@ -2487,15 +2551,31 @@ export function App() {
 
       {rightPanelOpen && (
         <aside className="activity-panel">
-          <ActivityView
-            activities={activities}
-            approvals={approvals}
-            resolvingApprovalId={resolvingApprovalId}
-            onResolve={resolveApproval}
-            userInputs={userInputs}
-            resolvingUserInputId={resolvingUserInputId}
-            onResolveUserInput={resolveUserInput}
-          />
+          {rightPanelView === "outline" ? (
+            <ConversationOutlineView
+              currentTurn={currentConversationTurn}
+              entries={filteredConversationOutline}
+              onClose={closeConversationOutline}
+              onSearchChange={setConversationOutlineSearch}
+              onSelect={(index) => {
+                scrollToConversationTurnIndex(index);
+                closeConversationOutline();
+              }}
+              search={conversationOutlineSearch}
+              totalCount={conversationOutline.length}
+              currentRef={conversationOutlineCurrentRef}
+            />
+          ) : (
+            <ActivityView
+              activities={activities}
+              approvals={approvals}
+              resolvingApprovalId={resolvingApprovalId}
+              onResolve={resolveApproval}
+              userInputs={userInputs}
+              resolvingUserInputId={resolvingUserInputId}
+              onResolveUserInput={resolveUserInput}
+            />
+          )}
         </aside>
       )}
       {dialogView === "settings" && (
@@ -2648,6 +2728,13 @@ function SelectionCheckbox({
     if (inputRef.current) inputRef.current.indeterminate = indeterminate;
   }, [indeterminate]);
   return <input ref={inputRef} type="checkbox" checked={checked} aria-label={ariaLabel} onChange={onChange} />;
+}
+
+function conversationOutlineSummary(content: string, fileNames: string[] = []): string {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  if (normalized) return normalized.length > 120 ? `${normalized.slice(0, 117)}...` : normalized;
+  if (fileNames.length) return fileNames.length === 1 ? fileNames[0]! : `${fileNames[0]} and ${fileNames.length - 1} more`;
+  return "Attachment message";
 }
 
 const ChatMessageRow = memo(function ChatMessageRow({
@@ -3048,6 +3135,59 @@ function ActivityView({
             <div><strong>{entry.label}</strong><p>{entry.detail}</p></div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function ConversationOutlineView({
+  currentTurn,
+  entries,
+  onClose,
+  onSearchChange,
+  onSelect,
+  search,
+  totalCount,
+  currentRef,
+}: {
+  currentTurn: number;
+  entries: Array<{ id: string; index: number; summary: string }>;
+  onClose: () => void;
+  onSearchChange: (value: string) => void;
+  onSelect: (index: number) => void;
+  search: string;
+  totalCount: number;
+  currentRef: RefObject<HTMLButtonElement | null>;
+}) {
+  return (
+    <div className="conversation-outline" aria-label="Conversation outline">
+      <div className="conversation-outline-header">
+        <div>
+          <strong>Conversation outline</strong>
+          <span>{totalCount} questions</span>
+        </div>
+        <button type="button" className="icon-button compact" title="Close outline" aria-label="Close outline" onClick={onClose}><X size={15} /></button>
+      </div>
+      <label className="conversation-outline-search">
+        <Search size={14} />
+        <input value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="Search questions" aria-label="Search questions" />
+        {search && <button type="button" title="Clear search" aria-label="Clear search" onClick={() => onSearchChange("")}><X size={12} /></button>}
+      </label>
+      <div className="conversation-outline-list">
+        {entries.map((entry) => (
+          <button
+            type="button"
+            className={`conversation-outline-row ${entry.index === currentTurn ? "current" : ""}`}
+            key={entry.id}
+            ref={entry.index === currentTurn ? currentRef : undefined}
+            aria-current={entry.index === currentTurn ? "location" : undefined}
+            onClick={() => onSelect(entry.index)}
+          >
+            <span>{String(entry.index + 1).padStart(2, "0")}</span>
+            <strong>{entry.summary}</strong>
+          </button>
+        ))}
+        {entries.length === 0 && <div className="conversation-outline-empty">No matching questions</div>}
       </div>
     </div>
   );

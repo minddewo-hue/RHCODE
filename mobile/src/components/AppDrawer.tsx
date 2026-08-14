@@ -232,10 +232,17 @@ function ThreadList(props: AppDrawerProps) {
 
       <View style={styles.drawerNav}>
         <View style={styles.connectionSummary}>
-          <View style={[styles.connectionDot, connectionDot(props.connectionStatus)]} />
-          <Text numberOfLines={1} style={styles.connectionText}>
-            {connectionSummaryLabel(props.connections, props.connectionStates)}
-          </Text>
+          <Pressable
+            accessibilityLabel="切换电脑"
+            accessibilityRole="button"
+            onPress={() => props.onPageChange("computers")}
+            style={({ pressed }) => [styles.connectionSummaryButton, pressed && styles.morePressed]}
+          >
+            <View style={[styles.connectionDot, connectionDot(props.connectionStatus)]} />
+            <Text numberOfLines={1} style={styles.connectionText}>
+              {connectionSummaryLabel(props.connections, props.connectionStates)}
+            </Text>
+          </Pressable>
           <Pressable
             accessibilityLabel="设置"
             hitSlop={8}
@@ -758,7 +765,8 @@ const styles = createThemedStyles((colors) => ({
   navRowPressed: { backgroundColor: colors.pressed },
   navText: { flex: 1, color: colors.ink, fontSize: 13, lineHeight: 18, letterSpacing: 0 },
   navTrailing: { color: colors.inkMuted, fontSize: 11, lineHeight: 15, letterSpacing: 0 },
-  connectionSummary: { height: 48, paddingLeft: 10, paddingRight: 3, flexDirection: "row", alignItems: "center" },
+  connectionSummary: { height: 48, paddingRight: 3, flexDirection: "row", alignItems: "center" },
+  connectionSummaryButton: { flex: 1, height: 40, paddingLeft: 10, borderRadius: 6, flexDirection: "row", alignItems: "center" },
   connectionDot: { width: 7, height: 7, borderRadius: 4, marginRight: 8 },
   connectionText: { flex: 1, color: colors.inkMuted, fontSize: 11, lineHeight: 15, letterSpacing: 0 },
   settingsButton: { width: 40, height: 40, borderRadius: 6, alignItems: "center", justifyContent: "center" },

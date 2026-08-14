@@ -106,6 +106,7 @@ export function ChatScreen(props: ChatScreenProps) {
   const [activePage, setActivePage] = useState<ConversationPage>("result");
   const [taskMenuVisible, setTaskMenuVisible] = useState(false);
   const [attachmentMenuVisible, setAttachmentMenuVisible] = useState(false);
+  const [conversationOutlineVisible, setConversationOutlineVisible] = useState(false);
   const activePageRef = useRef(activePage);
   const pageWidthRef = useRef(pageWidth);
   activePageRef.current = activePage;
@@ -143,6 +144,7 @@ export function ChatScreen(props: ChatScreenProps) {
   ]);
   const resultEntries = useMemo(() => entries.filter(isResultEntry), [entries]);
   const activityEntries = useMemo(() => entries.filter((entry) => !isResultEntry(entry)), [entries]);
+  const resultTurnCount = useMemo(() => resultEntries.filter(isUserChatEntry).length, [resultEntries]);
   const activityCount = useMemo(() => countActivityEntries(props), [
     props.approvals,
     props.selectedThreadId,
@@ -162,6 +164,7 @@ export function ChatScreen(props: ChatScreenProps) {
 
   useEffect(() => {
     setActivePage("result");
+    setConversationOutlineVisible(false);
   }, [props.selectedThreadId]);
 
   const selectPage = (page: ConversationPage) => {
@@ -206,6 +209,13 @@ export function ChatScreen(props: ChatScreenProps) {
             running={threadRunning}
             onPress={() => selectPage("activity")}
           />
+          {activePage === "result" && resultTurnCount > 1 && (
+            <IconButton
+              accessibilityLabel="打开对话目录"
+              icon="list-outline"
+              onPress={() => setConversationOutlineVisible(true)}
+            />
+          )}
           <IconButton
             accessibilityLabel="打开任务菜单"
             icon="ellipsis-horizontal"
@@ -249,6 +259,8 @@ export function ChatScreen(props: ChatScreenProps) {
           hasThread={Boolean(props.selectedThreadId || props.newThreadDraft)}
           props={props}
           resultListRef={resultListRef}
+          outlineVisible={conversationOutlineVisible}
+          onCloseOutline={() => setConversationOutlineVisible(false)}
           visible
         />
       </View>
@@ -505,13 +517,15 @@ function ActivityWaveIcon({ active, running }: { active: boolean; running: boole
   );
 }
 
-function ConversationList({ activityListRef, activePage, entries, hasThread, props, resultListRef, visible }: {
+function ConversationList({ activityListRef, activePage, entries, hasThread, onCloseOutline, outlineVisible, props, resultListRef, visible }: {
   activityListRef: React.RefObject<FlatList<ChatEntry> | null>;
   activePage: ConversationPage;
   entries: ChatEntry[];
   hasThread: boolean;
   props: ChatScreenProps;
   resultListRef: React.RefObject<FlatList<ChatEntry> | null>;
+  outlineVisible: boolean;
+  onCloseOutline: () => void;
   visible: boolean;
 }) {
   const listRef = activePage === "result" ? resultListRef : activityListRef;
@@ -526,8 +540,14 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
   const previousEntryCount = useRef(entries.length);
   const visibleEntries = useMemo(() => entries.slice(-visibleCount), [entries, visibleCount]);
   const userEntryIds = useMemo(() => entries.flatMap((entry) => (
-    (entry.type === "timeline" && entry.item.kind === "user") || entry.type === "pending" ? [entry.id] : []
+    isUserChatEntry(entry) ? [entry.id] : []
   )), [entries]);
+  const outlineEntries = useMemo(() => entries.filter(isUserChatEntry).map((entry, index) => ({
+    id: entry.id,
+    index,
+    summary: mobileConversationOutlineSummary(entry),
+    time: mobileConversationOutlineTime(entry.createdAt),
+  })), [entries]);
   const userEntryIdsRef = useRef(userEntryIds);
   userEntryIdsRef.current = userEntryIds;
   const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: Array<{ item: ChatEntry }> }) => {
@@ -546,14 +566,15 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
     });
   };
 
-  const scrollToUserTurn = (direction: -1 | 1) => {
+  const scrollToUserTurnIndex = (nextTurn: number) => {
     if (!userEntryIds.length) return;
-    const nextTurn = Math.max(0, Math.min(userEntryIds.length - 1, currentUserTurn + direction));
-    const targetEntryIndex = entries.findIndex((entry) => entry.id === userEntryIds[nextTurn]);
+    const boundedTurn = Math.max(0, Math.min(userEntryIds.length - 1, nextTurn));
+    const targetEntryIndex = entries.findIndex((entry) => entry.id === userEntryIds[boundedTurn]);
+    if (targetEntryIndex < 0) return;
     const requiredVisibleCount = entries.length - targetEntryIndex;
     nearBottom.current = false;
     setIsNearBottom(false);
-    setCurrentUserTurn(nextTurn);
+    setCurrentUserTurn(boundedTurn);
     setVisibleCount((count) => Math.max(count, requiredVisibleCount));
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const visibleIndex = Math.max(0, targetEntryIndex - Math.max(0, entries.length - Math.max(visibleCount, requiredVisibleCount)));
@@ -670,27 +691,140 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, pro
         );
       }}
     />
-    {!!userEntryIds.length && (
-      <View pointerEvents="box-none" style={styles.conversationNavigation}>
-        <View style={styles.turnNavigation}>
-          <Pressable accessibilityLabel="上一轮对话" hitSlop={6} onPress={() => scrollToUserTurn(-1)} style={({ pressed }) => [styles.turnNavigationButton, pressed && styles.iconPressed]}>
-            <Feather color={colors.ink} name="chevron-up" size={20} />
-          </Pressable>
-          <Text style={styles.turnNavigationText}>{Math.min(currentUserTurn + 1, userEntryIds.length)}/{userEntryIds.length}</Text>
-          <Pressable accessibilityLabel="下一轮对话" hitSlop={6} onPress={() => scrollToUserTurn(1)} style={({ pressed }) => [styles.turnNavigationButton, pressed && styles.iconPressed]}>
-            <Feather color={colors.ink} name="chevron-down" size={20} />
-          </Pressable>
-        </View>
-        {!isNearBottom && (
-          <Pressable accessibilityLabel="回到最新内容" onPress={returnToLatest} style={({ pressed }) => [styles.latestButton, pressed && styles.latestButtonPressed]}>
-            <Feather color={colors.onSolid} name="arrow-down" size={18} />
-            <Text style={styles.latestButtonText}>{unreadUpdates ? `${unreadUpdates} 条新内容` : "回到最新"}</Text>
-          </Pressable>
+    {!isNearBottom && !!userEntryIds.length && (
+      <Pressable accessibilityLabel="回到最新内容" onPress={returnToLatest} style={({ pressed }) => [styles.latestButton, pressed && styles.latestButtonPressed]}>
+        <Feather color={colors.ink} name="arrow-down" size={19} />
+        {unreadUpdates > 0 && (
+          <View style={styles.latestBadge}>
+            <Text style={styles.latestBadgeText}>{Math.min(unreadUpdates, 99)}</Text>
+          </View>
         )}
-      </View>
+      </Pressable>
     )}
+    <ConversationOutlineSheet
+      currentTurn={currentUserTurn}
+      entries={outlineEntries}
+      onClose={onCloseOutline}
+      onSelect={(index) => {
+        onCloseOutline();
+        scrollToUserTurnIndex(index);
+      }}
+      visible={outlineVisible}
+    />
     </View>
   );
+}
+
+function ConversationOutlineSheet({ currentTurn, entries, onClose, onSelect, visible }: {
+  currentTurn: number;
+  entries: Array<{ id: string; index: number; summary: string; time: string }>;
+  onClose: () => void;
+  onSelect: (index: number) => void;
+  visible: boolean;
+}) {
+  const insets = useSafeAreaInsets();
+  const listRef = useRef<FlatList<(typeof entries)[number]>>(null);
+  const [query, setQuery] = useState("");
+  const filteredEntries = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    return normalized ? entries.filter((entry) => entry.summary.toLocaleLowerCase().includes(normalized)) : entries;
+  }, [entries, query]);
+
+  useEffect(() => {
+    if (!visible) setQuery("");
+  }, [visible]);
+
+  useEffect(() => {
+    if (!visible || query.trim() || !entries.length) return;
+    requestAnimationFrame(() => listRef.current?.scrollToIndex({ animated: false, index: Math.min(currentTurn, entries.length - 1), viewPosition: 0.35 }));
+  }, [currentTurn, entries.length, query, visible]);
+
+  return (
+    <Modal animationType="fade" onRequestClose={onClose} statusBarTranslucent transparent visible={visible}>
+      <View style={styles.outlineModalRoot}>
+        <Pressable accessibilityLabel="关闭对话目录" onPress={onClose} style={styles.outlineScrim} />
+        <View style={[styles.outlineSheet, { paddingTop: insets.top, paddingBottom: Math.max(insets.bottom, 8) }]}>
+          <View style={styles.outlineHeader}>
+            <View style={styles.outlineHeaderText}>
+              <Text style={styles.outlineTitle}>对话目录</Text>
+              <Text style={styles.outlineCount}>{entries.length} 个问题</Text>
+            </View>
+            <Pressable accessibilityLabel="关闭" hitSlop={8} onPress={onClose} style={({ pressed }) => [styles.outlineClose, pressed && styles.iconPressed]}>
+              <Ionicons color={colors.ink} name="close" size={21} />
+            </Pressable>
+          </View>
+          <View style={styles.outlineSearch}>
+            <Feather color={colors.inkMuted} name="search" size={15} />
+            <TextInput
+              accessibilityLabel="搜索对话问题"
+              autoCapitalize="none"
+              autoCorrect={false}
+              onChangeText={setQuery}
+              placeholder="搜索问题"
+              placeholderTextColor={colors.inkFaint}
+              style={styles.outlineSearchInput}
+              value={query}
+            />
+            {!!query && (
+              <Pressable accessibilityLabel="清除搜索" hitSlop={6} onPress={() => setQuery("")}>
+                <Ionicons color={colors.inkMuted} name="close-circle" size={17} />
+              </Pressable>
+            )}
+          </View>
+          <FlatList
+            ref={listRef}
+            contentContainerStyle={styles.outlineList}
+            data={filteredEntries}
+            getItemLayout={(_data, index) => ({ length: 70, offset: 70 * index, index })}
+            keyExtractor={(entry) => entry.id}
+            keyboardShouldPersistTaps="handled"
+            ListEmptyComponent={<Text style={styles.outlineEmpty}>没有匹配的问题</Text>}
+            style={styles.outlineListView}
+            renderItem={({ item }) => {
+              const current = item.index === currentTurn;
+              return (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: current }}
+                  onPress={() => onSelect(item.index)}
+                  style={({ pressed }) => [styles.outlineRow, current && styles.outlineRowCurrent, pressed && styles.outlineRowPressed]}
+                >
+                  <View style={[styles.outlineMarker, current && styles.outlineMarkerCurrent]} />
+                  <Text style={[styles.outlineIndex, current && styles.outlineIndexCurrent]}>{String(item.index + 1).padStart(2, "0")}</Text>
+                  <View style={styles.outlineRowBody}>
+                    <Text numberOfLines={2} style={[styles.outlineSummary, current && styles.outlineSummaryCurrent]}>{item.summary}</Text>
+                    {!!item.time && <Text style={styles.outlineTime}>{item.time}</Text>}
+                  </View>
+                </Pressable>
+              );
+            }}
+          />
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function isUserChatEntry(entry: ChatEntry): boolean {
+  return (entry.type === "timeline" && entry.item.kind === "user") || entry.type === "pending";
+}
+
+function mobileConversationOutlineSummary(entry: ChatEntry): string {
+  const content = entry.type === "timeline" ? entry.item.content : entry.type === "pending" ? entry.message.content : "";
+  const normalized = content.replace(/\s+/g, " ").trim();
+  if (normalized) return normalized.length > 100 ? `${normalized.slice(0, 97)}...` : normalized;
+  const attachmentName = entry.type === "timeline"
+    ? entry.item.files?.[0]?.name || entry.item.images?.[0]?.name
+    : entry.type === "pending"
+      ? entry.message.attachments?.[0]?.name
+      : undefined;
+  return attachmentName || "附件消息";
+}
+
+function mobileConversationOutlineTime(createdAt: string): string {
+  const value = new Date(createdAt);
+  if (Number.isNaN(value.getTime())) return "";
+  return value.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
 function IconButton({

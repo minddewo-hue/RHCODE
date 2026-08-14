@@ -70,6 +70,10 @@ import {
 const { autoUpdater } = updaterPackage;
 const systemFetch = net.fetch.bind(net) as typeof fetch;
 
+if (process.env.RHZYCODE_DISABLE_HARDWARE_ACCELERATION === "1") {
+  app.disableHardwareAcceleration();
+}
+
 let mainWindow: BrowserWindow | null = null;
 let runtime: DesktopRuntime | null = null;
 let controlPersistence: EncryptedControlPersistence | null = null;
@@ -141,12 +145,14 @@ function createWindow(): BrowserWindow {
     const menu = Menu.buildFromTemplate(buildTextContextMenu(params));
     menu.popup({ window: mainWindow || undefined });
   });
-  mainWindow.once("ready-to-show", () => {
+  const revealWindow = () => {
     if (!mainWindow) return;
     mainWindow.show();
     mainWindow.focus();
     mainWindow.webContents.focus();
-  });
+  };
+  mainWindow.once("ready-to-show", revealWindow);
+  mainWindow.webContents.once("did-finish-load", revealWindow);
   mainWindow.on("focus", () => {
     if (!mainWindow) return;
     mainWindow.flashFrame(false);

@@ -462,7 +462,12 @@ button:focus-visible, [role="button"]:focus-visible, select:focus-visible {
 .modal-actions button.secondary { color: var(--text); border-color: var(--border-strong); background: var(--surface); }
 .modal-actions button.secondary:hover { background: var(--surface-muted); }
 .delete-confirmation-modal { width: min(440px, calc(100vw - 48px)); }
-.delete-confirmation-body { padding: 20px; color: var(--text-muted); font-size: 13px; line-height: 1.5; }
+.delete-confirmation-modal .app-modal-body { display: flex; flex-direction: column; overflow: hidden; }
+.delete-confirmation-body { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 20px; color: var(--text-muted); font-size: 13px; line-height: 1.5; }
+.delete-confirmation-body::-webkit-scrollbar { width: 8px; }
+.delete-confirmation-body::-webkit-scrollbar-track { background: transparent; }
+.delete-confirmation-body::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 8px; background: #b8bfcc; background-clip: padding-box; }
+.delete-confirmation-body::-webkit-scrollbar-thumb:hover { background: #969fb0; background-clip: padding-box; }
 .delete-confirmation-body p { margin: 0; }
 .delete-confirmation-body p + p { margin-top: 8px; }
 .delete-confirmation-body strong { color: var(--text); overflow-wrap: anywhere; }
@@ -1089,8 +1094,10 @@ button:focus-visible, [role="button"]:focus-visible, select:focus-visible {
 [data-theme="dark"] .workspace-header.terminal-header { color: #dfe3ef; border-bottom-color: #252e43; background: #101725; }
 [data-theme="dark"] .app-modal { color: #e6e9f2; border-color: #343e57; background: #151c2b; box-shadow: 0 24px 70px #03050b99, 0 4px 14px #03050b70; }
 [data-theme="dark"] .app-modal-header { border-bottom-color: #293248; }
-[data-theme="dark"] .app-modal-body::-webkit-scrollbar-thumb { background: #46516b; background-clip: padding-box; }
-[data-theme="dark"] .app-modal-body::-webkit-scrollbar-thumb:hover { background: #5d6985; background-clip: padding-box; }
+[data-theme="dark"] .app-modal-body::-webkit-scrollbar-thumb,
+[data-theme="dark"] .delete-confirmation-body::-webkit-scrollbar-thumb { background: #46516b; background-clip: padding-box; }
+[data-theme="dark"] .app-modal-body::-webkit-scrollbar-thumb:hover,
+[data-theme="dark"] .delete-confirmation-body::-webkit-scrollbar-thumb:hover { background: #5d6985; background-clip: padding-box; }
 [data-theme="dark"] .app-modal-header > div > svg,
 [data-theme="dark"] .settings-heading > svg { color: var(--accent); }
 [data-theme="dark"] .app-modal-header h2 { color: #f0f2f8; }

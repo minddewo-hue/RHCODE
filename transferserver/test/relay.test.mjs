@@ -41,6 +41,10 @@ test("forwards control requests only while the matching desktop is online", asyn
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { lastSequence: 7 });
 
+  const healthHead = await app.inject({ method: "HEAD", url: "/health" });
+  assert.equal(healthHead.statusCode, 200);
+  assert.equal(healthHead.headers["cache-control"], "no-store");
+
   desktop.close();
   await onceClosed(desktop);
   const offline = await fetch(`${baseUrl}/control/v1/snapshot`, {

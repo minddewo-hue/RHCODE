@@ -78,10 +78,12 @@ export async function createTransferServer(options = {}) {
     return payload;
   });
 
-  app.get("/health", async (_request, reply) => {
+  const healthHandler = async (_request, reply) => {
     reply.header("Cache-Control", "no-store");
     return { status: "ok", onlineDesktops: registry.onlineDesktopCount };
-  });
+  };
+  app.get("/health", healthHandler);
+  app.head("/health", healthHandler);
 
   registerUpdateRoutes(app, {
     updatesDirectory,

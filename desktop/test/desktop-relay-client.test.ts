@@ -103,6 +103,88 @@ test("buffers a mobile heartbeat while the local event socket is connecting", as
   });
 });
 
+test("reconnects when a relay socket errors without first closing", async (context) => {
+  const local = createServer((_request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ hosts: [], lastSequence: 3 }));
+  });
+  await listen(local);
+  const localAddress = local.address();
+  assert.ok(localAddress && typeof localAddress === "object");
+
+  const relayHttp = createServer();
+  const relaySockets = new WebSocketServer({ noServer: true });
+  let connectionCount = 0;
+  relayHttp.on("upgrade", (request, socket, head) => {
+    relaySockets.handleUpgrade(request, socket, head, (webSocket) => {
+      connectionCount += 1;
+      webSocket.send(JSON.stringify({ type: "registered" }));
+    });
+  });
+  await listen(relayHttp);
+  const relayAddress = relayHttp.address();
+  assert.ok(relayAddress && typeof relayAddress === "object");
+
+  const client = new DesktopRelayClient({
+    serverUrl: `http://127.0.0.1:${relayAddress.port}`,
+    reconnectDelaysMs: [10],
+  });
+  client.on("error", () => undefined);
+  client.start(`http://127.0.0.1:${localAddress.port}`, key);
+  context.after(async () => {
+    client.stop();
+    relaySockets.close();
+    await new Promise<void>((resolve) => relayHttp.close(() => resolve()));
+    await new Promise<void>((resolve) => local.close(() => resolve()));
+  });
+  await waitFor(async () => connectionCount === 1);
+
+  // Reproduce a transport error that does not rely on a close event to drive
+  // recovery. This is the stale-registration failure seen in production.
+  const desktopSocket = (client as unknown as { socket: WebSocket | null }).socket;
+  assert.ok(desktopSocket);
+  desktopSocket.emit("error", new Error("simulated relay transport failure"));
+
+  await waitFor(async () => connectionCount >= 2);
+});
+
+test("reconnects when a half-open relay stops answering heartbeats", async (context) => {
+  const local = createServer((_request, response) => response.end());
+  await listen(local);
+  const localAddress = local.address();
+  assert.ok(localAddress && typeof localAddress === "object");
+
+  const relayHttp = createServer();
+  const relaySockets = new WebSocketServer({ noServer: true, autoPong: false });
+  let connectionCount = 0;
+  relayHttp.on("upgrade", (request, socket, head) => {
+    relaySockets.handleUpgrade(request, socket, head, (webSocket) => {
+      connectionCount += 1;
+      webSocket.send(JSON.stringify({ type: "registered" }));
+    });
+  });
+  await listen(relayHttp);
+  const relayAddress = relayHttp.address();
+  assert.ok(relayAddress && typeof relayAddress === "object");
+
+  const client = new DesktopRelayClient({
+    serverUrl: `http://127.0.0.1:${relayAddress.port}`,
+    reconnectDelaysMs: [10],
+    heartbeatIntervalMs: 10,
+    heartbeatTimeoutMs: 10,
+  });
+  client.on("error", () => undefined);
+  client.start(`http://127.0.0.1:${localAddress.port}`, key);
+  context.after(async () => {
+    client.stop();
+    relaySockets.close();
+    await new Promise<void>((resolve) => relayHttp.close(() => resolve()));
+    await new Promise<void>((resolve) => local.close(() => resolve()));
+  });
+
+  await waitFor(async () => connectionCount >= 2);
+});
+
 function listen(server: ReturnType<typeof createServer>): Promise<void> {
   return new Promise((resolve, reject) => {
     server.once("error", reject);

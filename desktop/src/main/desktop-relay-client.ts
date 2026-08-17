@@ -7,10 +7,15 @@ const MAX_SOCKET_BUFFERED_BYTES = 16 * 1024 * 1024;
 const MAX_PENDING_EVENT_FRAME_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 65_000;
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000] as const;
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const HEARTBEAT_TIMEOUT_MS = 15_000;
 
 interface DesktopRelayClientOptions {
   serverUrl: string;
   fetchImpl?: typeof fetch;
+  reconnectDelaysMs?: readonly number[];
+  heartbeatIntervalMs?: number;
+  heartbeatTimeoutMs?: number;
 }
 
 export class DesktopRelayClient extends EventEmitter {
@@ -19,14 +24,20 @@ export class DesktopRelayClient extends EventEmitter {
   private pendingEventFrames = new Map<string, Buffer>();
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectAttempt = 0;
+  private heartbeatInterval: NodeJS.Timeout | null = null;
+  private heartbeatTimeout: NodeJS.Timeout | null = null;
   private stopped = true;
   private localUrl = "";
   private accessKey = "";
   private readonly fetchImpl: typeof fetch;
+  private readonly reconnectDelaysMs: readonly number[];
 
   constructor(private readonly options: DesktopRelayClientOptions) {
     super();
     this.fetchImpl = options.fetchImpl || fetch;
+    this.reconnectDelaysMs = options.reconnectDelaysMs?.length
+      ? options.reconnectDelaysMs
+      : RECONNECT_DELAYS_MS;
   }
 
   start(localUrl: string, accessKey: string): void {
@@ -75,12 +86,33 @@ export class DesktopRelayClient extends EventEmitter {
     this.socket = socket;
     socket.once("open", () => {
       this.reconnectAttempt = 0;
+      this.startHeartbeat(socket);
       this.emit("status", "online");
     });
+    socket.on("pong", () => {
+      if (this.socket === socket) this.clearHeartbeatTimeout();
+    });
     socket.on("message", (data) => void this.handleMessage(socket, data));
-    socket.once("error", (error) => this.emit("error", error));
+    socket.once("error", (error) => {
+      this.emit("error", error);
+      // A WebSocket error is not guaranteed to be followed by close. If the
+      // relay has already evicted this registration, keeping the stale socket
+      // here prevents connect() from ever registering the desktop again.
+      if (this.socket === socket) {
+        this.socket = null;
+        this.stopHeartbeat();
+        this.closeEventSockets();
+        socket.terminate();
+        this.emit("status", "offline");
+        this.scheduleReconnect();
+      }
+    });
     socket.once("close", () => {
-      if (this.socket === socket) this.socket = null;
+      // An intentionally replaced socket may close after the new connection
+      // has opened. It must not tear down the replacement's heartbeat/events.
+      if (this.socket !== socket) return;
+      this.socket = null;
+      this.stopHeartbeat();
       this.closeEventSockets();
       this.emit("status", "offline");
       this.scheduleReconnect();
@@ -195,7 +227,9 @@ export class DesktopRelayClient extends EventEmitter {
 
   private scheduleReconnect(): void {
     if (this.stopped || this.reconnectTimer) return;
-    const delay = RECONNECT_DELAYS_MS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
+    const delay = this.reconnectDelaysMs[
+      Math.min(this.reconnectAttempt, this.reconnectDelaysMs.length - 1)
+    ];
     this.reconnectAttempt += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -204,9 +238,37 @@ export class DesktopRelayClient extends EventEmitter {
     this.reconnectTimer.unref();
   }
 
+  private startHeartbeat(socket: WebSocket): void {
+    this.stopHeartbeat();
+    const intervalMs = this.options.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
+    const timeoutMs = this.options.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS;
+    this.heartbeatInterval = setInterval(() => {
+      if (this.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+      this.clearHeartbeatTimeout();
+      socket.ping();
+      this.heartbeatTimeout = setTimeout(() => {
+        if (this.socket === socket) socket.terminate();
+      }, timeoutMs);
+      this.heartbeatTimeout.unref();
+    }, intervalMs);
+    this.heartbeatInterval.unref();
+  }
+
+  private clearHeartbeatTimeout(): void {
+    if (this.heartbeatTimeout) clearTimeout(this.heartbeatTimeout);
+    this.heartbeatTimeout = null;
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+    this.heartbeatInterval = null;
+    this.clearHeartbeatTimeout();
+  }
+
   private disconnect(code: number, reason: string): void {
     const socket = this.socket;
     this.socket = null;
+    this.stopHeartbeat();
     this.closeEventSockets();
     if (socket?.readyState === WebSocket.CONNECTING || socket?.readyState === WebSocket.OPEN) socket.close(code, reason);
   }

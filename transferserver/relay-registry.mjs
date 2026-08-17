@@ -100,7 +100,13 @@ export class RelayRegistry {
     socket.once("close", () => {
       this.#removeSession(session);
     });
-    socket.once("error", () => this.#removeSession(session));
+    socket.once("error", () => {
+      // Removing the registry entry alone can leave the desktop with an open
+      // TCP/WebSocket object, so it never reconnects even though mobile sees
+      // desktop_offline. Terminate the failed transport as well.
+      this.#removeSession(session);
+      if (socket.readyState === 0 || socket.readyState === 1) socket.terminate();
+    });
     this.#send(socket, { type: "registered" });
     return session;
   }

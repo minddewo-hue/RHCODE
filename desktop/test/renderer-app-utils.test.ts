@@ -207,7 +207,7 @@ test("groups all tasks by project and searches across the project tree", () => {
     name: group.name,
     threads: group.threads.map((thread) => thread.id),
   })), [
-    { name: "alpha", threads: ["thread-a", "thread-c"] },
+    { name: "alpha", threads: ["thread-c", "thread-a"] },
     { name: "empty", threads: [] },
     { name: "beta", threads: ["thread-b"] },
   ]);

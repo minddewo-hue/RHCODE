@@ -1,8 +1,8 @@
 import type { ControlSnapshot, RemoteThreadOpenResult } from "@rhzycode/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
-import { resumeConnectionAction } from "../components/chat-screen-model";
 import {
+  appConnectionAction,
   getSnapshotWithRetry,
   heartbeatPingFrame,
   heartbeatPongId,
@@ -51,7 +51,8 @@ interface RuntimeConnection {
   socket: WebSocket | null;
   socketOpen: boolean;
   connecting: boolean;
-  probe: (() => void) | null;
+  pause: (() => void) | null;
+  resume: (() => void) | null;
   reconnect: (() => void) | null;
   resync: (() => void) | null;
 }
@@ -78,17 +79,11 @@ export function useControlPlane({
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (next) => {
-      const resumed = appState.current !== "active" && next === "active";
+      const action = appConnectionAction(appState.current, next);
       appState.current = next;
-      if (!resumed) return;
       for (const runtime of runtimeConnections.current.values()) {
-        if (resumeConnectionAction(runtime.socketOpen) === "resync") {
-          // Recover any deltas lost while JS was suspended, then confirm the socket.
-          runtime.resync?.();
-          runtime.probe?.();
-        } else {
-          runtime.reconnect?.();
-        }
+        if (action === "pause") runtime.pause?.();
+        if (action === "resume") runtime.resume?.();
       }
     });
     return () => subscription.remove();
@@ -130,7 +125,8 @@ export function useControlPlane({
         socket: null,
         socketOpen: false,
         connecting: false,
-        probe: null,
+        pause: null,
+        resume: null,
         reconnect: null,
         resync: null,
       };
@@ -145,6 +141,8 @@ export function useControlPlane({
       let pendingHeartbeatId: string | null = null;
       let heartbeatSequence = 0;
       let reconnectAttempt = 0;
+      let paused = appState.current !== "active";
+      let connectionGeneration = 0;
 
       const clearSocketConnectTimer = () => {
         if (!socketConnectTimer) return;
@@ -161,7 +159,7 @@ export function useControlPlane({
       };
 
       const scheduleReconnect = () => {
-        if (disposed || stopped || reconnectTimer || runtime.connecting) return;
+        if (disposed || stopped || paused || reconnectTimer || runtime.connecting) return;
         runtime.socketOpen = false;
         update({ status: "offline" });
         const delay = reconnectDelay(reconnectAttempt++);
@@ -193,10 +191,11 @@ export function useControlPlane({
       };
 
       const resyncSnapshot = async () => {
-        if (disposed || stopped) return;
+        if (disposed || stopped || paused) return;
+        const generation = connectionGeneration;
         try {
           const next = await loadSnapshot();
-          if (disposed || stopped) return;
+          if (disposed || stopped || paused || generation !== connectionGeneration) return;
           acceptSnapshotCursor(next);
           update((current) => ({
             ...current,
@@ -205,7 +204,7 @@ export function useControlPlane({
             ...(runtime.socketOpen ? { status: "online" as const } : {}),
           }));
         } catch (error) {
-          if (disposed || stopped) return;
+          if (disposed || stopped || paused || generation !== connectionGeneration) return;
           if (isUnauthorized(error)) {
             stopped = true;
             update({ status: "needs_configuration", notice: describeControlError(error) });
@@ -264,12 +263,13 @@ export function useControlPlane({
       }
 
       const synchronize = async () => {
-        if (disposed || stopped || runtime.connecting) return;
+        if (disposed || stopped || paused || runtime.connecting) return;
+        const generation = connectionGeneration;
         runtime.connecting = true;
         update({ status: "connecting", notice: null });
         try {
           const next = await loadSnapshot();
-          if (disposed || stopped) return;
+          if (disposed || stopped || paused || generation !== connectionGeneration) return;
           acceptSnapshotCursor(next);
           update((current) => ({
             ...current,
@@ -277,7 +277,7 @@ export function useControlPlane({
             notice: null,
           }));
         } catch (error) {
-          if (disposed || stopped) return;
+          if (disposed || stopped || paused || generation !== connectionGeneration) return;
           if (isUnauthorized(error)) {
             runtime.connecting = false;
             stopped = true;
@@ -313,11 +313,13 @@ export function useControlPlane({
             return;
           }
           clearSocketConnectTimer();
-          if (disposed || stopped) return;
+          if (disposed || stopped || paused) {
+            socket.close();
+            return;
+          }
           reconnectAttempt = 0;
           runtime.connecting = false;
           runtime.socketOpen = true;
-          runtime.probe = () => sendHeartbeat(socket);
           update({ status: "online", notice: null });
           sendHeartbeat(socket);
           // Cover the race between the pre-socket snapshot and the first event frame
@@ -371,22 +373,50 @@ export function useControlPlane({
           runtime.connecting = false;
           runtime.socketOpen = false;
           runtime.socket = null;
-          runtime.probe = null;
           scheduleReconnect();
         };
+      };
+
+      const closeRealtimeConnection = () => {
+        connectionGeneration += 1;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        clearSocketConnectTimer();
+        clearHeartbeatTimers();
+        runtime.connecting = false;
+        runtime.socketOpen = false;
+        runtime.snapshotPromise = null;
+        const socket = runtime.socket;
+        runtime.socket = null;
+        try {
+          socket?.close();
+        } catch {
+          // A connecting React Native socket can already be detached by the OS.
+        }
+      };
+
+      runtime.pause = () => {
+        if (disposed || stopped || paused) return;
+        paused = true;
+        closeRealtimeConnection();
+        update({ status: "offline", notice: null });
+      };
+      runtime.resume = () => {
+        if (disposed || stopped) return;
+        paused = false;
+        reconnectAttempt = 0;
+        closeRealtimeConnection();
+        void synchronize();
       };
 
       void synchronize();
       cleanups.push(() => {
         stopped = true;
-        if (reconnectTimer) clearTimeout(reconnectTimer);
-        clearSocketConnectTimer();
-        clearHeartbeatTimers();
-        runtime.connecting = false;
-        runtime.probe = null;
+        closeRealtimeConnection();
+        runtime.pause = null;
+        runtime.resume = null;
         runtime.reconnect = null;
         runtime.resync = null;
-        runtime.socket?.close();
       });
     }
 

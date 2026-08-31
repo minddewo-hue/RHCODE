@@ -73,6 +73,7 @@ npm run dev:desktop
 | `RHZYCODE_SKIP_ENVIRONMENT_MIGRATION` | 测试时禁用首次环境迁移 |
 | `RHZYCODE_STARTUP_TRACE` | 写入不含秘密的启动诊断 |
 | `RHZYCODE_OZONE_PLATFORM` | Linux Chromium 后端；默认 `x11`，已验证原生 Wayland 时可设为 `wayland` |
+| `RHZYCODE_DISABLE_HARDWARE_ACCELERATION` | `1` 强制禁用、`0` 强制启用；未设置时 Linux VMware 主机默认禁用 |
 
 Provider Key 的变量名由 `desktop/gateway.config.json` 声明。不要在文档、日志或测试输出中枚举真实值。
 
@@ -87,7 +88,7 @@ npm test --workspace @rhzycode/desktop
 npm run test:ui --workspace @rhzycode/desktop
 ```
 
-Ubuntu 安装使用 `scripts/install-ubuntu.sh`，运行使用 `scripts/launch-ubuntu.sh`。安装包与启动器默认强制 Electron 使用 X11/Xwayland，避免 VMware Wayland 会话中的指针事件和 surface-role 故障；仅在已验证的原生 Wayland 主机上设置 `RHZYCODE_OZONE_PLATFORM=wayland`。
+Ubuntu 安装使用 `scripts/install-ubuntu.sh`，运行使用 `scripts/launch-ubuntu.sh`。安装包与启动器默认强制 Electron 使用 X11/Xwayland，避免 VMware Wayland 会话中的指针事件和 surface-role 故障；仅在已验证的原生 Wayland 主机上设置 `RHZYCODE_OZONE_PLATFORM=wayland`。Linux VMware 主机还会默认关闭硬件加速；诊断事件和本地 Crashpad 转储分别保存在 Electron `userData/diagnostics/process-events.jsonl` 和 `userData/diagnostics/crash-dumps`，不会自动上传。
 
 Linux 首次环境迁移使用原生模态框。显示期间主窗口会临时置顶，确保迁移框不会隐藏在主窗口或其他工作区后面；响应或失败后必须恢复普通窗口层级。
 

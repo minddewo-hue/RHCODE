@@ -154,10 +154,15 @@ export function groupThreadsByProject(
     // substrings like "test" falsely match names such as "grok-latest".
     const projectMatches = !term || `${basename(path)} ${path}`.toLocaleLowerCase().includes(term);
     const projectThreads = (threadsByProject.get(key) || [])
-      .filter((thread) => projectMatches || thread.title.toLocaleLowerCase().includes(term));
+      .filter((thread) => projectMatches || thread.title.toLocaleLowerCase().includes(term))
+      .sort(compareThreadsByMostRecentlyUpdated);
     if (term && !projectMatches && projectThreads.length === 0) return [];
     return [{ key, path, name: basename(path), threads: projectThreads }];
   });
+}
+
+function compareThreadsByMostRecentlyUpdated(left: ThreadSummary, right: ThreadSummary): number {
+  return right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id);
 }
 
 function comparableProjectPath(path: string): string {

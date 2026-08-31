@@ -20,7 +20,6 @@ import {
   openThreadHistoryRetryDelayMs,
   openThreadHistorySoftRetryDelayMs,
   reconcilePendingMessages,
-  resumeConnectionAction,
   shouldCaptureConversationPageSwipe,
   shouldCatchUpActiveThread,
   shouldContinueThreadHistorySoftRetry,
@@ -410,11 +409,6 @@ test("does not open history while offline, archived, or unselected", () => {
     online: true,
     alreadyOpenedThreadId: null,
   }), false);
-});
-
-test("chooses resync on resume when the socket survived backgrounding", () => {
-  assert.equal(resumeConnectionAction(true), "resync");
-  assert.equal(resumeConnectionAction(false), "reconnect");
 });
 
 test("reopens history after each offline recovery while skipping duplicate online flaps", () => {

@@ -208,11 +208,6 @@ export function shouldResetOpenedThreadHistory(previousStatus: string | null | u
   return false;
 }
 
-/** Foreground resume: keep the socket when possible and only hard-reconnect when it is down. */
-export function resumeConnectionAction(socketOpen: boolean): "resync" | "reconnect" {
-  return socketOpen ? "resync" : "reconnect";
-}
-
 export function shouldCaptureConversationPageSwipe(dx: number, dy: number): boolean {
   const horizontalDistance = Math.abs(dx);
   return horizontalDistance >= 12 && horizontalDistance > Math.abs(dy) * 1.5;

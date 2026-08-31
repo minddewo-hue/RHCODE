@@ -17,7 +17,7 @@ test("shows only project directories still registered by the desktop", () => {
   assert.equal(isSameProjectPath("/Work/active", "/work/active"), false);
 });
 
-test("filters conversations without changing their project order", () => {
+test("sorts conversations by latest update without changing their project order", () => {
   const threads = [
     { id: "older", hostId: "desktop", title: "Keep first", projectPath: "D:\\work\\active", model: "test", status: "completed" as const, updatedAt: "2026-07-22T00:00:00.000Z" },
     { id: "newer", hostId: "desktop", title: "Keep second", projectPath: "D:\\work\\active", model: "test", status: "completed" as const, updatedAt: "2026-07-23T00:00:00.000Z" },
@@ -35,7 +35,7 @@ test("filters conversations without changing their project order", () => {
     threads: group.threads.map((thread) => thread.id),
   })), [
     { path: "D:\\work\\second", threads: [] },
-    { path: "D:\\work\\active", threads: ["older", "newer"] },
+    { path: "D:\\work\\active", threads: ["newer", "older"] },
     { path: "D:\\work\\empty", threads: [] },
   ]);
   assert.deepEqual(

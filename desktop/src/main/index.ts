@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, net, Notification, safeStorage, shell } from "electron";
+import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, net, Notification, safeStorage, shell } from "electron";
 import updaterPackage from "electron-updater";
 import {
   ControlStore,
@@ -33,12 +33,20 @@ import {
 import { selectGatewayRoot } from "./gateway-module";
 import { SkillsManager } from "./skills-manager";
 import { showStartupDialog } from "./startup-dialog";
+import { sendToRenderer, shouldRecoverRenderer } from "./renderer-ipc";
+import {
+  ProcessDiagnostics,
+  processDiagnosticPaths,
+  readLinuxHostIdentity,
+} from "./process-diagnostics";
 import {
   bundledCodexExecutable,
   desktopUpdatePlatform,
+  hardwareAccelerationPolicy,
   linuxOzonePlatform,
   preferredCodexPath,
   shouldQuitWhenAllWindowsClose,
+  shouldUseElectronNetFetch,
 } from "./platform/desktop-platform";
 import {
   resolveTaskWindowChrome,
@@ -68,11 +76,34 @@ import {
 } from "./ipc-validation";
 
 const { autoUpdater } = updaterPackage;
-const systemFetch = net.fetch.bind(net) as typeof fetch;
+const systemFetch = (shouldUseElectronNetFetch()
+  ? net.fetch.bind(net)
+  : globalThis.fetch.bind(globalThis)) as typeof fetch;
 
-if (process.env.RHZYCODE_DISABLE_HARDWARE_ACCELERATION === "1") {
+const userDataOverride = process.env.RHZYCODE_USER_DATA_DIR?.trim();
+if (userDataOverride) app.setPath("userData", resolve(userDataOverride));
+
+const accelerationPolicy = hardwareAccelerationPolicy(
+  process.platform,
+  process.env.RHZYCODE_DISABLE_HARDWARE_ACCELERATION,
+  readLinuxHostIdentity(),
+);
+if (accelerationPolicy.disabled) {
   app.disableHardwareAcceleration();
 }
+
+let diagnosticPaths = processDiagnosticPaths(app.getPath("userData"));
+try {
+  fs.mkdirSync(diagnosticPaths.crashDumps, { recursive: true });
+  app.setPath("crashDumps", diagnosticPaths.crashDumps);
+} catch (error) {
+  console.error(`[Diagnostics] Could not configure the crash dump directory: ${String(error)}`);
+  diagnosticPaths = { ...diagnosticPaths, crashDumps: app.getPath("crashDumps") };
+}
+const processDiagnostics = new ProcessDiagnostics({
+  paths: diagnosticPaths,
+  getAppMetrics: () => app.getAppMetrics(),
+});
 
 let mainWindow: BrowserWindow | null = null;
 let runtime: DesktopRuntime | null = null;
@@ -80,9 +111,6 @@ let controlPersistence: EncryptedControlPersistence | null = null;
 let quitAfterCleanup = false;
 let startupEnvironmentMigration: Promise<void> = Promise.resolve();
 let taskActivityPresenter: WindowTaskActivityPresenter | null = null;
-
-const userDataOverride = process.env.RHZYCODE_USER_DATA_DIR?.trim();
-if (userDataOverride) app.setPath("userData", resolve(userDataOverride));
 
 const remoteDebugPort = process.env.RHZYCODE_DEBUG_PORT?.trim();
 if (remoteDebugPort && /^\d{2,5}$/.test(remoteDebugPort)) {
@@ -95,6 +123,43 @@ if (ozonePlatform) app.commandLine.appendSwitch("ozone-platform", ozonePlatform)
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
+let crashReporterStarted = false;
+if (hasSingleInstanceLock) {
+  try {
+    crashReporter.start({
+      uploadToServer: false,
+      ignoreSystemCrashHandler: true,
+      globalExtra: {
+        hardware_acceleration: accelerationPolicy.disabled ? "disabled" : "enabled",
+        hardware_acceleration_source: accelerationPolicy.source,
+      },
+    });
+    crashReporterStarted = true;
+  } catch (error) {
+    console.error(`[Diagnostics] Crash reporter failed to start: ${String(error)}`);
+  }
+}
+if (hasSingleInstanceLock) {
+  processDiagnostics.start({
+    appVersion: app.getVersion(),
+    electronVersion: process.versions.electron,
+    chromeVersion: process.versions.chrome,
+    platform: process.platform,
+    crashReporterStarted,
+    hardwareAccelerationDisabled: accelerationPolicy.disabled,
+    hardwareAccelerationSource: accelerationPolicy.source,
+  });
+  console.info(
+    `[Diagnostics] Crash dumps: ${diagnosticPaths.crashDumps}; hardware acceleration ${
+      accelerationPolicy.disabled ? "disabled" : "enabled"
+    } (${accelerationPolicy.source})`,
+  );
+}
+
+app.on("child-process-gone", (_event, details) => {
+  processDiagnostics.recordProcessGone("child", { ...details });
+});
+
 app.on("second-instance", () => {
   if (!mainWindow) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
@@ -103,7 +168,8 @@ app.on("second-instance", () => {
 });
 
 function createWindow(): BrowserWindow {
-  mainWindow = new BrowserWindow({
+  const rendererRecoveryAttempts: number[] = [];
+  const window = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 1040,
@@ -118,8 +184,13 @@ function createWindow(): BrowserWindow {
       sandbox: true,
     },
   });
+  mainWindow = window;
 
-  mainWindow.webContents.on(
+  window.once("closed", () => {
+    if (mainWindow === window) mainWindow = null;
+  });
+
+  window.webContents.on(
     "did-fail-load",
     (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       if (isMainFrame) {
@@ -129,15 +200,35 @@ function createWindow(): BrowserWindow {
       }
     },
   );
-  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+  window.webContents.on("render-process-gone", (_event, details) => {
+    processDiagnostics.recordProcessGone("renderer", {
+      webContentsId: window.webContents.id,
+      ...details,
+    });
     console.error(`[Renderer] Process exited: ${details.reason} (${details.exitCode})`);
+    if (!shouldRecoverRenderer(details.reason)) return;
+
+    const now = Date.now();
+    while ((rendererRecoveryAttempts[0] ?? Number.POSITIVE_INFINITY) < now - 60_000) {
+      rendererRecoveryAttempts.shift();
+    }
+    if (rendererRecoveryAttempts.length >= 3) {
+      console.error("[Renderer] Automatic recovery stopped after 3 crashes in 60 seconds");
+      return;
+    }
+    rendererRecoveryAttempts.push(now);
+    setTimeout(() => {
+      if (mainWindow !== window || window.isDestroyed() || window.webContents.isDestroyed()) return;
+      console.warn("[Renderer] Reloading after an unexpected renderer exit");
+      window.webContents.reload();
+    }, 250);
   });
-  mainWindow.webContents.on("console-message", (details) => {
+  window.webContents.on("console-message", (details) => {
     if (details.level === "warning" || details.level === "error") {
       console.error(`[Renderer:${details.level}] ${details.message}`);
     }
   });
-  mainWindow.webContents.on("context-menu", (event, params) => {
+  window.webContents.on("context-menu", (event, params) => {
     if (params.mediaType === "image") {
       event.preventDefault();
       return;
@@ -151,20 +242,20 @@ function createWindow(): BrowserWindow {
     mainWindow.focus();
     mainWindow.webContents.focus();
   };
-  mainWindow.once("ready-to-show", revealWindow);
-  mainWindow.webContents.once("did-finish-load", revealWindow);
-  mainWindow.on("focus", () => {
-    if (!mainWindow) return;
-    mainWindow.flashFrame(false);
-    mainWindow.webContents.focus();
+  window.once("ready-to-show", revealWindow);
+  window.webContents.once("did-finish-load", revealWindow);
+  window.on("focus", () => {
+    if (window.isDestroyed()) return;
+    window.flashFrame(false);
+    window.webContents.focus();
   });
 
   if (process.env.ELECTRON_RENDERER_URL) {
-    void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
+    void window.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
-    void mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
+    void window.loadFile(join(__dirname, "../renderer/index.html"));
   }
-  return mainWindow;
+  return window;
 }
 
 function registerIpc(
@@ -509,30 +600,30 @@ function registerIpc(
     menu.popup({ window: mainWindow || undefined });
   });
 
-  activeRuntime.on("agent:status", (status) => mainWindow?.webContents.send("agent:status", status));
+  activeRuntime.on("agent:status", (status) => sendToRenderer(mainWindow, "agent:status", status));
   activeRuntime.on("task:activity", (activity: TaskActivityStatus) => {
     taskActivityPresenter?.handle(activity);
   });
-  activeRuntime.on("agent:message", (message) => mainWindow?.webContents.send("agent:message", message));
+  activeRuntime.on("agent:message", (message) => sendToRenderer(mainWindow, "agent:message", message));
   activeRuntime.on("agent:diagnostic", (message) =>
-    mainWindow?.webContents.send("agent:diagnostic", message),
+    sendToRenderer(mainWindow, "agent:diagnostic", message),
   );
   activeRuntime.on("gateway:status", (status) =>
-    mainWindow?.webContents.send("gateway:status", status),
+    sendToRenderer(mainWindow, "gateway:status", status),
   );
-  activeRuntime.on("sync:status", (status) => mainWindow?.webContents.send("sync:status", status));
-  activeRuntime.on("sync:event", (event) => mainWindow?.webContents.send("sync:event", event));
+  activeRuntime.on("sync:status", (status) => sendToRenderer(mainWindow, "sync:status", status));
+  activeRuntime.on("sync:event", (event) => sendToRenderer(mainWindow, "sync:event", event));
   activeRuntime.on("terminal:status", (status) =>
-    mainWindow?.webContents.send("terminal:status", status),
+    sendToRenderer(mainWindow, "terminal:status", status),
   );
   activeRuntime.on("terminal:output", (output) =>
-    mainWindow?.webContents.send("terminal:output", output),
+    sendToRenderer(mainWindow, "terminal:output", output),
   );
   activeRuntime.on("projects:changed", (projects) =>
-    mainWindow?.webContents.send("projects:changed", projects),
+    sendToRenderer(mainWindow, "projects:changed", projects),
   );
-  updates.on("status", (status) => mainWindow?.webContents.send("updates:status", status));
-  mobileAccess.on("status", (status) => mainWindow?.webContents.send("mobile-access:status", status));
+  updates.on("status", (status) => sendToRenderer(mainWindow, "updates:status", status));
+  mobileAccess.on("status", (status) => sendToRenderer(mainWindow, "mobile-access:status", status));
 }
 
 async function chooseProjectDirectory(): Promise<string | null> {
@@ -793,6 +884,7 @@ app.whenReady().then(async () => {
     if (!window.webContents.isLoadingMainFrame()) resolveWindow();
     else window.webContents.once("did-finish-load", () => resolveWindow());
   });
+  processDiagnostics.recordResourceSnapshot("renderer-ready");
   try {
     try {
       await runStartupEnvironmentMigrations(codexHome, projectDirectories, window);
@@ -805,17 +897,18 @@ app.whenReady().then(async () => {
         `session-providers-normalized: ${providerNormalization.normalizedCount}/${providerNormalization.examinedCount}`,
       );
       if (providerNormalization.failedCount > 0) {
-        window.webContents.send(
+        sendToRenderer(
+          window,
           "agent:diagnostic",
           `${providerNormalization.failedCount} migrated conversation(s) could not be made compatible with the local model gateway.`,
         );
       }
     } catch (error) {
-      window.webContents.send("agent:diagnostic", `Conversation migration failed: ${String(error)}`);
+      sendToRenderer(window, "agent:diagnostic", `Conversation migration failed: ${String(error)}`);
     }
     await runtime.start();
   } catch (error) {
-    window.webContents.send("agent:diagnostic", String(error));
+    sendToRenderer(window, "agent:diagnostic", String(error));
   } finally {
     finishEnvironmentMigration();
   }
@@ -838,6 +931,11 @@ app.on("before-quit", (event) => {
       app.quit();
     });
   });
+});
+
+app.on("will-quit", () => {
+  processDiagnostics.recordResourceSnapshot("shutdown");
+  processDiagnostics.stop();
 });
 
 app.on("window-all-closed", () => {
@@ -948,7 +1046,7 @@ class WindowTaskActivityPresenter {
     const window = this.getWindow();
     if (!window || window.isDestroyed()) return;
     const payload: RendererTaskActivityStatus = toRendererTaskActivity(activity, chrome);
-    window.webContents.send("task:activity", payload);
+    sendToRenderer(window, "task:activity", payload);
   }
 
   private clearHold(): void {

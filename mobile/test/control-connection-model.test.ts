@@ -3,6 +3,7 @@ import test from "node:test";
 import type { ControlSnapshot } from "@rhzycode/protocol";
 import { ControlClientError } from "../src/api/control-client";
 import {
+  appConnectionAction,
   getSnapshotWithRetry,
   heartbeatPingFrame,
   heartbeatPongId,
@@ -22,6 +23,7 @@ const snapshot: ControlSnapshot = {
 };
 
 test("retries transient snapshot failures while a VPN route is settling", async () => {
+  assert.equal(snapshotRequestTimeoutMs, 15_000);
   let calls = 0;
   const waits: number[] = [];
   const timeouts: number[] = [];
@@ -125,6 +127,13 @@ test("grows reconnect backoff across many drops and stays capped", () => {
   for (let index = 1; index < delays.length; index += 1) {
     assert.ok(delays[index]! >= delays[index - 1]!);
   }
+});
+
+test("pauses realtime work in background and starts a clean connection on resume", () => {
+  assert.equal(appConnectionAction("active", "inactive"), "pause");
+  assert.equal(appConnectionAction("inactive", "background"), "none");
+  assert.equal(appConnectionAction("background", "active"), "resume");
+  assert.equal(appConnectionAction("active", "active"), "none");
 });
 
 test("classifies duplicate, contiguous, and missing event sequences", () => {

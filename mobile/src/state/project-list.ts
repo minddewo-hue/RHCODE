@@ -56,10 +56,15 @@ export function groupThreadsByProject(
     const projectMatches = !term || `${projectName(projectPath)} ${projectPath}`.toLocaleLowerCase().includes(term);
     const projectThreads = threads
       .filter((thread) => projectPathKey(thread.projectPath) === key)
-      .filter((thread) => projectMatches || thread.title.toLocaleLowerCase().includes(term));
+      .filter((thread) => projectMatches || thread.title.toLocaleLowerCase().includes(term))
+      .sort(compareThreadsByMostRecentlyUpdated);
     if (term && !projectMatches && projectThreads.length === 0) return [];
     return [{ key, path: projectPath, threads: projectThreads }];
   });
+}
+
+function compareThreadsByMostRecentlyUpdated(left: ThreadSummary, right: ThreadSummary): number {
+  return right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id);
 }
 
 export function projectPathKey(projectPath: string): string {

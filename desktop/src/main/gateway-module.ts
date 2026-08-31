@@ -31,6 +31,7 @@ export class GatewayModule extends EventEmitter {
   private error: string | null = null;
   private probeTimer: NodeJS.Timeout | null = null;
   private probeInFlight: Promise<GatewayModuleStatus> | null = null;
+  private lastEmittedStatusKey: string | null = null;
   private catalogPath: string | null = null;
 
   constructor(
@@ -215,8 +216,9 @@ export class GatewayModule extends EventEmitter {
     if (this.probeInFlight) return this.probeInFlight;
     const handle = this.handle;
     this.probeInFlight = handle.probeProviders().then(() => {
-      if (this.handle === handle) this.emit("status", this.getStatus());
-      return this.getStatus();
+      const status = this.getStatus();
+      if (this.handle === handle) this.emitStatusIfChanged(status);
+      return status;
     }).finally(() => {
       this.probeInFlight = null;
     });
@@ -238,8 +240,31 @@ export class GatewayModule extends EventEmitter {
 
   private setState(state: GatewayModuleState): void {
     this.state = state;
-    this.emit("status", this.getStatus());
+    const status = this.getStatus();
+    this.lastEmittedStatusKey = gatewayStatusChangeKey(status);
+    this.emit("status", status);
   }
+
+  private emitStatusIfChanged(status: GatewayModuleStatus): void {
+    const key = gatewayStatusChangeKey(status);
+    if (key === this.lastEmittedStatusKey) return;
+    this.lastEmittedStatusKey = key;
+    this.emit("status", status);
+  }
+}
+
+export function gatewayStatusChangeKey(status: GatewayModuleStatus): string {
+  return JSON.stringify({
+    ...status,
+    providers: status.providers.map((provider) => ({
+      ...provider,
+      health: {
+        ...provider.health,
+        latencyMs: null,
+        checkedAt: null,
+      },
+    })),
+  });
 }
 
 function upstreamModelFromCatalogSlug(slug: string): string {

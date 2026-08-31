@@ -1,10 +1,18 @@
 import type { ControlSnapshot } from "@rhzycode/protocol";
 import { ControlClientError, type ControlClient } from "./control-client";
 
-export const snapshotRequestTimeoutMs = 60_000;
+export const snapshotRequestTimeoutMs = 15_000;
 export const webSocketConnectTimeoutMs = 15_000;
 export const webSocketHeartbeatIntervalMs = 20_000;
 export const webSocketHeartbeatTimeoutMs = 15_000;
+
+export type AppConnectionAction = "none" | "pause" | "resume";
+
+export function appConnectionAction(previous: string, next: string): AppConnectionAction {
+  if (previous === next) return "none";
+  if (next === "active") return "resume";
+  return previous === "active" ? "pause" : "none";
+}
 
 export type IncomingSequenceAction = "apply" | "duplicate" | "gap";
 

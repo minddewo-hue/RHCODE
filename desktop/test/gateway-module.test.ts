@@ -4,7 +4,44 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { GatewayModule, resolveGatewayEnvPath, selectGatewayRoot } from "../src/main/gateway-module";
+import {
+  GatewayModule,
+  gatewayStatusChangeKey,
+  resolveGatewayEnvPath,
+  selectGatewayRoot,
+  type GatewayModuleStatus,
+} from "../src/main/gateway-module";
+
+test("ignores transient probe timing when comparing gateway statuses", () => {
+  const status: GatewayModuleStatus = {
+    state: "running",
+    transport: "internal",
+    providerCount: 1,
+    modelCount: 0,
+    configSource: "/tmp/gateway.config.json",
+    providers: [{
+      id: "provider-1",
+      protocol: "responses",
+      health: {
+        state: "healthy",
+        latencyMs: 40,
+        checkedAt: "2026-08-31T03:00:00.000Z",
+        httpStatus: 200,
+        circuitState: "closed",
+        lastError: null,
+      },
+    }],
+    models: [],
+    error: null,
+  };
+  const nextProbe = structuredClone(status);
+  nextProbe.providers[0]!.health.latencyMs = 83;
+  nextProbe.providers[0]!.health.checkedAt = "2026-08-31T03:01:00.000Z";
+
+  assert.equal(gatewayStatusChangeKey(nextProbe), gatewayStatusChangeKey(status));
+  nextProbe.providers[0]!.health.state = "degraded";
+  assert.notEqual(gatewayStatusChangeKey(nextProbe), gatewayStatusChangeKey(status));
+});
 
 test("resolves the source desktop environment outside model-gateway", () => {
   const desktopRoot = path.join(os.tmpdir(), "rhzycode-desktop");

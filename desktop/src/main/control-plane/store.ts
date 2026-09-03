@@ -17,6 +17,11 @@ const maxEvents = 2_000;
 // The complete conversation remains in rollout files. The control-plane
 // snapshot only needs recent task activity for reconnecting clients.
 const maxTimelineItems = 250;
+// Keep the relay snapshot comfortably below its 35 MiB response limit. Large
+// command output remains available from the authoritative rollout/openThread.
+const maxTimelineItemContentBytes = 256 * 1024;
+const maxSnapshotTimelineBytes = 20 * 1024 * 1024;
+const truncatedContentMarker = "\n\n… RHZYCODE mobile preview truncated …\n\n";
 
 export interface ControlStoreState {
   snapshot: ControlSnapshot;
@@ -68,11 +73,12 @@ export class ControlStore extends EventEmitter {
   }
 
   snapshot(): ControlSnapshot {
+    const timeline = boundedSnapshotTimeline([...this.timeline.values()]);
     return {
       hosts: [...this.hosts.values()],
       projects: [...this.projects],
       threads: [...this.threads.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
-      timeline: [...this.timeline.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+      timeline,
       approvals: [...this.approvals.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
       userInputs: [...this.userInputs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
       lastSequence: this.sequence,
@@ -99,7 +105,7 @@ export class ControlStore extends EventEmitter {
     return {
       snapshot: {
         ...snapshot,
-        timeline: snapshot.timeline.slice(-maxTimelineItems).map(durableTimelineItem),
+        timeline: snapshot.timeline.map(durableTimelineItem),
         approvals: [],
         userInputs: [],
       },
@@ -169,7 +175,7 @@ export class ControlStore extends EventEmitter {
 
   publish(input: AgentEventInput): AgentEvent {
     const normalizedInput = input.type === "timeline.upserted"
-      ? { ...input, item: normalizeTimelineIdentity(input.item) }
+      ? { ...input, item: compactTimelineItem(normalizeTimelineIdentity(input.item)) }
       : input;
     const event = { ...normalizedInput, sequence: ++this.sequence } as AgentEvent;
     this.apply(event);
@@ -193,6 +199,7 @@ export class ControlStore extends EventEmitter {
       const key = timelineIdentityKey(event.item);
       const current = this.timeline.get(key);
       this.timeline.set(key, current ? preferTimelineItem(current, event.item) : event.item);
+      this.pruneTimeline();
     }
     if (event.type === "approval.requested") this.approvals.set(event.approval.id, event.approval);
     if (event.type === "approval.resolved") this.approvals.delete(event.approvalId);
@@ -222,6 +229,19 @@ export class ControlStore extends EventEmitter {
 
   private earliestReplaySequence(): number {
     return this.events[0]?.sequence ?? this.sequence + 1;
+  }
+
+  private pruneTimeline(): void {
+    if (this.timeline.size <= maxTimelineItems) return;
+    const keep = new Set(
+      [...this.timeline.entries()]
+        .sort(([, left], [, right]) => compareTimelineItems(left, right))
+        .slice(-maxTimelineItems)
+        .map(([key]) => key),
+    );
+    for (const key of this.timeline.keys()) {
+      if (!keep.has(key)) this.timeline.delete(key);
+    }
   }
 
   private listCommandReplays(): PersistedCommandReplay[] {
@@ -254,6 +274,63 @@ function durableTimelineItem(item: TimelineItem): TimelineItem {
     file.source === "generated" || file.mimeType?.startsWith("image/") === true) || [];
   const { files: _transientFiles, ...durable } = item;
   return files.length ? { ...durable, files } : durable;
+}
+
+function boundedSnapshotTimeline(items: TimelineItem[]): TimelineItem[] {
+  const recent = items
+    .sort(compareTimelineItems)
+    .slice(-maxTimelineItems)
+    .map(compactTimelineItem);
+  const selected: TimelineItem[] = [];
+  let bytes = 2; // JSON array brackets.
+  for (let index = recent.length - 1; index >= 0; index -= 1) {
+    const item = recent[index]!;
+    const itemBytes = Buffer.byteLength(JSON.stringify(item)) + (selected.length ? 1 : 0);
+    if (bytes + itemBytes > maxSnapshotTimelineBytes) continue;
+    selected.push(item);
+    bytes += itemBytes;
+  }
+  return selected.reverse();
+}
+
+function compactTimelineItem(item: TimelineItem): TimelineItem {
+  if (Buffer.byteLength(item.content) <= maxTimelineItemContentBytes) return item;
+  const markerBytes = Buffer.byteLength(truncatedContentMarker);
+  const availableBytes = maxTimelineItemContentBytes - markerBytes;
+  const headBytes = Math.floor(availableBytes * 0.6);
+  const tailBytes = availableBytes - headBytes;
+  return {
+    ...item,
+    content: `${utf8Prefix(item.content, headBytes)}${truncatedContentMarker}${utf8Suffix(item.content, tailBytes)}`,
+  };
+}
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value) <= maxBytes) return value;
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(value.slice(0, middle)) <= maxBytes) low = middle;
+    else high = middle - 1;
+  }
+  return value.slice(0, low);
+}
+
+function utf8Suffix(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value) <= maxBytes) return value;
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(value.slice(value.length - middle)) <= maxBytes) low = middle;
+    else high = middle - 1;
+  }
+  return value.slice(value.length - low);
+}
+
+function compareTimelineItems(left: TimelineItem, right: TimelineItem): number {
+  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 }
 
 function normalizeTimelineIdentity(item: TimelineItem): TimelineItem {

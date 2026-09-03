@@ -60,6 +60,7 @@ export class UpdateManager extends EventEmitter {
   private status: UpdateStatus;
   private initialCheck: NodeJS.Timeout | null = null;
   private periodicCheck: NodeJS.Timeout | null = null;
+  private checkInFlight: Promise<UpdateStatus> | null = null;
 
   constructor(
     private readonly adapter: UpdateAdapter,
@@ -100,8 +101,20 @@ export class UpdateManager extends EventEmitter {
     this.periodicCheck.unref();
   }
 
-  async check(): Promise<UpdateStatus> {
-    this.requireEnabled();
+  check(): Promise<UpdateStatus> {
+    if (!this.status.enabled) {
+      return Promise.reject(new Error("Automatic updates are not configured for this build."));
+    }
+    if (this.checkInFlight) return this.checkInFlight;
+    const pending = this.performCheck();
+    this.checkInFlight = pending;
+    void pending.finally(() => {
+      if (this.checkInFlight === pending) this.checkInFlight = null;
+    }).catch(() => undefined);
+    return pending;
+  }
+
+  private async performCheck(): Promise<UpdateStatus> {
     this.setStatus({ state: "checking", percent: null, error: null });
     try {
       const latest = await fetchDesktopUpdate({

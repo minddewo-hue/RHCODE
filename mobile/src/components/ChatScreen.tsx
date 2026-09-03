@@ -20,6 +20,7 @@ import {
   FlatList,
   Image,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   PanResponder,
   Platform,
@@ -49,6 +50,7 @@ import {
   type PendingMessage,
 } from "./chat-screen-model";
 import { chatScreenStyles as styles } from "./chat-screen-styles";
+import { parseAssistantContent, parseAssistantInline } from "./assistant-content-model";
 
 export type { PendingMessage } from "./chat-screen-model";
 
@@ -938,7 +940,7 @@ function TimelineRow({ item, onDownloadGeneratedImage, onOpenFile, onShareGenera
     return (
       <View style={styles.assistantRow}>
         {!!content && (
-          <Text selectable style={styles.assistantText}>{content}</Text>
+          <AssistantContent content={content} />
         )}
         {!!images.length && (
           <View style={styles.generatedImages}>
@@ -976,6 +978,106 @@ function TimelineRow({ item, onDownloadGeneratedImage, onOpenFile, onShareGenera
       </View>
       {!!item.content && <Text selectable style={styles.activityContent}>{item.content}</Text>}
     </View>
+  );
+}
+
+function AssistantContent({ content }: { content: string }) {
+  const blocks = useMemo(() => parseAssistantContent(content), [content]);
+  return (
+    <View style={styles.assistantContent}>
+      {blocks.map((block, blockIndex) => {
+        if (block.type === "heading") {
+          return (
+            <InlineMarkdown
+              key={`heading:${blockIndex}`}
+              style={[styles.assistantText, block.level <= 2 ? styles.markdownHeadingLarge : styles.markdownHeading]}
+              text={block.text}
+            />
+          );
+        }
+        if (block.type === "paragraph") {
+          return <InlineMarkdown key={`paragraph:${blockIndex}`} style={styles.assistantText} text={block.text} />;
+        }
+        if (block.type === "quote") {
+          return (
+            <View key={`quote:${blockIndex}`} style={styles.markdownQuote}>
+              <InlineMarkdown style={styles.markdownQuoteText} text={block.text} />
+            </View>
+          );
+        }
+        if (block.type === "list") {
+          return (
+            <View key={`list:${blockIndex}`} style={styles.markdownList}>
+              {block.items.map((text, itemIndex) => (
+                <View key={`${itemIndex}:${text}`} style={styles.markdownListRow}>
+                  <Text style={styles.markdownListMarker}>{block.ordered ? `${itemIndex + 1}.` : "•"}</Text>
+                  <InlineMarkdown style={styles.markdownListText} text={text} />
+                </View>
+              ))}
+            </View>
+          );
+        }
+        if (block.type === "code") {
+          return (
+            <View key={`code:${blockIndex}`} style={styles.markdownCodeBlock}>
+              {!!block.language && <Text style={styles.markdownCodeLanguage}>{block.language}</Text>}
+              <Text selectable style={styles.markdownCodeText}>{block.content}</Text>
+            </View>
+          );
+        }
+        if (block.type === "table") {
+          return <MobileMarkdownTable block={block} key={`table:${blockIndex}`} />;
+        }
+        return <View key={`rule:${blockIndex}`} style={styles.markdownRule} />;
+      })}
+    </View>
+  );
+}
+
+function MobileMarkdownTable({ block }: {
+  block: Extract<ReturnType<typeof parseAssistantContent>[number], { type: "table" }>;
+}) {
+  return (
+    <View style={styles.markdownTable}>
+      {block.rows.map((row, rowIndex) => (
+        <View key={`row:${rowIndex}`} style={styles.markdownTableCard}>
+          {block.headers.map((header, columnIndex) => (
+            <View key={`${columnIndex}:${header}`} style={styles.markdownTableField}>
+              <InlineMarkdown style={styles.markdownTableLabel} text={header || `第 ${columnIndex + 1} 列`} />
+              <InlineMarkdown style={styles.markdownTableValue} text={row[columnIndex] || "—"} />
+            </View>
+          ))}
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function InlineMarkdown({ style, text }: { style: React.ComponentProps<typeof Text>["style"]; text: string }) {
+  return (
+    <Text selectable style={style}>
+      {parseAssistantInline(text).map((span, index) => {
+        if (span.type === "strong") {
+          return <Text key={index} style={styles.markdownStrong}>{span.text}</Text>;
+        }
+        if (span.type === "code") {
+          return <Text key={index} style={styles.markdownInlineCode}>{span.text}</Text>;
+        }
+        if (span.type === "link") {
+          const opensInBrowser = /^https?:\/\//i.test(span.url);
+          return (
+            <Text
+              key={index}
+              onPress={opensInBrowser ? () => void Linking.openURL(span.url) : undefined}
+              style={opensInBrowser ? styles.markdownLink : styles.markdownFileReference}
+            >
+              {span.text}
+            </Text>
+          );
+        }
+        return <Text key={index}>{span.text}</Text>;
+      })}
+    </Text>
   );
 }
 

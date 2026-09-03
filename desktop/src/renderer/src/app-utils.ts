@@ -1,5 +1,5 @@
 import type { ApprovalRequest, ConversationMessage, ThreadSummary, TimelineItem } from "@rhzycode/protocol";
-import type { ApprovalPolicy, CredentialStatus, ModelOption, ReasoningEffort, SandboxMode, UpdateStatus } from "../../shared/desktop-api";
+import type { CredentialStatus, ModelOption, ReasoningEffort, UpdateStatus } from "../../shared/desktop-api";
 
 export interface ActivityEntry {
   id: string;
@@ -167,7 +167,9 @@ function compareThreadsByMostRecentlyUpdated(left: ThreadSummary, right: ThreadS
 
 function comparableProjectPath(path: string): string {
   const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
-  return /^[a-z]:\//i.test(normalized) ? normalized.toLocaleLowerCase() : normalized;
+  return /^[a-z]:\//i.test(normalized) || /^\/\/[^/]/.test(normalized)
+    ? normalized.toLowerCase()
+    : normalized;
 }
 
 function uniqueProjectPaths(paths: string[]): string[] {
@@ -260,15 +262,6 @@ export function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function storedApprovalPolicy(): ApprovalPolicy {
-  const stored = localStorage.getItem("rhzycode.approvalPolicy");
-  return stored === "untrusted" || stored === "never" ? stored : "on-request";
-}
-
-export function storedSelectedModel(): string {
-  return localStorage.getItem("rhzycode.selectedModel") || "";
-}
-
 export function preferredModelFromCatalog(models: ModelOption[], preferredModel: string): string {
   return models.some((model) => model.model === preferredModel)
     ? preferredModel
@@ -358,36 +351,6 @@ function modelSourcePresentation(
   };
 }
 
-export function storedReasoningEffort(): ReasoningEffort {
-  const stored = localStorage.getItem("rhzycode.reasoningEffort");
-  return reasoningEffortValues.includes(stored as ReasoningEffort) ? stored as ReasoningEffort : "high";
-}
-
-export function storedLastProject(): string {
-  return localStorage.getItem("rhzycode.lastProject") || "";
-}
-
-export function storedLastThread(projectPath: string): string | null {
-  try {
-    const entries = JSON.parse(localStorage.getItem("rhzycode.lastThreads") || "{}") as Record<string, unknown>;
-    return typeof entries[projectPath] === "string" ? entries[projectPath] : null;
-  } catch {
-    return null;
-  }
-}
-
-export function storeLastThread(projectPath: string, threadId: string): void {
-  let entries: Record<string, string> = {};
-  try {
-    const stored = JSON.parse(localStorage.getItem("rhzycode.lastThreads") || "{}") as Record<string, unknown>;
-    entries = Object.fromEntries(Object.entries(stored).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
-  } catch {
-    entries = {};
-  }
-  entries[projectPath] = threadId;
-  localStorage.setItem("rhzycode.lastThreads", JSON.stringify(entries));
-}
-
 export function isActiveThreadStatus(status: ThreadSummary["status"]): boolean {
   return status === "running" || status === "waiting_for_approval" || status === "waiting_for_input";
 }
@@ -412,55 +375,6 @@ export function notificationThreadId(params: Record<string, unknown>): string | 
 export function summarizePrompt(text: string): string {
   const title = text.replace(/\s+/g, " ").trim();
   return title.length > 60 ? `${title.slice(0, 57)}...` : title || "New task";
-}
-
-export function storedSandboxMode(): SandboxMode {
-  const stored = localStorage.getItem("rhzycode.sandboxMode");
-  return stored === "read-only" || stored === "danger-full-access" ? stored : "workspace-write";
-}
-
-export function storedRecentProjects(): string[] {
-  try {
-    const value = JSON.parse(localStorage.getItem("rhzycode.recentProjects") || "[]");
-    return Array.isArray(value)
-      ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0).slice(0, 50)
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-export function storedForgottenProjects(): string[] {
-  try {
-    const value = JSON.parse(localStorage.getItem("rhzycode.forgottenProjects") || "[]");
-    return Array.isArray(value)
-      ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0).slice(0, 50)
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-export function storedCollapsedProjectPaths(): string[] {
-  try {
-    return normalizeProjectPaths(JSON.parse(localStorage.getItem("rhzycode.collapsedProjects") || "[]"));
-  } catch {
-    return [];
-  }
-}
-
-export function storeCollapsedProjectPaths(paths: Iterable<string>): void {
-  localStorage.setItem("rhzycode.collapsedProjects", JSON.stringify(normalizeProjectPaths([...paths])));
-}
-
-function normalizeProjectPaths(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  const paths: string[] = [];
-  for (const entry of value) {
-    if (typeof entry !== "string" || !entry.trim()) continue;
-    if (!paths.some((path) => isSameProjectPath(path, entry))) paths.push(entry);
-  }
-  return paths.slice(0, 50);
 }
 
 export function formatFileSize(size: number): string {

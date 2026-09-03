@@ -77,6 +77,34 @@ test("does not ask electron-updater to download metadata when the manifest versi
   assert.equal(updater.checks, 0);
 });
 
+test("coalesces overlapping desktop update checks", async () => {
+  const updater = new FakeUpdater();
+  let releaseManifest!: () => void;
+  const manifestReady = new Promise<void>((resolve) => { releaseManifest = resolve; });
+  let fetches = 0;
+  const manager = new UpdateManager(updater, true, {
+    currentVersion: "0.1.0",
+    platform: "windows",
+    fetchImpl: async () => {
+      fetches += 1;
+      await manifestReady;
+      return new Response(JSON.stringify(validManifest));
+    },
+  });
+
+  const first = manager.check();
+  const second = manager.check();
+  assert.strictEqual(second, first);
+  assert.equal(fetches, 1);
+  releaseManifest();
+  const [firstStatus, secondStatus] = await Promise.all([first, second]);
+  assert.deepEqual(secondStatus, firstStatus);
+  assert.equal(updater.checks, 1);
+
+  await manager.check();
+  assert.equal(fetches, 2);
+});
+
 test("selects the macOS feed for a macOS desktop", async () => {
   const updater = new FakeUpdater();
   const manager = new UpdateManager(updater, true, {

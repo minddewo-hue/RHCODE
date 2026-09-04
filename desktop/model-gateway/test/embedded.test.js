@@ -581,6 +581,47 @@ test("discovers provider models at startup and makes them routable", async (cont
   assert.equal(gateway.models.find((model) => model.id.includes("31b"))?.upstreamModel, "gemma-4-31b-it-uncensored-bf16");
 });
 
+test("refreshes models added upstream after gateway startup", async (context) => {
+  let modelIds = ["initial-model"];
+  const upstream = http.createServer((request, response) => {
+    if (request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: modelIds.map((id) => ({ id })) }));
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  await new Promise((resolve, reject) => {
+    upstream.once("error", reject);
+    upstream.listen(0, "127.0.0.1", resolve);
+  });
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-model-refresh-"));
+  fs.writeFileSync(path.join(rootDir, "gateway.config.json"), JSON.stringify({
+    providers: {
+      relay: {
+        base_url: `http://127.0.0.1:${address.port}/v1`,
+        protocol: "responses",
+        model_discovery: { prefix: "relay/" },
+      },
+    },
+  }));
+  const gateway = await startEmbeddedGateway({ rootDir, port: 0 });
+  context.after(async () => {
+    await gateway.stop();
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  assert.deepEqual(gateway.models.map((model) => model.id), ["relay/initial-model"]);
+  modelIds.push("qwen3.8-27b-uncensored-fp8");
+  const refreshed = await gateway.refreshModels();
+  assert.equal(refreshed.changed, true);
+  assert.ok(refreshed.models.some((model) => model.id === "relay/qwen3.8-27b-uncensored-fp8"));
+  assert.ok(gateway.models.some((model) => model.id === "relay/qwen3.8-27b-uncensored-fp8"));
+});
+
 test("keeps disabled static and discovered models out of the catalog", async (context) => {
   const upstream = http.createServer((request, response) => {
     if (request.url === "/v1/models") {

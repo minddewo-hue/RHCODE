@@ -17,9 +17,8 @@ export async function startEmbeddedGateway(options) {
     : path.join(rootDir, configuredPath);
   const config = loadGatewayConfig({ configPath });
   const contextConfig = loadModelContextConfig(rootDir, options.contextConfigPath);
-  await discoverProviderModels(config, options.discoveryTimeoutMs ?? 5000, fetchImpl);
-  addDiscoveredModelProviderFallbacks(config);
-  addAutomaticModelProtocolRoutes(config, contextConfig);
+  const discoveryTimeoutMs = options.discoveryTimeoutMs ?? 5000;
+  await refreshDiscoveredModels(config, contextConfig, discoveryTimeoutMs, fetchImpl);
   if (config.models.size === 0) {
     throw new Error(
       "Gateway config has no models. Add model IDs to the provider or use an upstream that supports GET /models.",
@@ -66,21 +65,18 @@ export async function startEmbeddedGateway(options) {
     baseUrl: `http://${host}:${address.port}/v1`,
     configSource: config.source,
     providerCount: config.providers.size,
-    modelCount: config.models.size,
+    get modelCount() {
+      return config.models.size;
+    },
     providers,
-    models: [...config.models.values()].map((model) => ({
-      id: model.id,
-      ownedBy: model.ownedBy,
-      capabilities: model.capabilities,
-      providerId: model.routes[0].provider.id,
-      upstreamModel: model.routes[0].upstreamModel,
-      protocol: model.routes[0].protocol,
-      contextWindow: model.contextWindow,
-      maxContextWindow: model.maxContextWindow,
-      effectiveContextWindowPercent: model.effectiveContextWindowPercent,
-      contextWindowSource: model.contextWindowSource,
-      runtimeInstructions: model.runtimeInstructions,
-    })),
+    get models() {
+      return summarizeModels(config);
+    },
+    async refreshModels() {
+      const previousCount = config.models.size;
+      await refreshDiscoveredModels(config, contextConfig, discoveryTimeoutMs, fetchImpl);
+      return { changed: config.models.size !== previousCount, models: summarizeModels(config) };
+    },
     async probeProviders(options = {}) {
       const timeoutMs = options.timeoutMs ?? 5000;
       const results = await Promise.all(
@@ -184,6 +180,28 @@ async function discoverProviderModels(config, timeoutMs, fetchImpl) {
     } finally {
       clearTimeout(timeout);
     }
+  }));
+}
+
+async function refreshDiscoveredModels(config, contextConfig, timeoutMs, fetchImpl) {
+  await discoverProviderModels(config, timeoutMs, fetchImpl);
+  addDiscoveredModelProviderFallbacks(config);
+  addAutomaticModelProtocolRoutes(config, contextConfig);
+}
+
+function summarizeModels(config) {
+  return [...config.models.values()].map((model) => ({
+    id: model.id,
+    ownedBy: model.ownedBy,
+    capabilities: model.capabilities,
+    providerId: model.routes[0].provider.id,
+    upstreamModel: model.routes[0].upstreamModel,
+    protocol: model.routes[0].protocol,
+    contextWindow: model.contextWindow,
+    maxContextWindow: model.maxContextWindow,
+    effectiveContextWindowPercent: model.effectiveContextWindowPercent,
+    contextWindowSource: model.contextWindowSource,
+    runtimeInstructions: model.runtimeInstructions,
   }));
 }
 

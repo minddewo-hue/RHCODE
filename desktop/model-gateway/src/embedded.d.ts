@@ -46,6 +46,7 @@ export interface EmbeddedGatewayHandle {
   modelCount: number;
   providers: EmbeddedGatewayProvider[];
   models: EmbeddedGatewayModel[];
+  refreshModels(): Promise<{ changed: boolean; models: EmbeddedGatewayModel[] }>;
   probeProviders(options?: { timeoutMs?: number }): Promise<EmbeddedGatewayProvider[]>;
   interruptTurn(turnId: string): number;
   setThreadModel(threadId: string, modelId: string): boolean;

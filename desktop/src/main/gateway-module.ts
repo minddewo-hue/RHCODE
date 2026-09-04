@@ -203,6 +203,15 @@ export class GatewayModule extends EventEmitter {
     return this.start();
   }
 
+  async refreshModels(): Promise<boolean> {
+    if (!this.handle) return false;
+    const refreshed = await this.handle.refreshModels();
+    if (!refreshed.changed) return false;
+    this.catalogPath = this.writeRuntimeCatalog(refreshed.models);
+    this.emit("status", this.getStatus());
+    return true;
+  }
+
   interruptTurn(turnId: string): number {
     return this.handle?.interruptTurn(turnId) || 0;
   }

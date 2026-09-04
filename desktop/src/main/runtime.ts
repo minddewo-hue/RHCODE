@@ -266,6 +266,7 @@ export class DesktopRuntime extends EventEmitter {
   private pendingUserInputs = new Map<string, PendingUserInput>();
   private pendingCompactions = new Map<string, PendingCompaction>();
   private pendingGatewayFailures = new Map<string, PendingGatewayFailure>();
+  private modelRefreshPromise: Promise<void> | null = null;
   private gatewayFailureGraceMs = GATEWAY_FAILURE_GRACE_MS;
   private activeThreadId: string | null = null;
   private terminalSession: TerminalSessionStatus | null = null;
@@ -564,6 +565,7 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   async listModels(): Promise<ModelListResponse> {
+    await this.refreshGatewayModelsForCatalog();
     const response = await this.agent.request<{
       data?: Array<Omit<ModelOption, "supportedReasoningEfforts" | "isDefault"> & {
         supportedReasoningEfforts?: ModelOption["supportedReasoningEfforts"];
@@ -578,6 +580,22 @@ export class DesktopRuntime extends EventEmitter {
         isDefault: model.isDefault === true,
       })),
     };
+  }
+
+  private async refreshGatewayModelsForCatalog(): Promise<void> {
+    if (this.activeTurns.size > 0) return;
+    if (this.modelRefreshPromise) return this.modelRefreshPromise;
+    this.modelRefreshPromise = (async () => {
+      if (await this.gateway.refreshModels() && this.agent.getStatus().state === "connected") {
+        this.agent.stop();
+        await this.startAgent();
+      }
+    })();
+    try {
+      await this.modelRefreshPromise;
+    } finally {
+      this.modelRefreshPromise = null;
+    }
   }
 
   async listSkills(forceReload = false): Promise<{

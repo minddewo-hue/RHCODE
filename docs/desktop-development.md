@@ -49,6 +49,8 @@
 
 打包时脚本会运行实际 Codex 二进制的 `--version`。版本与锁定文件不一致时构建失败。
 
+运行时按以下顺序选择 Codex 可执行文件：`RHZYCODE_CODEX_PATH` 显式指定 > 本机已安装 Codex（`where.exe codex` 可解析且版本不低于内置版本）> 安装包内置副本。因此开发机执行 `codex update` 后，重启应用即自动使用新版本。
+
 ## 开发隔离
 
 不要让开发应用读取正式用户数据或默认 Codex Home：

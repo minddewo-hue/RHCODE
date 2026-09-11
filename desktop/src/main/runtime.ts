@@ -1815,28 +1815,29 @@ export class DesktopRuntime extends EventEmitter {
     try {
       const localThread = this.threads.get(threadId)!;
       const localDetail = await this.loadLocalThreadDetail(localThread);
-      // Mobile only receives this payload. Prefer complete local history so large
-      // conversations stay fast on flaky links; resume only when the rollout is
-      // sparse or missing assistant finals.
+      // Mobile only receives this payload. Always ask App Server for its
+      // authoritative history: a local rollout can look balanced while still
+      // missing the newest user/assistant pair entirely.
       let detail: ThreadDetail;
-      if (localDetail && !isIncompleteRolloutHistory(localDetail)) {
+      try {
+        // Cap resume so a stuck App Server cannot starve mobile of the local
+        // history. A later open can retry when the agent becomes responsive.
+        const resumed = await withDeadline(
+          this.openThread(threadId, true),
+          mobileOpenResumeBudgetMs(),
+          "Mobile openThread resume",
+        );
+        detail = preferRicherThreadDetail(localDetail, resumed);
+      } catch (error) {
+        if (!localDetail) throw error;
         detail = localDetail;
-      } else {
-        try {
-          // Cap resume so a stuck App Server cannot starve mobile of the local
-          // user rows; the client keeps retrying sparse opens separately.
-          const resumed = await withDeadline(
-            this.openThread(threadId, true),
-            mobileOpenResumeBudgetMs(),
-            "Mobile openThread resume",
-          );
-          detail = preferRicherThreadDetail(localDetail, resumed);
-        } catch (error) {
-          if (!localDetail) throw error;
-          // Return the best local copy so the client can render something, but the
-          // incomplete-cache guards above keep forcing resume on later opens.
-          detail = localDetail;
-        }
+      }
+      // A lagging resume can recover older replies while still omitting the
+      // newest local user row. Do not let that balanced-but-stale response
+      // poison the next mobile catch-up attempt.
+      if (isIncompleteRolloutHistory(detail)) {
+        this.loadedThreadIds.delete(threadId);
+        this.threadDetailCache.delete(threadId);
       }
       const timelineById = new Map<string, (typeof detail.timeline)[number]>();
       for (const item of [...detail.timeline, ...remoteMessageTimeline(
@@ -2517,29 +2518,77 @@ function preferRicherThreadDetail(
 
   // Assistant count is the primary signal. Long user-only rollouts must not beat a
   // shorter resume payload that actually restored AI replies.
-  if (resumedAssistants > localAssistants) return resumed;
+  if (resumedAssistants > localAssistants) {
+    return withComplementaryMessages(resumed, localDetail);
+  }
   if (localAssistants > resumedAssistants) {
     return {
       thread: resumed.thread,
-      messages: localDetail.messages,
+      messages: mergeMissingMessages(localDetail.messages, resumed.messages),
       timeline: resumed.timeline.length ? resumed.timeline : localDetail.timeline,
     };
   }
 
-  if (resumedScore > localScore) return resumed;
+  if (resumedScore > localScore) return withComplementaryMessages(resumed, localDetail);
   if (localScore > resumedScore) {
     return {
       thread: resumed.thread,
-      messages: localDetail.messages,
+      messages: mergeMissingMessages(localDetail.messages, resumed.messages),
       timeline: resumed.timeline.length ? resumed.timeline : localDetail.timeline,
     };
   }
-  if (resumed.messages.length >= localDetail.messages.length) return resumed;
+  if (resumed.messages.length >= localDetail.messages.length) {
+    return withComplementaryMessages(resumed, localDetail);
+  }
   return {
     thread: resumed.thread,
-    messages: localDetail.messages,
+    messages: mergeMissingMessages(localDetail.messages, resumed.messages),
     timeline: resumed.timeline.length ? resumed.timeline : localDetail.timeline,
   };
+}
+
+function withComplementaryMessages(primary: ThreadDetail, secondary: ThreadDetail): ThreadDetail {
+  return {
+    ...primary,
+    messages: mergeMissingMessages(primary.messages, secondary.messages),
+    timeline: primary.timeline.length ? primary.timeline : secondary.timeline,
+  };
+}
+
+/** Insert rows missing from the preferred history around exact shared anchors. */
+function mergeMissingMessages(
+  primary: ConversationMessage[],
+  secondary: ConversationMessage[],
+): ConversationMessage[] {
+  if (!primary.length) return secondary.slice();
+  if (!secondary.length) return primary.slice();
+  const primaryIds = new Set(primary.map((message) => message.id));
+  if (!secondary.some((message) => primaryIds.has(message.id))) return primary.slice();
+
+  const result = primary.slice();
+  const resultIds = new Set(primaryIds);
+  let index = 0;
+  while (index < secondary.length) {
+    if (resultIds.has(secondary[index]!.id)) {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    while (index < secondary.length && !resultIds.has(secondary[index]!.id)) index += 1;
+    const missing = secondary.slice(start, index).filter((message) => !resultIds.has(message.id));
+    if (!missing.length) continue;
+
+    const nextAnchorId = secondary[index]?.id;
+    const nextAnchorIndex = nextAnchorId
+      ? result.findIndex((message) => message.id === nextAnchorId)
+      : -1;
+    const insertionIndex = nextAnchorIndex >= 0
+      ? nextAnchorIndex
+      : result.length;
+    result.splice(insertionIndex, 0, ...missing);
+    for (const message of missing) resultIds.add(message.id);
+  }
+  return result;
 }
 
 function countVisibleRole(detail: ThreadDetail, role: ConversationMessage["role"]): number {

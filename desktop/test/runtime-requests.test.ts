@@ -408,6 +408,181 @@ test("prefers recovered assistant history over a longer user-only rollout", asyn
   );
 });
 
+test("mobile openThread restores a newest turn missing entirely from a balanced local rollout", async (context) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-missing-latest-turn-"));
+  const { runtime, internals } = createRuntimeHarness(codexHome);
+  const thread = internals.threads.get("thread-1")!;
+  const rolloutPath = path.join(codexHome, "sessions", "rollout-thread-1.jsonl");
+  context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+  fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+  fs.writeFileSync(rolloutPath, [
+    JSON.stringify({
+      timestamp: "2026-07-30T00:00:00.000Z",
+      type: "session_meta",
+      payload: { id: thread.id, cwd: thread.projectPath },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-30T00:00:01.000Z",
+      type: "response_item",
+      payload: {
+        id: "user-old",
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Old question" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-old" },
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-30T00:00:02.000Z",
+      type: "response_item",
+      payload: {
+        id: "assistant-old",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Old answer" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-old" },
+      },
+    }),
+    "",
+  ].join("\n"), "utf8");
+  internals.loadedThreadIds.delete(thread.id);
+
+  let resumeCount = 0;
+  runtime.agent.request = async (method) => {
+    assert.equal(method, "thread/resume");
+    resumeCount += 1;
+    return {
+      thread: {
+        id: thread.id,
+        cwd: thread.projectPath,
+        preview: thread.title,
+        status: { type: "idle" },
+        turns: [{
+          id: "turn-old",
+          status: "completed",
+          items: [
+            { id: "user-old", type: "userMessage", content: [{ type: "text", text: "Old question" }] },
+            { id: "assistant-old", type: "agentMessage", text: "Old answer" },
+          ],
+        }, {
+          id: "turn-latest",
+          status: "completed",
+          items: [
+            { id: "user-latest", type: "userMessage", content: [{ type: "text", text: "Latest desktop question" }] },
+            { id: "assistant-latest", type: "agentMessage", text: "Latest desktop answer" },
+          ],
+        }],
+      },
+      model: thread.model,
+    } as never;
+  };
+
+  const remote = await runtime.remoteCommandHandlers().openThread(thread.id, remoteContext());
+
+  assert.equal(resumeCount, 1);
+  assert.deepEqual(
+    remote.timeline
+      .filter((item) => item.kind === "user" || item.kind === "assistant")
+      .map((item) => [item.kind, item.content]),
+    [
+      ["user", "Old question"],
+      ["assistant", "Old answer"],
+      ["user", "Latest desktop question"],
+      ["assistant", "Latest desktop answer"],
+    ],
+  );
+});
+
+test("mobile openThread retains the newest local question while a completed resume catches up", async (context) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-lagging-completed-resume-"));
+  const { runtime, internals } = createRuntimeHarness(codexHome);
+  const thread = internals.threads.get("thread-1")!;
+  const rolloutPath = path.join(codexHome, "sessions", "rollout-thread-1.jsonl");
+  context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+  fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+  fs.writeFileSync(rolloutPath, [
+    JSON.stringify({
+      timestamp: "2026-07-30T00:00:00.000Z",
+      type: "session_meta",
+      payload: { id: thread.id, cwd: thread.projectPath },
+    }),
+    ...[
+      ["turn-old", "user-old", "Old question"],
+      ["turn-latest", "user-latest", "Latest desktop question"],
+    ].map(([turnId, id, text], index) => JSON.stringify({
+      timestamp: `2026-07-30T00:00:0${index + 1}.000Z`,
+      type: "response_item",
+      payload: {
+        id,
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text }],
+        internal_chat_message_metadata_passthrough: { turn_id: turnId },
+      },
+    })),
+    "",
+  ].join("\n"), "utf8");
+  internals.loadedThreadIds.delete(thread.id);
+
+  let resumeCount = 0;
+  runtime.agent.request = async (method) => {
+    assert.equal(method, "thread/resume");
+    resumeCount += 1;
+    const turns = [{
+      id: "turn-old",
+      status: "completed",
+      items: [
+        { id: "user-old", type: "userMessage", content: [{ type: "text", text: "Old question" }] },
+        { id: "assistant-old", type: "agentMessage", text: "Old answer" },
+      ],
+    }];
+    if (resumeCount > 1) turns.push({
+      id: "turn-latest",
+      status: "completed",
+      items: [
+        { id: "user-latest", type: "userMessage", content: [{ type: "text", text: "Latest desktop question" }] },
+        { id: "assistant-latest", type: "agentMessage", text: "Latest desktop answer" },
+      ],
+    });
+    return {
+      thread: {
+        id: thread.id,
+        cwd: thread.projectPath,
+        preview: thread.title,
+        status: { type: "idle" },
+        turns,
+      },
+      model: thread.model,
+    } as never;
+  };
+
+  const first = await runtime.remoteCommandHandlers().openThread(thread.id, remoteContext());
+  assert.deepEqual(
+    first.timeline
+      .filter((item) => item.kind === "user" || item.kind === "assistant")
+      .map((item) => [item.kind, item.content]),
+    [
+      ["user", "Old question"],
+      ["assistant", "Old answer"],
+      ["user", "Latest desktop question"],
+    ],
+  );
+
+  const second = await runtime.remoteCommandHandlers().openThread(thread.id, remoteContext());
+  assert.equal(resumeCount, 2);
+  assert.deepEqual(
+    second.timeline
+      .filter((item) => item.kind === "user" || item.kind === "assistant")
+      .map((item) => [item.kind, item.content]),
+    [
+      ["user", "Old question"],
+      ["assistant", "Old answer"],
+      ["user", "Latest desktop question"],
+      ["assistant", "Latest desktop answer"],
+    ],
+  );
+});
+
 
 test("mobile openThread returns local sparse history when resume exceeds budget", async (context) => {
   const previousBudget = process.env.RHZYCODE_MOBILE_OPEN_RESUME_MS;

@@ -227,6 +227,31 @@ export function conversationPageSwipeDirection(
   return dx < 0 ? "next" : "previous";
 }
 
+export function conversationTurnScrollPlan(
+  entryIds: readonly string[],
+  userEntryIds: readonly string[],
+  requestedTurn: number,
+): {
+  turnIndex: number;
+  targetEntryId: string;
+  visibleCount: number;
+  visibleIndex: number;
+} | null {
+  if (!userEntryIds.length) return null;
+  const turnIndex = Math.max(0, Math.min(userEntryIds.length - 1, Math.floor(requestedTurn)));
+  const targetEntryId = userEntryIds[turnIndex]!;
+  const targetEntryIndex = entryIds.indexOf(targetEntryId);
+  if (targetEntryIndex < 0) return null;
+  const nextVisibleCount = entryIds.length - targetEntryIndex;
+  const visibleStartIndex = Math.max(0, entryIds.length - nextVisibleCount);
+  return {
+    turnIndex,
+    targetEntryId,
+    visibleCount: nextVisibleCount,
+    visibleIndex: targetEntryIndex - visibleStartIndex,
+  };
+}
+
 export function isResultEntry(entry: ChatEntry): boolean {
   if (entry.type === "pending") return true;
   if (entry.type !== "timeline") return false;

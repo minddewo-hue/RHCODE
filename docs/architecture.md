@@ -101,4 +101,4 @@ Desktop Relay Client -> loopback Control Plane -> DesktopRuntime
 
 ## 版本策略
 
-桌面发布固定一个 Codex CLI 版本，事实来源是 `desktop/codex-version.json`。打包脚本会执行 `codex --version` 并在不匹配时失败。升级 Codex 时必须重新运行 App Server、历史恢复、审批、命令、文件修改和终端相关测试。
+桌面发布固定一个 Codex CLI 版本，事实来源是 `desktop/codex-version.json`，打包时随安装包内置。运行时优先使用本机安装的 Codex（版本不低于内置版本时），否则回退到内置副本，因此本机执行 `codex update` 即可升级应用，无需重新打包。打包脚本会执行 `codex --version` 并在不匹配时失败。升级 Codex 时必须重新运行 App Server、历史恢复、审批、命令、文件修改和终端相关测试。

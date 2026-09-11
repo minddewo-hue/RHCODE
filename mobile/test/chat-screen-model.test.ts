@@ -11,6 +11,7 @@ import {
   claimPendingTimelineMatches,
   composerInteractionState,
   conversationPageSwipeDirection,
+  conversationTurnScrollPlan,
   countActivityEntries,
   findRetryablePendingMessage,
   isResultEntry,
@@ -152,6 +153,31 @@ test("switches pages for a short flick or a clear horizontal drag", () => {
   assert.equal(conversationPageSwipeDirection(50, 8, 0.1, 400), "previous");
   assert.equal(conversationPageSwipeDirection(-30, 4, -0.1, 400), null);
   assert.equal(conversationPageSwipeDirection(-80, 70, -0.8, 400), null);
+});
+
+test("expands the rendered history before jumping to a conversation outline turn", () => {
+  const entryIds = Array.from({ length: 30 }, (_, index) => `entry-${index}`);
+  const userEntryIds = ["entry-0", "entry-6", "entry-12", "entry-18", "entry-24"];
+
+  assert.deepEqual(conversationTurnScrollPlan(entryIds, userEntryIds, 0), {
+    turnIndex: 0,
+    targetEntryId: "entry-0",
+    visibleCount: 30,
+    visibleIndex: 0,
+  });
+  assert.deepEqual(conversationTurnScrollPlan(entryIds, userEntryIds, 3), {
+    turnIndex: 3,
+    targetEntryId: "entry-18",
+    visibleCount: 12,
+    visibleIndex: 0,
+  });
+  assert.deepEqual(conversationTurnScrollPlan(entryIds, userEntryIds, 4), {
+    turnIndex: 4,
+    targetEntryId: "entry-24",
+    visibleCount: 6,
+    visibleIndex: 0,
+  });
+  assert.equal(conversationTurnScrollPlan(entryIds, [], 0), null);
 });
 
 test("builds result entries only for the selected thread", () => {

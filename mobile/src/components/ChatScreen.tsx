@@ -42,6 +42,7 @@ import {
   buildChatEntries,
   composerInteractionState,
   conversationPageSwipeDirection,
+  conversationTurnScrollPlan,
   countActivityEntries,
   isResultEntry,
   shouldCaptureConversationPageSwipe,
@@ -537,6 +538,10 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, onC
   const didInitialScroll = useRef(false);
   const loadingOlder = useRef(false);
   const nearBottom = useRef(true);
+  const outlineScrollSequence = useRef(0);
+  const activeOutlineScroll = useRef<{ entryId: string; sequence: number } | null>(null);
+  const outlineScrollFrame = useRef<number | null>(null);
+  const [outlineScrollRequest, setOutlineScrollRequest] = useState<{ entryId: string; sequence: number } | null>(null);
   const previousEntryCount = useRef(entries.length);
   const visibleEntries = useMemo(() => entries.slice(-visibleCount), [entries, visibleCount]);
   const userEntryIds = useMemo(() => entries.flatMap((entry) => (
@@ -566,23 +571,38 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, onC
     });
   };
 
+  const cancelOutlineScroll = () => {
+    activeOutlineScroll.current = null;
+    if (outlineScrollFrame.current !== null) {
+      cancelAnimationFrame(outlineScrollFrame.current);
+      outlineScrollFrame.current = null;
+    }
+  };
+
   const scrollToUserTurnIndex = (nextTurn: number) => {
-    if (!userEntryIds.length) return;
-    const boundedTurn = Math.max(0, Math.min(userEntryIds.length - 1, nextTurn));
-    const targetEntryIndex = entries.findIndex((entry) => entry.id === userEntryIds[boundedTurn]);
-    if (targetEntryIndex < 0) return;
-    const requiredVisibleCount = entries.length - targetEntryIndex;
+    const plan = conversationTurnScrollPlan(
+      entries.map((entry) => entry.id),
+      userEntryIds,
+      nextTurn,
+    );
+    if (!plan) return;
     nearBottom.current = false;
+    didInitialScroll.current = true;
     setIsNearBottom(false);
-    setCurrentUserTurn(boundedTurn);
-    setVisibleCount((count) => Math.max(count, requiredVisibleCount));
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      const visibleIndex = Math.max(0, targetEntryIndex - Math.max(0, entries.length - Math.max(visibleCount, requiredVisibleCount)));
-      listRef.current?.scrollToIndex({ animated: true, index: visibleIndex, viewPosition: 0.08 });
-    }));
+    setCurrentUserTurn(plan.turnIndex);
+    setVisibleCount(plan.visibleCount);
+    cancelOutlineScroll();
+    outlineScrollSequence.current += 1;
+    const request = {
+      entryId: plan.targetEntryId,
+      sequence: outlineScrollSequence.current,
+    };
+    activeOutlineScroll.current = request;
+    setOutlineScrollRequest(request);
   };
 
   const returnToLatest = () => {
+    cancelOutlineScroll();
     nearBottom.current = true;
     setIsNearBottom(true);
     setUnreadUpdates(0);
@@ -600,14 +620,35 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, onC
   };
 
   useEffect(() => {
+    if (!outlineScrollRequest) return;
+    const visibleIndex = visibleEntries.findIndex((entry) => entry.id === outlineScrollRequest.entryId);
+    if (visibleIndex < 0) return;
+    const { sequence } = outlineScrollRequest;
+    outlineScrollFrame.current = requestAnimationFrame(() => {
+      outlineScrollFrame.current = requestAnimationFrame(() => {
+        outlineScrollFrame.current = null;
+        const activeRequest = activeOutlineScroll.current;
+        if (!activeRequest || activeRequest.sequence !== sequence) return;
+        listRef.current?.scrollToOffset({ animated: true, offset: 0 });
+        activeOutlineScroll.current = null;
+        setOutlineScrollRequest((current) => current?.sequence === sequence ? null : current);
+      });
+    });
+  }, [listRef, outlineScrollRequest, visibleEntries]);
+
+  useEffect(() => {
+    cancelOutlineScroll();
     setVisibleCount(10);
     didInitialScroll.current = false;
     loadingOlder.current = false;
     nearBottom.current = true;
+    setOutlineScrollRequest(null);
     setIsNearBottom(true);
     setUnreadUpdates(0);
     previousEntryCount.current = entries.length;
   }, [activePage, props.selectedThreadId]);
+
+  useEffect(() => () => cancelOutlineScroll(), []);
 
   return (
     <View style={styles.conversationListWrap}>
@@ -653,9 +694,6 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, onC
       }}
       maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
       scrollEventThrottle={100}
-      onScrollToIndexFailed={({ index, averageItemLength }) => {
-        listRef.current?.scrollToOffset({ animated: true, offset: Math.max(0, index * averageItemLength) });
-      }}
       onViewableItemsChanged={onViewableItemsChanged}
       renderItem={({ item }) => {
         if (item.type === "timeline") {

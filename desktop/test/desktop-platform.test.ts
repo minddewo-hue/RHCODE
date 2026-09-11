@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   bundledCodexExecutable,
+  compareCodexVersions,
   desktopHostPlatform,
   desktopUpdatePlatform,
   hardwareAccelerationPolicy,
@@ -65,14 +66,39 @@ test("allows the hardware acceleration environment setting to override VMware de
   });
 });
 
-test("prefers the bundled Codex binary and only falls back when it is absent", () => {
+test("prefers the system Codex when it is at least as new as the bundled copy", () => {
   assert.equal(
-    preferredCodexPath("C:\\app\\resources\\codex\\codex.exe", true, "C:\\system\\codex.exe"),
-    "C:\\app\\resources\\codex\\codex.exe",
+    preferredCodexPath("C:\app\resources\codex\codex.exe", "0.154.0", "C:\system\codex.exe", "0.154.0"),
+    "C:\system\codex.exe",
   );
   assert.equal(
-    preferredCodexPath("C:\\app\\resources\\codex\\codex.exe", false, " C:\\system\\codex.exe "),
-    "C:\\system\\codex.exe",
+    preferredCodexPath("C:\app\resources\codex\codex.exe", "0.147.0", "C:\system\codex.exe", "0.154.0"),
+    "C:\system\codex.exe",
   );
-  assert.equal(preferredCodexPath("/app/codex", false), undefined);
+  // A newer system binary upgrades the app without a repackage.
+  assert.equal(
+    preferredCodexPath("C:\app\resources\codex\codex.exe", "0.154.0", "C:\system\codex.exe", "0.160.1"),
+    "C:\system\codex.exe",
+  );
+});
+
+test("keeps the bundled Codex when the system install is older or missing", () => {
+  assert.equal(
+    preferredCodexPath("C:\app\resources\codex\codex.exe", "0.154.0", "C:\system\codex.exe", "0.147.0"),
+    "C:\app\resources\codex\codex.exe",
+  );
+  assert.equal(
+    preferredCodexPath("C:\app\resources\codex\codex.exe", "0.154.0", " C:\system\codex.exe ", "unknown"),
+    "C:\app\resources\codex\codex.exe",
+  );
+  assert.equal(preferredCodexPath("C:\app\resources\codex\codex.exe", "0.154.0", undefined, undefined), "C:\app\resources\codex\codex.exe");
+  assert.equal(preferredCodexPath("/app/codex", undefined), undefined);
+});
+
+test("compares Codex versions by numeric semver parts", () => {
+  assert.equal(compareCodexVersions("0.154.0", "0.154.0"), 0);
+  assert.equal(compareCodexVersions("0.154.0", "0.147.0"), 1);
+  assert.equal(compareCodexVersions("0.147.0", "0.154.0"), -1);
+  assert.equal(compareCodexVersions("0.9.9", "0.10.0"), -1);
+  assert.equal(compareCodexVersions("v0.154.1", "0.154.0"), 1);
 });

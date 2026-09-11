@@ -26,13 +26,33 @@ export function bundledCodexExecutable(platform: NodeJS.Platform = process.platf
   return platform === "win32" ? "codex.exe" : "codex";
 }
 
+/**
+ * Pick between the release-bundled Codex and the machine-installed Codex.
+ * The system binary wins when its version is at least the bundled version so
+ * a `codex update` on the machine upgrades the app without a repackage. The
+ * bundled copy remains the fallback for machines without a system install.
+ */
 export function preferredCodexPath(
   bundledPath: string,
-  bundledExists: boolean,
-  configuredPath?: string,
+  bundledVersion: string | undefined,
+  systemPath: string | undefined,
+  systemVersion: string | undefined,
 ): string | undefined {
-  if (bundledExists) return bundledPath;
-  return configuredPath?.trim() || undefined;
+  const trimmedSystem = systemPath?.trim() || undefined;
+  if (!trimmedSystem) return bundledVersion ? bundledPath : undefined;
+  if (compareCodexVersions(systemVersion || "0.0.0", bundledVersion || "0.0.0") >= 0) return trimmedSystem;
+  return bundledVersion ? bundledPath : undefined;
+}
+
+export function compareCodexVersions(left: string, right: string): number {
+  const normalize = (value: string) => value.trim().replace(/^v/i, "").split("-")[0] || "0.0.0";
+  const leftParts = normalize(left).split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const rightParts = normalize(right).split(".").map((part) => Number.parseInt(part, 10) || 0);
+  for (let index = 0; index < 3; index += 1) {
+    const delta = (leftParts[index] || 0) - (rightParts[index] || 0);
+    if (delta !== 0) return delta > 0 ? 1 : -1;
+  }
+  return 0;
 }
 
 export function shouldQuitWhenAllWindowsClose(platform: NodeJS.Platform = process.platform): boolean {

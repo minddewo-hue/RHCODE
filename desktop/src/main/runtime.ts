@@ -2560,15 +2560,26 @@ function preferRicherThreadDetail(
 /**
  * Make the per-thread orderKey scale monotonic across openThread calls so a
  * mobile client can use "largest orderKey" as an incremental cursor
- * (GET /timeline?afterOrderKey=N). Rows that already had a key keep it; only
- * never-seen rows receive new keys, always above every key seen so far.
+ * (GET /timeline?afterOrderKey=N).
  *
- * Key resolution per row:
- *  1. local rollout key — rollout file order IS the generation order and the
- *     rollout survives desktop restarts, so it is the most stable ruler;
- *  2. previously cached merged detail key — keeps keys already handed to
- *     mobile for rows absent from the local rollout (resumed-only replies);
- *  3. a fresh key above all recorded keys, in merged array order.
+ * The merged arrays are already in generation order (selectMergedThreadDetail
+ * / mergeMissingMessages insert missing rows around shared anchors), so the
+ * walk below assigns keys in array order on one shared per-thread scale. Two
+ * invariants follow:
+ *
+ *  · sort-by-key equals array order within a single response (keys strictly
+ *    increase along the walk), so the rebuilt order is the intended order;
+ *  · a row's key never shrinks between calls: each assignment is
+ *    `max(runningCounter + 1, anchor)`, where the anchor is the previously
+ *    cached merged key (preferred — it is the scale mobile's cursor was
+ *    derived from) or, for rows only the local rollout knows about, the
+ *    rollout key. A late mid-insert therefore shifts later rows UP, never
+ *    down, keeping the mobile cursor valid; the scale can only grow.
+ *
+ * Note: the local rollout scale is deliberately NOT authoritative on its
+ * own. A sparse rollout (e.g. user rows only, assistant rows still arriving
+ * via resume) has no key slots between its rows, and trusting its positions
+ * would push resumed rows that belong in between past the newer local rows.
  *
  * With no anchors at all (first observation) this falls back to the
  * position-based renumbering below.
@@ -2580,40 +2591,34 @@ function stabilizeThreadDetailKeys(
 ): ThreadDetail {
   if (!local && !previous) return renumberThreadDetail(merged);
 
-  const messageKeys = new Map<string, number>();
-  const timelineKeys = new Map<string, number>();
-  let next = 0;
-  const record = (detail: ThreadDetail | null, fillGaps: boolean) => {
-    if (!detail) return;
+  const messageAnchors = new Map<string, number>();
+  const timelineAnchors = new Map<string, number>();
+  for (const detail of [previous, local]) {
+    if (!detail) continue;
     for (const message of detail.messages) {
       if (typeof message.orderKey !== "number" || message.orderKey <= 0) continue;
-      const existing = messageKeys.get(message.id);
-      if (existing === undefined || !fillGaps) {
-        messageKeys.set(message.id, message.orderKey);
-        next = Math.max(next, message.orderKey);
-      }
+      if (!messageAnchors.has(message.id)) messageAnchors.set(message.id, message.orderKey);
     }
     for (const item of detail.timeline) {
       if (typeof item.orderKey !== "number" || item.orderKey <= 0) continue;
       const id = `${item.threadId}\u0000${item.logicalId || item.id}`;
-      const existing = timelineKeys.get(id);
-      if (existing === undefined || !fillGaps) {
-        timelineKeys.set(id, item.orderKey);
-        next = Math.max(next, item.orderKey);
-      }
+      if (!timelineAnchors.has(id)) timelineAnchors.set(id, item.orderKey);
     }
+  }
+
+  let next = 0;
+  const keyFor = (id: string, anchors: Map<string, number>) => {
+    next = Math.max(next + 1, anchors.get(id) ?? 0);
+    return next;
   };
-  record(local, false);
-  record(previous, true);
-  const assign = () => ++next;
 
   const messages = merged.messages.map((message) => ({
     ...message,
-    orderKey: messageKeys.get(message.id) ?? assign(),
+    orderKey: keyFor(message.id, messageAnchors),
   }));
   const timeline = merged.timeline.map((item) => ({
     ...item,
-    orderKey: timelineKeys.get(`${item.threadId}\u0000${item.logicalId || item.id}`) ?? assign(),
+    orderKey: keyFor(`${item.threadId}\u0000${item.logicalId || item.id}`, timelineAnchors),
   }));
   return { ...merged, messages, timeline };
 }

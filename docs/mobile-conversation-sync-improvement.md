@@ -1,6 +1,6 @@
 # 桌面→手机 对话同步改进方案
 
-> 状态：设计评审稿（未实施）。目标读者：桌面/移动/协议负责人。
+> 状态：**已实施**（Track B 四大支柱全部落地，见 §0.1 实施回填）。目标读者：桌面/移动/协议负责人。
 > 关联事实来源：`packages/protocol/src/index.ts`、`desktop/src/main/control-plane/app.ts`、`desktop/src/main/runtime.ts`、`desktop/src/main/control-plane/store.ts`、`mobile/src/state/control-reducer.ts`、`mobile/src/hooks/use-control-plane.ts`、`mobile/src/components/chat-screen-model.ts`。
 > 本文是"方案"，不是接口定义；一旦落地，接口以协议源码为准，并回填本文件。
 
@@ -20,6 +20,27 @@
 4. **正文/执行过程分离**（移动端默认只渲染 `kind ∈ {user, assistant}`，移除"执行过程"页）——满足"只显正文"。
 
 若希望快速止血，先做 **Track A（最小改动）**；Track B 是治本目标，两者可分阶段推进，协议改动需桌面/手机/中转同版本协同（见 `docs/architecture.md`「协议边界」）。
+
+### 0.1 实施回填（Track B 已落地，2026-09-20）
+
+> 四大支柱全部实施完成，全量 `npm run check` 通过（desktop 216/216、mobile 114/114、protocol 8/8——新增 `packages/protocol/test/timeline-order.test.ts` 覆盖 §6 要求的 orderKey 混排/同毫秒/provisional+canonical/内容漂移用例、transferserver/appupdate 全绿，typecheck 无错误）。下文是**实施后的实际形态**，接口以协议源码为准；与 §3.2 设计有差异处逐条注明。
+
+| 支柱 | 实施位置 | 状态 |
+| --- | --- | --- |
+| 一：`orderKey` | `protocol/index.ts`（`timelineItemSchema.orderKey` optional + `compareTimelineOrder`）；`store.ts`（`orderCounters` 持久化 + `withOrderKey` 分配 + `noteOrderBaseline`）；`runtime.ts`（`toThreadDetail` 按 `turn.items` 顺序单尺分配） | ✅ 按计划 |
+| 二：`logicalId` | `store.ts`（`normalizeTimelineIdentity` 出门校验+补全）；`runtime.ts` live 发布首帧即带；移动端 `timelineIdentity = threadId + (logicalId \|\| id)` 统一去重 | ✅ 按计划 |
+| 三：增量游标同步 | `app.ts` delta 端点；`control-client.ts fetchThreadTimeline`；`storage/timeline-cache.ts` + `native-timeline-cache.ts`；`use-control-plane.ts` gap 续拉；`App.tsx` delta-first catch-up | ✅ 有偏差（见下） |
+| 四：正文-only | `ChatScreen.tsx` 恒定 `kind ∈ {user, assistant}`，"执行过程"页及切换已移除；桌面端不变 | ✅ 按计划 |
+
+**支柱三实际形态（与设计差异，接口以此为准）**：
+
+1. **delta 端点**：`GET /v1/commands/threads/:id/timeline?afterOrderKey=N&limit=K` → 仅 `orderKey > N` 的 item（`limit` 钳制 [1, 5000]，`hasMore` 表部分页）。响应 `maxOrderKey` 是**整次重建的最大键**而非当页最大键——移动端用它检测"标尺重置"（`maxOrderKey < 本地游标` → 回退一次全量 `openThread`）。设计里"openThread 增加 `sinceOrderKey`"**未做**：catch-up 全部由 delta 端点 + 本地缓存承担。
+2. **移动端本地持久化**：`storage/timeline-cache.ts`（通用 store，LRU 上限 20 线程，按 `updatedAt` 淘汰）+ `storage/native-timeline-cache.ts`（设备端 expo-file-system，web/测试用内存 fallback）。每线程缓存 `maxOrderKey` 游标与正文行（缓存只存 user/assistant）。冷启动/前后台恢复**先读本地即时渲染**，再 `fetchThreadTimeline` 循环补增量；写盘 400ms 防抖。
+3. **gap 续拉**：判定 `gap` 后优先重开 WS 带 `after=lastSequence` 回放（最多 3 次续拉尝试），仍失败或 `control.sync` 报 `replayUnavailable`/`streamChanged` 才回退全量 snapshot。设计 A2 里"建连后额外全量 resync"**已删除**（`after` 回放已覆盖）。
+4. **收敛 catch-up**：`isSparseThreadHistory(timeline, threadId, localMaxOrderKey)` 改为 orderKey 完整性判定（远端最大键 < 本地缓存最大键 → 稀疏）；稀疏线程全量 `openThread` 一次并刷新本地缓存，不再有 14 次全量重试风暴。
+5. **orderKey 跨次稳定性**（设计未列，实施必需）：`runtime.ts stabilizeThreadDetailKeys` 在合并本地 rollout / 上次缓存后按"生成顺序 walk"分配键——单次响应内键严格递增（排序==生成序）；**同一行键跨次只增不减**（锚点优先级：上次缓存 > 本地 rollout，`key = max(计数器+1, 锚点)`），中途补插行只会把后续行推高。这是移动端 `maxOrderKey` 游标在桌面重启/延迟 resume 场景下依然有效的前提；键收缩时由第 1 条的 scale-reset 检测兜底。
+
+**Track A 处置**：A1/A2/A3/A4 已被支柱三/四的更强实现覆盖；A5（createdAt 兜底排序）由 `orderKey` + `compareTimelineOrder` 回退链取代（legacy 无键数据仍走 `createdAt → id`）。
 
 ---
 

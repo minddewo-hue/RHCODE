@@ -5,7 +5,9 @@ import {
   applyAgentEvent,
   emptyControlSnapshot,
   hydrateThreadSnapshot,
+  localThreadMaxOrderKey,
   mergeControlSnapshot,
+  mergeTimelineDelta,
 } from "../src/state/control-reducer";
 
 const now = "2026-07-15T10:00:00.000Z";
@@ -626,6 +628,82 @@ test("collapses unscoped live assistant rows into turn-scoped history rows", () 
   assert.equal(hydrated.timeline[0]?.id, "turn-9::assistant-1");
   assert.equal(hydrated.timeline[0]?.content, history.content);
   assert.equal(hydrated.timeline[0]?.status, "completed");
+});
+
+test("merges an incremental timeline delta with the live identity rules", () => {
+  const localAssistant = {
+    ...timeline,
+    id: "assistant-live",
+    kind: "assistant" as const,
+    status: "running" as const,
+    content: "partial",
+    orderKey: 1,
+  };
+  const localUser = {
+    ...timeline,
+    id: "turn-1::item-user-1",
+    kind: "user" as const,
+    status: "completed" as const,
+    content: "continue",
+    orderKey: 0,
+  };
+  const current: ControlSnapshot = {
+    ...emptyControlSnapshot,
+    threads: [thread],
+    timeline: [localUser, localAssistant],
+    lastSequence: 12,
+  };
+  const delta = mergeTimelineDelta(current, {
+    threadId: thread.id,
+    timeline: [
+      { ...localAssistant, status: "completed" as const, content: "final answer" },
+      {
+        ...timeline,
+        id: "turn-2::item-user-1",
+        kind: "user" as const,
+        status: "completed" as const,
+        content: "next question",
+        orderKey: 2,
+      },
+    ],
+    maxOrderKey: 2,
+    hasMore: false,
+  });
+
+  assert.deepEqual(delta.timeline.map((item) => item.id), [
+    "turn-1::item-user-1",
+    "assistant-live",
+    "turn-2::item-user-1",
+  ]);
+  assert.equal(delta.timeline[1]?.status, "completed");
+  assert.equal(delta.timeline[1]?.content, "final answer");
+  assert.equal(delta.timeline[1]?.orderKey, 1);
+  assert.equal(delta.lastSequence, 12);
+});
+
+test("an empty delta leaves the snapshot untouched", () => {
+  const current: ControlSnapshot = {
+    ...emptyControlSnapshot,
+    threads: [thread],
+    timeline: [timeline],
+  };
+  const merged = mergeTimelineDelta(current, {
+    threadId: thread.id,
+    timeline: [],
+    maxOrderKey: 0,
+    hasMore: false,
+  });
+  assert.equal(merged, current);
+});
+
+test("localThreadMaxOrderKey tracks the largest per-thread cursor", () => {
+  assert.equal(localThreadMaxOrderKey([], "thread-1"), 0);
+  assert.equal(localThreadMaxOrderKey([
+    { ...timeline, orderKey: 5 },
+    { ...timeline, threadId: "thread-2", orderKey: 9 },
+    { ...timeline, orderKey: 7 },
+    { ...timeline },
+  ], "thread-1"), 7);
 });
 
 test("keeps similar assistant replies from different turns", () => {

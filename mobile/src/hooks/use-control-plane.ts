@@ -19,9 +19,19 @@ import {
   emptyControlSnapshot,
   hydrateThreadSnapshot,
   mergeControlSnapshot,
+  mergeTimelineDelta,
 } from "../state/control-reducer";
+import type { RemoteTimelineDeltaResult } from "@rhzycode/protocol";
 
 export type ConnectionStatus = "connecting" | "online" | "offline" | "needs_configuration";
+
+/**
+ * A bounded gap is healed by re-opening the socket at `after=lastSequence`
+ * (the relay replays the missing events). Three consecutive continuations
+ * without progress mean the replay buffer cannot cover — escalate to a full
+ * snapshot instead of looping.
+ */
+const maxGapContinuationAttempts = 3;
 
 export interface ApprovalOperation {
   busy: boolean;
@@ -262,6 +272,145 @@ export function useControlPlane({
         return true;
       }
 
+      let continuationAttempts = 0;
+
+      /**
+       * Close a socket and schedule the FULL recovery path (snapshot + new
+       * socket) with backoff. Used when the relay replay buffer cannot cover
+       * our cursor, when the stream changed, or when continuation retries
+       * keep failing.
+       */
+      const startFullResync = (socket: WebSocket) => {
+        continuationAttempts = 0;
+        runtime.connecting = false;
+        runtime.socket = null;
+        try {
+          socket.close();
+        } catch {
+          // The reconnect below replaces sockets that cannot be closed.
+        }
+        scheduleReconnect();
+      };
+
+      /**
+       * Open the realtime socket at the current `lastSequence` cursor. The
+       * relay replays every event after it before streaming, so re-opening
+       * the socket (without a fresh snapshot) is a complete recovery for a
+       * bounded gap — the server's first `control.sync` frame tells us when
+       * the replay buffer no longer covers the cursor and we fall back to
+       * a full resync.
+       */
+      const openRealtimeSocket = () => {
+        if (disposed || stopped || paused || runtime.connecting || runtime.socketOpen) return;
+        const generation = connectionGeneration;
+        runtime.connecting = true;
+        const descriptor = client.eventSocket(runtime.lastSequence);
+        const socket = new WebSocket(descriptor.url, descriptor.protocols);
+        runtime.socket = socket;
+        socketConnectTimer = setTimeout(() => {
+          if (disposed || stopped || runtime.socket !== socket || runtime.socketOpen) return;
+          socketConnectTimer = null;
+          runtime.connecting = false;
+          runtime.socket = null;
+          update({ notice: "实时连接超时，正在重试。" });
+          try {
+            socket.close();
+          } catch {
+            // The reconnect below replaces sockets that cannot be closed while connecting.
+          }
+          scheduleReconnect();
+        }, webSocketConnectTimeoutMs);
+        socket.onopen = () => {
+          if (runtime.socket !== socket) {
+            socket.close();
+            return;
+          }
+          clearSocketConnectTimer();
+          if (disposed || stopped || paused || generation !== connectionGeneration) {
+            socket.close();
+            return;
+          }
+          reconnectAttempt = 0;
+          runtime.connecting = false;
+          runtime.socketOpen = true;
+          update({ status: "online", notice: null });
+          sendHeartbeat(socket);
+          // No extra full snapshot here: the pre-socket snapshot plus the
+          // replay from after=lastSequence already cover the race, and the
+          // control.sync frame / gap handler fall back to a full resync when
+          // the replay buffer cannot cover the cursor.
+        };
+        socket.onmessage = (message) => {
+          if (disposed || stopped || runtime.socket !== socket) return;
+          if (acceptHeartbeat(String(message.data))) return;
+          try {
+            const frame = client.parseSocketFrame(String(message.data));
+            if (frame.type === "control.sync") {
+              const streamChanged = Boolean(runtime.streamId && runtime.streamId !== frame.streamId);
+              const replayUnavailable = runtime.lastSequence < frame.earliestReplaySequence - 1
+                && runtime.lastSequence < frame.lastSequence;
+              if (streamChanged || replayUnavailable) {
+                // Replay buffer cannot cover our cursor: a full snapshot is
+                // the only complete recovery.
+                update({ notice: "实时数据版本已变化，正在重新同步。" });
+                startFullResync(socket);
+                return;
+              }
+              runtime.streamId = frame.streamId;
+              return;
+            }
+            const event = frame;
+            const sequenceAction = incomingSequenceAction(runtime.lastSequence, event.sequence);
+            if (sequenceAction === "duplicate") return;
+            if (sequenceAction === "gap") {
+              // Continuation first: re-open the socket at lastSequence and
+              // let the relay replay the missing events. Only escalate to a
+              // full snapshot when the next control.sync frame proves the
+              // replay buffer cannot cover (or continuation keeps failing).
+              if (continuationAttempts >= maxGapContinuationAttempts) {
+                update({ notice: "检测到实时数据缺口，正在重新同步。" });
+                startFullResync(socket);
+                return;
+              }
+              continuationAttempts += 1;
+              update({ notice: "检测到实时数据缺口，正在续拉。" });
+              runtime.connecting = false;
+              runtime.socket = null;
+              try {
+                socket.close();
+              } catch {
+                // The replacement socket below supersedes it.
+              }
+              openRealtimeSocket();
+              return;
+            }
+            continuationAttempts = 0;
+            runtime.lastSequence = event.sequence;
+            update((current) => ({
+              ...current,
+              snapshot: applyAgentEvent(current.snapshot, event),
+              approvalOperations: event.type === "approval.resolved"
+                ? omitKey(current.approvalOperations, event.approvalId)
+                : current.approvalOperations,
+            }));
+          } catch (error) {
+            update({ notice: describeControlError(error) });
+            socket.close();
+          }
+        };
+        socket.onerror = () => socket.close();
+        socket.onclose = () => {
+          if (runtime.socket !== socket) return;
+          clearSocketConnectTimer();
+          clearHeartbeatTimers();
+          if (disposed || stopped) return;
+          runtime.connecting = false;
+          runtime.socketOpen = false;
+          runtime.socket = null;
+          scheduleReconnect();
+        };
+      };
+
       const synchronize = async () => {
         if (disposed || stopped || paused || runtime.connecting) return;
         const generation = connectionGeneration;
@@ -291,90 +440,7 @@ export function useControlPlane({
           return;
         }
 
-        const descriptor = client.eventSocket(runtime.lastSequence);
-        const socket = new WebSocket(descriptor.url, descriptor.protocols);
-        runtime.socket = socket;
-        socketConnectTimer = setTimeout(() => {
-          if (disposed || stopped || runtime.socket !== socket || runtime.socketOpen) return;
-          socketConnectTimer = null;
-          runtime.connecting = false;
-          runtime.socket = null;
-          update({ notice: "实时连接超时，正在重试。" });
-          try {
-            socket.close();
-          } catch {
-            // The reconnect below replaces sockets that cannot be closed while connecting.
-          }
-          scheduleReconnect();
-        }, webSocketConnectTimeoutMs);
-        socket.onopen = () => {
-          if (runtime.socket !== socket) {
-            socket.close();
-            return;
-          }
-          clearSocketConnectTimer();
-          if (disposed || stopped || paused) {
-            socket.close();
-            return;
-          }
-          reconnectAttempt = 0;
-          runtime.connecting = false;
-          runtime.socketOpen = true;
-          update({ status: "online", notice: null });
-          sendHeartbeat(socket);
-          // Cover the race between the pre-socket snapshot and the first event frame
-          // so completed assistant replies are not stuck missing on flaky links.
-          void resyncSnapshot();
-        };
-        socket.onmessage = (message) => {
-          if (disposed || stopped || runtime.socket !== socket) return;
-          if (acceptHeartbeat(String(message.data))) return;
-          try {
-            const frame = client.parseSocketFrame(String(message.data));
-            if (frame.type === "control.sync") {
-              const streamChanged = Boolean(runtime.streamId && runtime.streamId !== frame.streamId);
-              const replayUnavailable = runtime.lastSequence < frame.earliestReplaySequence - 1
-                && runtime.lastSequence < frame.lastSequence;
-              if (streamChanged || replayUnavailable) {
-                update({ notice: "实时数据版本已变化，正在重新同步。" });
-                socket.close();
-                return;
-              }
-              runtime.streamId = frame.streamId;
-              return;
-            }
-            const event = frame;
-            const sequenceAction = incomingSequenceAction(runtime.lastSequence, event.sequence);
-            if (sequenceAction === "duplicate") return;
-            if (sequenceAction === "gap") {
-              update({ notice: "检测到实时数据缺口，正在重新同步。" });
-              socket.close();
-              return;
-            }
-            runtime.lastSequence = event.sequence;
-            update((current) => ({
-              ...current,
-              snapshot: applyAgentEvent(current.snapshot, event),
-              approvalOperations: event.type === "approval.resolved"
-                ? omitKey(current.approvalOperations, event.approvalId)
-                : current.approvalOperations,
-            }));
-          } catch (error) {
-            update({ notice: describeControlError(error) });
-            socket.close();
-          }
-        };
-        socket.onerror = () => socket.close();
-        socket.onclose = () => {
-          if (runtime.socket !== socket) return;
-          clearSocketConnectTimer();
-          clearHeartbeatTimers();
-          if (disposed || stopped) return;
-          runtime.connecting = false;
-          runtime.socketOpen = false;
-          runtime.socket = null;
-          scheduleReconnect();
-        };
+        openRealtimeSocket();
       };
 
       const closeRealtimeConnection = () => {
@@ -537,11 +603,21 @@ export function useControlPlane({
     }));
   }, [activeSession]);
 
+  /** Merge an incremental timeline delta (GET /timeline?afterOrderKey=N). */
+  const applyTimelineDelta = useCallback((result: RemoteTimelineDeltaResult) => {
+    if (!activeSession) return;
+    updateConnectionState(setConnectionStates, activeSession.id, (current) => ({
+      ...current,
+      snapshot: mergeTimelineDelta(current.snapshot, result),
+    }));
+  }, [activeSession]);
+
   return {
     ...activeState,
     connectionStates,
     refresh,
     hydrateThread,
+    applyTimelineDelta,
     resolveApproval,
   };
 }

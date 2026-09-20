@@ -339,6 +339,51 @@ test("loads the model catalog from the selected desktop", async () => {
   assert.equal(requestedUrl, `${controlUrl}/v1/commands/models`);
 });
 
+test("fetches an incremental timeline delta with cursor and limit in the query", async () => {
+  let requestedUrl = "";
+  let authorization = "";
+  const client = new ControlClient(accessKey, {
+    fetchImpl: async (input, init) => {
+      requestedUrl = String(input);
+      authorization = String((init?.headers as Record<string, string> | undefined)?.Authorization || "");
+      return Response.json({
+        threadId: "thread-delta",
+        timeline: [{
+          id: "item-3",
+          logicalId: "logical-3",
+          threadId: "thread-delta",
+          kind: "assistant",
+          status: "completed",
+          title: "",
+          content: "New reply",
+          createdAt: now,
+          orderKey: 3,
+        }],
+        maxOrderKey: 4,
+        hasMore: false,
+      });
+    },
+  });
+
+  const result = await client.fetchThreadTimeline("thread-delta", 2, 500);
+  assert.equal(requestedUrl, `${controlUrl}/v1/commands/threads/thread-delta/timeline?afterOrderKey=2&limit=500`);
+  assert.match(authorization, /^Bearer /);
+  assert.equal(result.maxOrderKey, 4);
+  assert.equal(result.hasMore, false);
+  assert.equal(result.timeline[0]?.id, "item-3");
+  assert.equal(result.timeline[0]?.orderKey, 3);
+
+  // Negative cursors clamp to 0; limits clamp into [1, 5000].
+  await client.fetchThreadTimeline("thread-delta", -5, 90_000);
+  assert.equal(requestedUrl, `${controlUrl}/v1/commands/threads/thread-delta/timeline?afterOrderKey=0&limit=5000`);
+
+  const invalidClient = new ControlClient(
+    accessKey,
+    { fetchImpl: async () => Response.json({ threadId: "thread-delta", timeline: [], hasMore: false }) },
+  );
+  await assert.rejects(() => invalidClient.fetchThreadTimeline("thread-delta"), isCode("invalid_response"));
+});
+
 function isCode(code: ControlClientError["code"]): (error: unknown) => boolean {
   return (error) => error instanceof ControlClientError && error.code === code;
 }

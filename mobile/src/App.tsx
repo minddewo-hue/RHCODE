@@ -1,5 +1,6 @@
 import {
   codexComposerCommandPrompt,
+  dedupeTimelineItems,
   parseCodexComposerCommand,
   type ConversationFile,
   type ParsedCodexComposerCommand,
@@ -11,6 +12,7 @@ import {
   type RemoteSandboxMode,
   type RemoteTurnAttachment,
   type ThreadSummary,
+  type TimelineItem,
   type UserInputAnswers,
 } from "@rhzycode/protocol";
 import Constants from "expo-constants";
@@ -61,6 +63,7 @@ import { preferredRemoteModel, remoteModelReasoningEfforts } from "./components/
 import { ModelPickerSheet } from "./components/ModelPickerSheet";
 import { ProjectPickerSheet, ThreadActionsSheet } from "./components/TaskSheets";
 import { describeControlError, useControlPlane } from "./hooks/use-control-plane";
+import { createNativeTimelineCacheStore } from "./storage/native-timeline-cache";
 import { createNativeSecureSessionStore } from "./storage/native-secure-session";
 import type {
   MobileSession,
@@ -68,6 +71,11 @@ import type {
   PendingCommandReceipt,
   SecureSessionStore,
 } from "./storage/secure-session";
+import {
+  upsertCachedThread,
+  type ThreadTimelineCache,
+  type ThreadTimelineCacheStore,
+} from "./storage/timeline-cache";
 import { isRegisteredProject, isSameProjectPath, registeredProjectPaths, resolveNewThreadProjectPath } from "./state/project-list";
 import { colors, createThemedStyles, loadThemeMode, saveThemeMode, setActiveThemeMode, type ThemeMode } from "./ui/theme";
 import { defaultUpdateManifestUrl } from "./platform/update/mobile-update";
@@ -85,6 +93,26 @@ const updateManifestUrl = String(Constants.expoConfig?.extra?.updateManifestUrl 
 function isImageAttachment(name: string, mimeType?: string): boolean {
   if (mimeType?.toLowerCase().startsWith("image/")) return true;
   return /\.(avif|bmp|gif|jpe?g|png|webp)$/i.test(name);
+}
+
+/** Largest orderKey in a (thread-scoped) timeline; 0 when none carry one. */
+function maxTimelineOrderKey(timeline: ReadonlyArray<Pick<TimelineItem, "orderKey">>): number {
+  let max = 0;
+  for (const item of timeline) {
+    if (typeof item.orderKey === "number" && item.orderKey > max) max = item.orderKey;
+  }
+  return max;
+}
+
+/**
+ * Body rows for the local timeline cache (mobile renders only user/assistant
+ * — the activity page is desktop-only). Deduped with the same identity rules
+ * as the reducer so provisional/canonical rows collapse.
+ */
+function bodyCacheItems(existing: TimelineItem[], incoming: TimelineItem[]): TimelineItem[] {
+  if (!incoming.length) return existing;
+  return dedupeTimelineItems([...existing, ...incoming])
+    .filter((item) => item.kind === "user" || item.kind === "assistant");
 }
 
 function imageMimeType(name: string): string {
@@ -199,10 +227,37 @@ function AppContent() {
   const threadsNeedingHistoryCatchUpRef = useRef(new Set<string>());
   const connectionStatusRef = useRef<string | null>(null);
   const sendInFlightRef = useRef(false);
+  const timelineCacheRef = useRef<ThreadTimelineCache | null>(null);
+  const timelineCacheConnectionId = useRef<string | null>(null);
+  const timelineCacheStoreRef = useRef<ThreadTimelineCacheStore | null>(null);
+  const timelineCacheSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const session = useMemo(
     () => sessionState.connections.find((connection) => connection.id === sessionState.activeConnectionId) || null,
     [sessionState],
   );
+
+  /** Load (once per connection) the persisted per-thread timeline cursors. */
+  const ensureTimelineCache = useCallback(async (connectionId: string): Promise<ThreadTimelineCache> => {
+    if (timelineCacheConnectionId.current === connectionId && timelineCacheRef.current) {
+      return timelineCacheRef.current;
+    }
+    const store = createNativeTimelineCacheStore(connectionId);
+    const loaded = await store.load();
+    timelineCacheStoreRef.current = store;
+    timelineCacheConnectionId.current = connectionId;
+    timelineCacheRef.current = loaded;
+    return loaded;
+  }, []);
+
+  /** Debounced best-effort persistence of the timeline cache. */
+  const persistTimelineCache = useCallback((threads: ThreadTimelineCache) => {
+    timelineCacheRef.current = threads;
+    if (timelineCacheSaveTimer.current) clearTimeout(timelineCacheSaveTimer.current);
+    timelineCacheSaveTimer.current = setTimeout(() => {
+      timelineCacheSaveTimer.current = null;
+      void timelineCacheStoreRef.current?.save(threads);
+    }, 400);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -512,6 +567,86 @@ function AppContent() {
         }
       };
 
+      // Local timeline cache (sync plan §3.2 支柱三): render the cached body
+      // instantly, then catch up with the delta endpoint instead of
+      // re-fetching the whole thread. A scale reset (delta.maxOrderKey below
+      // the stored cursor) falls back to the full openThread path below.
+      let cache: ThreadTimelineCache | null = null;
+      if (session) {
+        try {
+          cache = await ensureTimelineCache(session.id);
+        } catch {
+          cache = null;
+        }
+      }
+      const cached = cache?.[threadId];
+      let scaleReset = false;
+
+      if (cached && cached.timeline.length) {
+        const knownThread = control.snapshot.threads.find((thread) => thread.id === threadId);
+        if (knownThread && !cancelled) {
+          control.hydrateThread({ thread: knownThread, timeline: cached.timeline });
+        }
+        clearOpeningIndicator();
+        try {
+          let cursor = cached.maxOrderKey;
+          let mergedBody = cached.timeline;
+          let pages = 0;
+          while (!cancelled && pages < 20) {
+            const delta = await runControlCommandWithRetry(
+              () => taskClient.fetchThreadTimeline(threadId, cursor),
+              { attempts: 2 },
+            );
+            if (cancelled) return;
+            if (delta.maxOrderKey < cursor) {
+              scaleReset = true;
+              break;
+            }
+            if (delta.timeline.length) {
+              control.applyTimelineDelta(delta);
+              mergedBody = bodyCacheItems(mergedBody, delta.timeline);
+            }
+            cursor = delta.maxOrderKey;
+            pages += 1;
+            if (!delta.hasMore) break;
+          }
+          if (cancelled) return;
+          if (!scaleReset) {
+            persistTimelineCache(upsertCachedThread(cache!, threadId, cursor, mergedBody));
+            sparseHistoryAttemptsRef.current.delete(threadId);
+            openedThreadHistoryRef.current = threadId;
+            threadsNeedingHistoryCatchUpRef.current.delete(threadId);
+            return;
+          }
+          // Scale reset: the stored cursor is not comparable anymore; the
+          // full openThread below rebuilds it (and the sparse check below
+          // falls back to the legacy heuristic).
+        } catch (error) {
+          if (cancelled) return;
+          if (isUnauthorized(error) && session) {
+            rejectCredentials(session.id);
+            return;
+          }
+          // Transport failure during delta catch-up: the cached history is
+          // still visible; let the full path below do the quiet catch-up.
+          needsSoftCatchUp = true;
+        }
+      }
+
+      const sparseLocalMax = scaleReset ? 0 : cached?.maxOrderKey || 0;
+      const rememberFullHistory = (timeline: TimelineItem[]) => {
+        if (!cache || cancelled) return;
+        if (isSparseThreadHistory(timeline, threadId, sparseLocalMax)) return;
+        const next = upsertCachedThread(
+          cache,
+          threadId,
+          maxTimelineOrderKey(timeline),
+          bodyCacheItems([], timeline),
+        );
+        cache = next;
+        persistTimelineCache(next);
+      };
+
       // Immediate retries: cover both sparse payloads and flaky transport.
       while (!cancelled) {
         try {
@@ -521,9 +656,10 @@ function AppContent() {
           );
           if (cancelled) return;
           control.hydrateThread(result);
+          rememberFullHistory(result.timeline);
           // Show whatever we got while catch-up continues in the background.
           clearOpeningIndicator();
-          const sparse = isSparseThreadHistory(result.timeline, threadId);
+          const sparse = isSparseThreadHistory(result.timeline, threadId, sparseLocalMax);
           sawSparse = sparse;
           if (shouldRetryOpenThreadHistory({
             online: true,
@@ -589,7 +725,8 @@ function AppContent() {
           );
           if (cancelled) return;
           control.hydrateThread(result);
-          const sparse = isSparseThreadHistory(result.timeline, threadId);
+          rememberFullHistory(result.timeline);
+          const sparse = isSparseThreadHistory(result.timeline, threadId, sparseLocalMax);
           sawSparse = sparse;
           needsSoftCatchUp = needsThreadHistoryCatchUp({ sparse });
           if (!sparse) {
@@ -627,7 +764,7 @@ function AppContent() {
     return () => {
       cancelled = true;
     };
-  }, [control.hydrateThread, control.status, rejectCredentials, selectedIsArchived, selectedThread?.status, selectedThreadId, session, taskClient]);
+  }, [control.applyTimelineDelta, control.hydrateThread, control.status, ensureTimelineCache, persistTimelineCache, rejectCredentials, selectedIsArchived, selectedThread?.status, selectedThreadId, session, taskClient]);
 
   useEffect(() => {
     const previous = connectionStatusRef.current;

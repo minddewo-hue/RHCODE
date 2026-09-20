@@ -103,18 +103,39 @@ export function shouldReloadCompletedThreadHistory(options: {
 }
 
 /** True when opened history still looks user-heavy and likely missing AI replies. */
+/**
+ * Whether an openThread payload looks incomplete.
+ *
+ * Primary signal (sync plan §3.2 支柱三): orderKey completeness. When the
+ * client already holds a cursor for the thread (`localMaxOrderKey`), a
+ * rebuild whose largest orderKey reaches it covers everything we had before
+ * — not sparse, no retry storm. A smaller max means the desktop restarted
+ * the scale (or the payload is stale) and the caller should refetch.
+ *
+ * Without a local cursor (first open) this falls back to the legacy
+ * assistant-vs-user heuristic, which catches resumes that are still missing
+ * assistant finals.
+ */
 export function isSparseThreadHistory(
-  timeline: ReadonlyArray<Pick<TimelineItem, "threadId" | "kind">>,
+  timeline: ReadonlyArray<Pick<TimelineItem, "threadId" | "kind" | "orderKey">>,
   threadId: string | null | undefined,
+  localMaxOrderKey = 0,
 ): boolean {
   if (!threadId) return false;
   let users = 0;
   let assistants = 0;
+  let maxOrderKey = 0;
+  let sawOrderKey = false;
   for (const item of timeline) {
     if (item.threadId !== threadId) continue;
     if (item.kind === "user") users += 1;
     if (item.kind === "assistant") assistants += 1;
+    if (typeof item.orderKey === "number" && item.orderKey > 0) {
+      sawOrderKey = true;
+      maxOrderKey = Math.max(maxOrderKey, item.orderKey);
+    }
   }
+  if (sawOrderKey && localMaxOrderKey > 0) return maxOrderKey < localMaxOrderKey;
   return users > 0 && assistants < users;
 }
 

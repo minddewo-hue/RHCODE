@@ -21,14 +21,12 @@ import {
   Image,
   KeyboardAvoidingView,
   Modal,
-  PanResponder,
   Platform,
   Pressable,
   RefreshControl,
   StyleSheet,
   Text,
   TextInput,
-  useWindowDimensions,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -41,11 +39,7 @@ import {
   assistantDisplayContent,
   buildChatEntries,
   composerInteractionState,
-  conversationPageSwipeDirection,
   conversationTurnScrollPlan,
-  countActivityEntries,
-  isResultEntry,
-  shouldCaptureConversationPageSwipe,
   type ChatEntry,
   type PendingMessage,
 } from "./chat-screen-model";
@@ -98,60 +92,21 @@ interface ChatScreenProps {
   onApproval: (id: string, decision: "approved" | "declined") => void;
   onSubmitInput: (id: string, answers: UserInputAnswers) => void;
 }
-type ConversationPage = "result" | "activity";
-
 export function ChatScreen(props: ChatScreenProps) {
-  const resultListRef = useRef<FlatList<ChatEntry>>(null);
-  const activityListRef = useRef<FlatList<ChatEntry>>(null);
-  const { width: pageWidth } = useWindowDimensions();
-  const [activePage, setActivePage] = useState<ConversationPage>("result");
+  const listRef = useRef<FlatList<ChatEntry>>(null);
   const [taskMenuVisible, setTaskMenuVisible] = useState(false);
   const [attachmentMenuVisible, setAttachmentMenuVisible] = useState(false);
   const [conversationOutlineVisible, setConversationOutlineVisible] = useState(false);
-  const activePageRef = useRef(activePage);
-  const pageWidthRef = useRef(pageWidth);
-  activePageRef.current = activePage;
-  pageWidthRef.current = pageWidth;
-  const pagerSwipeResponder = useRef(PanResponder.create({
-    onMoveShouldSetPanResponderCapture: (_, gesture) => {
-      if (!shouldCaptureConversationPageSwipe(gesture.dx, gesture.dy)) return false;
-      return activePageRef.current === "result" ? gesture.dx < 0 : gesture.dx > 0;
-    },
-    onPanResponderRelease: (_, gesture) => {
-      const direction = conversationPageSwipeDirection(
-        gesture.dx,
-        gesture.dy,
-        gesture.vx,
-        pageWidthRef.current,
-      );
-      const targetPage = direction === "next"
-        ? "activity"
-        : direction === "previous"
-          ? "result"
-          : null;
-      if (!targetPage || targetPage === activePageRef.current) return;
-      activePageRef.current = targetPage;
-      setActivePage(targetPage);
-    },
-    onPanResponderTerminationRequest: () => false,
-  })).current;
-  const entries = useMemo(() => buildChatEntries(props, activePage === "activity"), [
-    activePage,
+  // Mobile intentionally renders only the conversation body (user/assistant).
+  // Intermediate thinking/tool-call activity stays desktop-only.
+  const entries = useMemo(() => buildChatEntries(props, false), [
     props.approvals,
     props.pendingMessages,
     props.selectedThreadId,
     props.timeline,
     props.userInputs,
   ]);
-  const resultEntries = useMemo(() => entries.filter(isResultEntry), [entries]);
-  const activityEntries = useMemo(() => entries.filter((entry) => !isResultEntry(entry)), [entries]);
-  const resultTurnCount = useMemo(() => resultEntries.filter(isUserChatEntry).length, [resultEntries]);
-  const activityCount = useMemo(() => countActivityEntries(props), [
-    props.approvals,
-    props.selectedThreadId,
-    props.timeline,
-    props.userInputs,
-  ]);
+  const resultTurnCount = useMemo(() => entries.filter(isUserChatEntry).length, [entries]);
   const threadRunning = props.thread?.status === "running";
   const composerState = composerInteractionState({
     hasConversation: Boolean(props.selectedThreadId || props.newThreadDraft),
@@ -164,14 +119,8 @@ export function ChatScreen(props: ChatScreenProps) {
     || props.sending;
 
   useEffect(() => {
-    setActivePage("result");
     setConversationOutlineVisible(false);
   }, [props.selectedThreadId]);
-
-  const selectPage = (page: ConversationPage) => {
-    activePageRef.current = page;
-    setActivePage(page);
-  };
 
   return (
     <KeyboardAvoidingView
@@ -196,21 +145,7 @@ export function ChatScreen(props: ChatScreenProps) {
           </View>
         </View>
         <View style={styles.headerActions}>
-          <HeaderPageButton
-            accessibilityLabel="对话"
-            active={activePage === "result"}
-            icon="message-circle"
-            onPress={() => selectPage("result")}
-          />
-          <HeaderPageButton
-            accessibilityLabel="执行过程"
-            active={activePage === "activity"}
-            badge={activityCount}
-            icon="activity"
-            running={threadRunning}
-            onPress={() => selectPage("activity")}
-          />
-          {activePage === "result" && resultTurnCount > 1 && (
+          {resultTurnCount > 1 && (
             <IconButton
               accessibilityLabel="打开对话目录"
               icon="list-outline"
@@ -252,14 +187,12 @@ export function ChatScreen(props: ChatScreenProps) {
         </Pressable>
       )}
 
-      <View {...pagerSwipeResponder.panHandlers} style={styles.pager}>
+      <View style={styles.pager}>
         <ConversationList
-          activityListRef={activityListRef}
-          activePage={activePage}
-          entries={activePage === "result" ? resultEntries : activityEntries}
+          entries={entries}
           hasThread={Boolean(props.selectedThreadId || props.newThreadDraft)}
+          listRef={listRef}
           props={props}
-          resultListRef={resultListRef}
           outlineVisible={conversationOutlineVisible}
           onCloseOutline={() => setConversationOutlineVisible(false)}
           visible
@@ -451,85 +384,15 @@ function AttachmentMenuOption({ icon, label, onPress }: {
   );
 }
 
-function HeaderPageButton({ accessibilityLabel, active, badge, icon, onPress, running = false }: {
-  accessibilityLabel: string;
-  active: boolean;
-  badge?: number;
-  icon: "activity" | "message-circle";
-  onPress: () => void;
-  running?: boolean;
-}) {
-  return (
-    <Pressable
-      accessibilityLabel={accessibilityLabel}
-      accessibilityRole="tab"
-      accessibilityState={{ selected: active, busy: running }}
-      hitSlop={6}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.headerPageButton,
-        active && styles.headerPageButtonActive,
-        pressed && styles.iconPressed,
-      ]}
-    >
-      {icon === "activity"
-        ? <ActivityWaveIcon active={active} running={running} />
-        : <Feather color={active ? colors.ink : colors.inkMuted} name={icon} size={19} />}
-      {!!badge && (
-        <View style={styles.headerPageBadge}>
-          <Text style={styles.headerPageBadgeText}>
-            {badge > 99 ? "99+" : badge}
-          </Text>
-        </View>
-      )}
-    </Pressable>
-  );
-}
-
-function ActivityWaveIcon({ active, running }: { active: boolean; running: boolean }) {
-  const pulse = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    if (!running) {
-      pulse.stopAnimation();
-      pulse.setValue(0);
-      return;
-    }
-
-    const animation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, { toValue: 1, duration: 460, useNativeDriver: true }),
-        Animated.timing(pulse, { toValue: 0, duration: 590, useNativeDriver: true }),
-      ]),
-    );
-    animation.start();
-    return () => animation.stop();
-  }, [pulse, running]);
-
-  return (
-    <Animated.View
-      style={{
-        opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [running ? 0.62 : 1, 1] }),
-        transform: [{ scaleY: pulse.interpolate({ inputRange: [0, 1], outputRange: [running ? 0.72 : 1, 1.22] }) }],
-      }}
-    >
-      <Feather color={active ? colors.ink : colors.inkMuted} name="activity" size={19} />
-    </Animated.View>
-  );
-}
-
-function ConversationList({ activityListRef, activePage, entries, hasThread, onCloseOutline, outlineVisible, props, resultListRef, visible }: {
-  activityListRef: React.RefObject<FlatList<ChatEntry> | null>;
-  activePage: ConversationPage;
+function ConversationList({ entries, hasThread, listRef, onCloseOutline, outlineVisible, props, visible }: {
   entries: ChatEntry[];
   hasThread: boolean;
+  listRef: React.RefObject<FlatList<ChatEntry> | null>;
   props: ChatScreenProps;
-  resultListRef: React.RefObject<FlatList<ChatEntry> | null>;
   outlineVisible: boolean;
   onCloseOutline: () => void;
   visible: boolean;
 }) {
-  const listRef = activePage === "result" ? resultListRef : activityListRef;
   const [visibleCount, setVisibleCount] = useState(10);
   const [pullRefreshing, setPullRefreshing] = useState(false);
   const [isNearBottom, setIsNearBottom] = useState(true);
@@ -646,7 +509,7 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, onC
     setIsNearBottom(true);
     setUnreadUpdates(0);
     previousEntryCount.current = entries.length;
-  }, [activePage, props.selectedThreadId]);
+  }, [props.selectedThreadId]);
 
   useEffect(() => () => cancelOutlineScroll(), []);
 
@@ -662,7 +525,7 @@ function ConversationList({ activityListRef, activePage, entries, hasThread, onC
       refreshControl={(
         <RefreshControl refreshing={pullRefreshing} onRefresh={refreshFromPull} tintColor={colors.ink} />
       )}
-      ListEmptyComponent={<EmptyConversation hasThread={hasThread} loading={props.historyLoading} page={activePage} />}
+      ListEmptyComponent={<EmptyConversation hasThread={hasThread} loading={props.historyLoading} />}
       onContentSizeChange={() => {
         if (!visibleEntries.length) return;
         if (!didInitialScroll.current) {
@@ -890,7 +753,7 @@ function IconButton({
   );
 }
 
-function EmptyConversation({ hasThread, loading, page }: { hasThread: boolean; loading: boolean; page: ConversationPage }) {
+function EmptyConversation({ hasThread, loading }: { hasThread: boolean; loading: boolean }) {
   if (loading) {
     return (
       <View style={styles.emptyState}>
@@ -902,10 +765,10 @@ function EmptyConversation({ hasThread, loading, page }: { hasThread: boolean; l
   return (
     <View style={styles.emptyState}>
       <View style={styles.codexMark}>
-        <Feather color={colors.accent} name={page === "result" ? "message-square" : "terminal"} size={20} />
+        <Feather color={colors.accent} name="message-square" size={20} />
       </View>
       <Text style={styles.emptyTitle}>
-        {page === "activity" ? "暂无执行过程" : hasThread ? "对话已就绪" : "开始一个任务"}
+        {hasThread ? "对话已就绪" : "开始一个任务"}
       </Text>
     </View>
   );

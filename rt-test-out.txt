@@ -1,0 +1,352 @@
+﻿TAP version 13
+# Subtest: restores desktop threads without reviving active RPC states
+ok 1 - restores desktop threads without reviving active RPC states
+  ---
+  duration_ms: 7.1359
+  type: 'test'
+  ...
+# Subtest: starts the agent without waiting for sync startup
+ok 2 - starts the agent without waiting for sync startup
+  ---
+  duration_ms: 1.7294
+  type: 'test'
+  ...
+# Subtest: restarts the Agent Host before retrying a thread that was not submitted
+ok 3 - restarts the Agent Host before retrying a thread that was not submitted
+  ---
+  duration_ms: 2.3239
+  type: 'test'
+  ...
+# Subtest: opens a mobile-created empty thread before its rollout exists
+ok 4 - opens a mobile-created empty thread before its rollout exists
+  ---
+  duration_ms: 15.3993
+  type: 'test'
+  ...
+# Subtest: opens an active thread after its new rollout metadata is written
+ok 5 - opens an active thread after its new rollout metadata is written
+  ---
+  duration_ms: 95.6668
+  type: 'test'
+  ...
+# Subtest: reuses a resumed thread detail until the thread changes
+ok 6 - reuses a resumed thread detail until the thread changes
+  ---
+  duration_ms: 7.3288
+  type: 'test'
+  ...
+# Subtest: reads rollout history without resuming until the next turn is sent
+ok 7 - reads rollout history without resuming until the next turn is sent
+  ---
+  duration_ms: 36.6116
+  type: 'test'
+  ...
+# Subtest: resumes sparse local history so assistant replies are not dropped
+ok 8 - resumes sparse local history so assistant replies are not dropped
+  ---
+  duration_ms: 30.6858
+  type: 'test'
+  ...
+# Subtest: prefers recovered assistant history over a longer user-only rollout
+ok 9 - prefers recovered assistant history over a longer user-only rollout
+  ---
+  duration_ms: 10.3049
+  type: 'test'
+  ...
+# Subtest: mobile openThread restores a newest turn missing entirely from a balanced local rollout
+ok 10 - mobile openThread restores a newest turn missing entirely from a balanced local rollout
+  ---
+  duration_ms: 8.1882
+  type: 'test'
+  ...
+# Subtest: mobile openThread retains the newest local question while a completed resume catches up
+ok 11 - mobile openThread retains the newest local question while a completed resume catches up
+  ---
+  duration_ms: 10.36
+  type: 'test'
+  ...
+# Subtest: mobile openThread returns local sparse history when resume exceeds budget
+ok 12 - mobile openThread returns local sparse history when resume exceeds budget
+  ---
+  duration_ms: 281.8343
+  type: 'test'
+  ...
+# Subtest: hydrates historical messages for mobile thread opening
+ok 13 - hydrates historical messages for mobile thread opening
+  ---
+  duration_ms: 6.1456
+  type: 'test'
+  ...
+# Subtest: keeps the persisted model when resume reports a different default
+ok 14 - keeps the persisted model when resume reports a different default
+  ---
+  duration_ms: 3.7081
+  type: 'test'
+  ...
+# Subtest: persists a thread model as soon as it is selected
+ok 15 - persists a thread model as soon as it is selected
+  ---
+  duration_ms: 3.7252
+  type: 'test'
+  ...
+# Subtest: deletes a local empty thread before its rollout exists
+ok 16 - deletes a local empty thread before its rollout exists
+  ---
+  duration_ms: 2.3223
+  type: 'test'
+  ...
+# Subtest: deletes a local empty thread whose rollout file has no metadata yet
+ok 17 - deletes a local empty thread whose rollout file has no metadata yet
+  ---
+  duration_ms: 1.4849
+  type: 'test'
+  ...
+# Subtest: permanently removes a local thread when only App Server index cleanup fails
+ok 18 - permanently removes a local thread when only App Server index cleanup fails
+  ---
+  duration_ms: 1.2935
+  type: 'test'
+  ...
+# Subtest: permanently deletes a thread rollout from disk
+ok 19 - permanently deletes a thread rollout from disk
+  ---
+  duration_ms: 24.8404
+  type: 'test'
+  ...
+# Subtest: keeps a thread rollout until App Server index cleanup settles
+ok 20 - keeps a thread rollout until App Server index cleanup settles
+  ---
+  duration_ms: 30.0526
+  type: 'test'
+  ...
+# Subtest: permanently deletes every project conversation but keeps source files
+ok 21 - permanently deletes every project conversation but keeps source files
+  ---
+  duration_ms: 24.6651
+  type: 'test'
+  ...
+# Subtest: finishes project deletion when App Server has lost its thread index
+ok 22 - finishes project deletion when App Server has lost its thread index
+  ---
+  duration_ms: 26.9783
+  type: 'test'
+  ...
+# Subtest: lists restored disk conversations when App Server index is empty
+ok 23 - lists restored disk conversations when App Server index is empty
+  ---
+  duration_ms: 20.6757
+  type: 'test'
+  ...
+# Subtest: removes resumed rollout copies from the shared control snapshot
+ok 24 - removes resumed rollout copies from the shared control snapshot
+  ---
+  duration_ms: 19.9074
+  type: 'test'
+  ...
+# Subtest: restores local images as message previews instead of placeholder text
+ok 25 - restores local images as message previews instead of placeholder text
+  ---
+  duration_ms: 4.1215
+  type: 'test'
+  ...
+# Subtest: stores generated images before forwarding completion events to desktop and mobile
+ok 26 - stores generated images before forwarding completion events to desktop and mobile
+  ---
+  duration_ms: 16.6388
+  type: 'test'
+  ...
+# Subtest: restores generated images from thread history for desktop and mobile
+ok 27 - restores generated images from thread history for desktop and mobile
+  ---
+  duration_ms: 7.3289
+  type: 'test'
+  ...
+# Subtest: restores rollout images omitted by App Server thread history
+ok 28 - restores rollout images omitted by App Server thread history
+  ---
+  duration_ms: 25.9459
+  type: 'test'
+  ...
+# Subtest: publishes a rollout image when App Server completes its turn
+ok 29 - publishes a rollout image when App Server completes its turn
+  ---
+  duration_ms: 11.4959
+  type: 'test'
+  ...
+# Subtest: forwards user answers without storing secret values
+ok 30 - forwards user answers without storing secret values
+  ---
+  duration_ms: 1.9298
+  type: 'test'
+  ...
+# Subtest: publishes agent messages as plain assistant content without user metadata rows
+ok 31 - publishes agent messages as plain assistant content without user metadata rows
+  ---
+  duration_ms: 1.4594
+  type: 'test'
+  ...
+# Subtest: submits remote user input only for pending question IDs
+ok 32 - submits remote user input only for pending question IDs
+  ---
+  duration_ms: 2.3687
+  type: 'test'
+  ...
+# Subtest: grants requested permissions for one turn and denies with an empty profile
+ok 33 - grants requested permissions for one turn and denies with an empty profile
+  ---
+  duration_ms: 2.5462
+  type: 'test'
+  ...
+# Subtest: overrides the model, approval policy, and reasoning effort on an existing thread
+ok 34 - overrides the model, approval policy, and reasoning effort on an existing thread
+  ---
+  duration_ms: 2.1224
+  type: 'test'
+  ...
+# Subtest: compacts an oversized thread with its last successful model before switching
+ok 35 - compacts an oversized thread with its last successful model before switching
+  ---
+  duration_ms: 11.7496
+  type: 'test'
+  ...
+# Subtest: returns one canonical mobile user row with its client message id
+ok 36 - returns one canonical mobile user row with its client message id
+  ---
+  duration_ms: 3.4276
+  type: 'test'
+  ...
+# Subtest: updates Agent Host settings before switching an image thread to a text model
+ok 37 - updates Agent Host settings before switching an image thread to a text model
+  ---
+  duration_ms: 8.3313
+  type: 'test'
+  ...
+# Subtest: resumes an unloaded existing thread through the internal gateway before starting a turn
+ok 38 - resumes an unloaded existing thread through the internal gateway before starting a turn
+  ---
+  duration_ms: 1.8616
+  type: 'test'
+  ...
+# Subtest: routes concurrent turn events to the matching thread
+ok 39 - routes concurrent turn events to the matching thread
+  ---
+  duration_ms: 1.1814
+  type: 'test'
+  ...
+# Subtest: finalizes running timeline items when a turn is interrupted
+ok 40 - finalizes running timeline items when a turn is interrupted
+  ---
+  duration_ms: 2.0487
+  type: 'test'
+  ...
+# Subtest: limits workspace-write sandbox roots and maps attachments to App Server input
+ok 41 - limits workspace-write sandbox roots and maps attachments to App Server input
+  ---
+  duration_ms: 11.7792
+  type: 'test'
+  ...
+# Subtest: publishes generated document artifacts as downloadable assistant files
+ok 42 - publishes generated document artifacts as downloadable assistant files
+  ---
+  duration_ms: 22.045
+  type: 'test'
+  ...
+# Subtest: publishes locally generated image links as inline assistant images
+ok 43 - publishes locally generated image links as inline assistant images
+  ---
+  duration_ms: 10.2408
+  type: 'test'
+  ...
+# Subtest: restores an existing local image link when opening an older thread
+ok 44 - restores an existing local image link when opening an older thread
+  ---
+  duration_ms: 11.7671
+  type: 'test'
+  ...
+# Subtest: keeps repeated App Server item ids unique across restored turns
+ok 45 - keeps repeated App Server item ids unique across restored turns
+  ---
+  duration_ms: 2.1663
+  type: 'test'
+  ...
+# Subtest: does not restore an uploaded file after the user deletes the original
+ok 46 - does not restore an uploaded file after the user deletes the original
+  ---
+  duration_ms: 4.8112
+  type: 'test'
+  ...
+# Subtest: executes remote commands through desktop authority with safe defaults
+ok 47 - executes remote commands through desktop authority with safe defaults
+  ---
+  duration_ms: 12.6548
+  type: 'test'
+  ...
+# Subtest: executes remote thread lifecycle commands and rehydrates restored state
+ok 48 - executes remote thread lifecycle commands and rehydrates restored state
+  ---
+  duration_ms: 10.3231
+  type: 'test'
+  ...
+# Subtest: executes remote conversation compaction through App Server
+ok 49 - executes remote conversation compaction through App Server
+  ---
+  duration_ms: 1.7498
+  type: 'test'
+  ...
+# Subtest: deletes archived remote threads and publishes one removal event
+ok 50 - deletes archived remote threads and publishes one removal event
+  ---
+  duration_ms: 2.585
+  type: 'test'
+  ...
+# Subtest: keeps archived listings out of the active control snapshot
+ok 51 - keeps archived listings out of the active control snapshot
+  ---
+  duration_ms: 1.9753
+  type: 'test'
+  ...
+# Subtest: forwards server-side thread search and archive operations
+ok 52 - forwards server-side thread search and archive operations
+  ---
+  duration_ms: 1.6587
+  type: 'test'
+  ...
+# Subtest: lists, deduplicates, and sorts skills from App Server
+ok 53 - lists, deduplicates, and sorts skills from App Server
+  ---
+  duration_ms: 1.587
+  type: 'test'
+  ...
+# Subtest: writes skill enabled state through App Server
+ok 54 - writes skill enabled state through App Server
+  ---
+  duration_ms: 1.1079
+  type: 'test'
+  ...
+# Subtest: renames and permanently deletes threads through App Server
+ok 55 - renames and permanently deletes threads through App Server
+  ---
+  duration_ms: 1.3545
+  type: 'test'
+  ...
+# Subtest: keeps App Server retries running and fails only on the terminal error
+ok 56 - keeps App Server retries running and fails only on the terminal error
+  ---
+  duration_ms: 1.7907
+  type: 'test'
+  ...
+# Subtest: fails a turn when a terminal gateway error receives no App Server completion
+ok 57 - fails a turn when a terminal gateway error receives no App Server completion
+  ---
+  duration_ms: 26.8141
+  type: 'test'
+  ...
+1..57
+# tests 57
+# suites 0
+# pass 57
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2538.9842

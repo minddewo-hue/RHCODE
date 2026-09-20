@@ -1036,6 +1036,7 @@ test("restores local images as message previews instead of placeholder text", as
   assert.deepEqual(detail.messages, [{
     id: "turn-image::user-image",
     role: "user",
+    orderKey: 1,
     content: "see",
     images: [{ path: imagePath, name: "screen.png" }],
   }]);
@@ -1070,6 +1071,7 @@ test("stores generated images before forwarding completion events to desktop and
       status: "completed",
       title: "",
       content: "",
+      orderKey: 1,
       images: [{
         id: String(item.name),
         name: String(item.name),
@@ -1276,6 +1278,7 @@ test("publishes agent messages as plain assistant content without user metadata 
     status: "completed",
     title: "",
     content: "Plain response body",
+    orderKey: 1,
     createdAt: store.snapshot().timeline[0]?.createdAt,
   }]);
   assert.doesNotMatch(JSON.stringify(store.snapshot().timeline), /userMessage|Agent activity/);

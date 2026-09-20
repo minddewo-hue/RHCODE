@@ -269,6 +269,15 @@ export function storedSelectedModel(): string {
   return localStorage.getItem("rhzycode.selectedModel") || "";
 }
 
+export function storeSelectedModel(model: string): void {
+  if (model) localStorage.setItem("rhzycode.selectedModel", model);
+}
+
+// "default" and "previous" are placeholders, not real model ids.
+export function isUsableThreadModel(model: string | undefined): model is string {
+  return Boolean(model) && model !== "default" && model !== "previous";
+}
+
 export function preferredModelFromCatalog(models: ModelOption[], preferredModel: string): string {
   return models.some((model) => model.model === preferredModel)
     ? preferredModel

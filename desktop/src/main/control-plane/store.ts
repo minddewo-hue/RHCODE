@@ -8,7 +8,7 @@ import type {
   TimelineItem,
   UserInputRequest,
 } from "@rhzycode/protocol";
-import { preferTimelineItem } from "@rhzycode/protocol";
+import { compareTimelineOrder, preferTimelineItem } from "@rhzycode/protocol";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { desktopHostPlatform } from "../platform/desktop-platform";
@@ -22,6 +22,8 @@ export interface ControlStoreState {
   snapshot: ControlSnapshot;
   events: AgentEvent[];
   commandReplays?: PersistedCommandReplay[];
+  /** Per-thread orderKey counters so live keys survive a restart. */
+  orderCounters?: Record<string, number>;
 }
 
 export interface PersistedCommandReplay {
@@ -49,6 +51,9 @@ export class ControlStore extends EventEmitter {
   private events: AgentEvent[] = [];
   private sequence = 0;
   private commandReplays = new Map<string, PersistedCommandReplay>();
+  /** Per-thread monotonic orderKey counters; the key assigned at first
+   *  creation is the item's position in the thread's generation order. */
+  private orderCounters = new Map<string, number>();
 
   constructor(state?: ControlStoreState | null) {
     super();
@@ -72,7 +77,7 @@ export class ControlStore extends EventEmitter {
       hosts: [...this.hosts.values()],
       projects: [...this.projects],
       threads: [...this.threads.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
-      timeline: [...this.timeline.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+      timeline: [...this.timeline.values()].sort(compareTimelineOrder),
       approvals: [...this.approvals.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
       userInputs: [...this.userInputs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
       lastSequence: this.sequence,
@@ -107,7 +112,19 @@ export class ControlStore extends EventEmitter {
       // Persisting every accumulated streaming revision duplicates large content.
       events: this.events.filter(isPersistedEvent),
       commandReplays: this.listCommandReplays(),
+      orderCounters: Object.fromEntries(this.orderCounters),
     };
+  }
+
+  /**
+   * Anchor a thread's orderKey counter above a known history size (e.g. after
+   * an openThread rebuild assigns keys 1..N) so the next live item continues
+   * after the whole history instead of colliding with it.
+   */
+  noteOrderBaseline(threadId: string, baseline: number): void {
+    if (!Number.isFinite(baseline) || baseline <= 0) return;
+    const current = this.orderCounters.get(threadId) || 0;
+    if (baseline > current) this.orderCounters.set(threadId, baseline);
   }
 
   getCommandReplay(key: string): PersistedCommandReplay | null {
@@ -169,7 +186,7 @@ export class ControlStore extends EventEmitter {
 
   publish(input: AgentEventInput): AgentEvent {
     const normalizedInput = input.type === "timeline.upserted"
-      ? { ...input, item: normalizeTimelineIdentity(input.item) }
+      ? { ...input, item: this.withOrderKey(normalizeTimelineIdentity(input.item)) }
       : input;
     const event = { ...normalizedInput, sequence: ++this.sequence } as AgentEvent;
     this.apply(event);
@@ -182,6 +199,25 @@ export class ControlStore extends EventEmitter {
   onEvent(listener: (event: AgentEvent) => void): () => void {
     this.on("event", listener);
     return () => this.off("event", listener);
+  }
+
+  /**
+   * Assign the thread's next orderKey on first creation of an identity;
+   * streaming upserts of an existing identity carry no key and keep the first
+   * one (preferTimelineItem/mergeDuplicateTimelineItems retain the minimum).
+   * Items that already carry a key (history rebuilds, restored state) only
+   * bump the counter so the live stream continues after them.
+   */
+  private withOrderKey(item: TimelineItem): TimelineItem {
+    const counter = this.orderCounters.get(item.threadId) || 0;
+    if (item.orderKey !== undefined) {
+      if (item.orderKey > counter) this.orderCounters.set(item.threadId, item.orderKey);
+      return item;
+    }
+    if (this.timeline.has(timelineIdentityKey(item))) return item;
+    const orderKey = counter + 1;
+    this.orderCounters.set(item.threadId, orderKey);
+    return { ...item, orderKey };
   }
 
   private apply(event: AgentEvent): void {
@@ -204,10 +240,21 @@ export class ControlStore extends EventEmitter {
     for (const host of state.snapshot.hosts) this.hosts.set(host.id, host);
     this.projects = [...(state.snapshot.projects || [])];
     for (const thread of state.snapshot.threads) this.threads.set(thread.id, thread);
+    const counters = new Map<string, number>();
+    for (const [threadId, value] of Object.entries(state.orderCounters || {})) {
+      if (Number.isFinite(value) && value >= 0) counters.set(threadId, value);
+    }
+    // Legacy persisted rows may predate orderKey: backfill them in stored
+    // (stable) order so every thread has a consistent scale after restart.
     for (const rawItem of state.snapshot.timeline.slice(-maxTimelineItems)) {
       const item = normalizeTimelineIdentity(rawItem);
-      this.timeline.set(timelineIdentityKey(item), item);
+      const counter = counters.get(item.threadId) || 0;
+      const orderKey = item.orderKey ?? counter + 1;
+      if (orderKey > counter) counters.set(item.threadId, orderKey);
+      const ordered = { ...item, orderKey };
+      this.timeline.set(timelineIdentityKey(ordered), ordered);
     }
+    this.orderCounters = counters;
     this.events = state.events.filter(isDurableEvent).slice(-maxEvents);
     for (const entry of state.commandReplays || []) {
       if (isPersistedCommandReplay(entry)) this.commandReplays.set(entry.key, entry);
@@ -257,8 +304,13 @@ function durableTimelineItem(item: TimelineItem): TimelineItem {
 }
 
 function normalizeTimelineIdentity(item: TimelineItem): TimelineItem {
+  // Turn-scoped ids are already stable per logical message, so they double as
+  // the logicalId. Unscoped provisional ids (user-*, streaming fallbacks) do
+  // not get one: their canonical row arrives under the turn-scoped identity
+  // and is collapsed by the content-based fallbacks.
   const logicalId = item.logicalId
-    || (item.clientMessageId ? `client-message:${item.clientMessageId}` : undefined);
+    || (item.clientMessageId ? `client-message:${item.clientMessageId}` : undefined)
+    || (item.id.includes("::") ? item.id : undefined);
   return {
     ...item,
     ...(logicalId ? { logicalId } : {}),

@@ -1,0 +1,2136 @@
+﻿
+> rhzycode@0.1.0 check
+> npm run typecheck && npm run test
+
+
+> rhzycode@0.1.0 typecheck
+> npm run typecheck --workspaces --if-present
+
+
+> @rhzycode/desktop@0.1.28 typecheck
+> tsc --noEmit
+
+
+> @rhzycode/mobile@0.1.41 typecheck
+> tsc --noEmit
+
+
+> @rhzycode/protocol@0.1.0 typecheck
+> tsc --noEmit
+
+
+> rhzycode@0.1.0 test
+> npm run test --workspaces --if-present
+
+
+> @rhzycode/appupdate@0.1.0 test
+> node --test
+
+TAP version 13
+# Subtest: stages releases directly in the transfer server project
+ok 1 - stages releases directly in the transfer server project
+  ---
+  duration_ms: 2.0085
+  type: 'test'
+  ...
+# Subtest: both clients check the transfer server update manifest
+ok 2 - both clients check the transfer server update manifest
+  ---
+  duration_ms: 1.0959
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 511.1213
+
+> @rhzycode/desktop@0.1.28 test
+> tsx --test test/*.test.ts test/*.test.mjs
+
+TAP version 13
+# Subtest: opts into experimental App Server methods used by the desktop runtime
+ok 1 - opts into experimental App Server methods used by the desktop runtime
+  ---
+  duration_ms: 3.3288
+  type: 'test'
+  ...
+# Subtest: accepts only approval methods from the current App Server protocol
+ok 2 - accepts only approval methods from the current App Server protocol
+  ---
+  duration_ms: 1.7935
+  type: 'test'
+  ...
+# Subtest: builds current approval requests and response payloads
+ok 3 - builds current approval requests and response payloads
+  ---
+  duration_ms: 4.004
+  type: 'test'
+  ...
+# Subtest: encrypts and restores durable control-plane state
+ok 4 - encrypts and restores durable control-plane state
+  ---
+  duration_ms: 32.1099
+  type: 'test'
+  ...
+# Subtest: defers persistence until a streaming timeline item reaches a durable state
+ok 5 - defers persistence until a streaming timeline item reaches a durable state
+  ---
+  duration_ms: 461.5893
+  type: 'test'
+  ...
+# Subtest: persists only recent control-plane timeline activity
+ok 6 - persists only recent control-plane timeline activity
+  ---
+  duration_ms: 2.117
+  type: 'test'
+  ...
+# Subtest: reports missing, partial, invalid, and unavailable restore states
+ok 7 - reports missing, partial, invalid, and unavailable restore states
+  ---
+  duration_ms: 19.9353
+  type: 'test'
+  ...
+# Subtest: resolves a pending approval exactly once
+ok 8 - resolves a pending approval exactly once
+  ---
+  duration_ms: 307.8368
+  type: 'test'
+  ...
+# Subtest: resolves user input without persisting answers
+ok 9 - resolves user input without persisting answers
+  ---
+  duration_ms: 14.7811
+  type: 'test'
+  ...
+# Subtest: restores durable state without reviving pending requests
+ok 10 - restores durable state without reviving pending requests
+  ---
+  duration_ms: 1.4131
+  type: 'test'
+  ...
+# Subtest: uses one persistent desktop access key and invalidates it on rotation
+ok 11 - uses one persistent desktop access key and invalidates it on rotation
+  ---
+  duration_ms: 301.8998
+  type: 'test'
+  ...
+# Subtest: authenticates event replay with the persistent key subprotocol
+ok 12 - authenticates event replay with the persistent key subprotocol
+  ---
+  duration_ms: 101.202
+  type: 'test'
+  ...
+# Subtest: closes the active WebSocket when the desktop replaces the key
+ok 13 - closes the active WebSocket when the desktop replaces the key
+  ---
+  duration_ms: 57.9033
+  type: 'test'
+  ...
+# Subtest: restores valid encrypted access state while discarding malformed audit records
+ok 14 - restores valid encrypted access state while discarding malformed audit records
+  ---
+  duration_ms: 1.5328
+  type: 'test'
+  ...
+# Subtest: serves only managed generated images with mobile authentication
+ok 15 - serves only managed generated images with mobile authentication
+  ---
+  duration_ms: 48.0054
+  type: 'test'
+  ...
+# Subtest: downloads only managed conversation files with mobile authentication
+ok 16 - downloads only managed conversation files with mobile authentication
+  ---
+  duration_ms: 34.8368
+  type: 'test'
+  ...
+# Subtest: delegates authenticated mobile task commands to desktop handlers
+ok 17 - delegates authenticated mobile task commands to desktop handlers
+  ---
+  duration_ms: 329.2623
+  type: 'test'
+  ...
+# Subtest: maps unavailable and rejected desktop commands to stable HTTP errors
+ok 18 - maps unavailable and rejected desktop commands to stable HTTP errors
+  ---
+  duration_ms: 40.0613
+  type: 'test'
+  ...
+# Subtest: publishes and restores authoritative desktop project directories
+ok 19 - publishes and restores authoritative desktop project directories
+  ---
+  duration_ms: 7.9596
+  type: 'test'
+  ...
+# Subtest: backs up active and archived project conversations and restores them
+ok 20 - backs up active and archived project conversations and restores them
+  ---
+  duration_ms: 111.2822
+  type: 'test'
+  ...
+# Subtest: skips a restored conversation when its thread id already exists
+ok 21 - skips a restored conversation when its thread id already exists
+  ---
+  duration_ms: 46.7237
+  type: 'test'
+  ...
+# Subtest: deduplicates resumed rollout copies by their embedded session lineage
+ok 22 - deduplicates resumed rollout copies by their embedded session lineage
+  ---
+  duration_ms: 49.9983
+  type: 'test'
+  ...
+# Subtest: exports selected conversations across projects without including unselected threads
+ok 23 - exports selected conversations across projects without including unselected threads
+  ---
+  duration_ms: 67.3435
+  type: 'test'
+  ...
+# Subtest: rejects damaged backups before restoring any conversation
+ok 24 - rejects damaged backups before restoring any conversation
+  ---
+  duration_ms: 58.5697
+  type: 'test'
+  ...
+# Subtest: reports projects with no conversations instead of creating an empty backup
+ok 25 - reports projects with no conversations instead of creating an empty backup
+  ---
+  duration_ms: 3.9997
+  type: 'test'
+  ...
+# Subtest: finds project conversations and permanently deletes active and archived files
+ok 26 - finds project conversations and permanently deletes active and archived files
+  ---
+  duration_ms: 35.1996
+  type: 'test'
+  ...
+# Subtest: deletes an empty rollout by its thread id suffix
+ok 27 - deletes an empty rollout by its thread id suffix
+  ---
+  duration_ms: 7.0145
+  type: 'test'
+  ...
+# Subtest: falls back to session metadata for a legacy rollout name
+ok 28 - falls back to session metadata for a legacy rollout name
+  ---
+  duration_ms: 22.8623
+  type: 'test'
+  ...
+# Subtest: refreshes the deletion index for a conversation created after an earlier deletion
+ok 29 - refreshes the deletion index for a conversation created after an earlier deletion
+  ---
+  duration_ms: 11.0127
+  type: 'test'
+  ...
+# Subtest: stores encrypted provider credentials without exposing plaintext status
+ok 30 - stores encrypted provider credentials without exposing plaintext status
+  ---
+  duration_ms: 24.2306
+  type: 'test'
+  ...
+# Subtest: deletes a built-in provider configuration and keeps it removed after restart
+ok 31 - deletes a built-in provider configuration and keeps it removed after restart
+  ---
+  duration_ms: 22.657
+  type: 'test'
+  ...
+# Subtest: merges custom providers into a runtime config and preserves encrypted keys
+ok 32 - merges custom providers into a runtime config and preserves encrypted keys
+  ---
+  duration_ms: 38.687
+  type: 'test'
+  ...
+# Subtest: maps Node desktop platforms to protocol and update platform names
+ok 33 - maps Node desktop platforms to protocol and update platform names
+  ---
+  duration_ms: 2.6261
+  type: 'test'
+  ...
+# Subtest: uses native executable and application lifecycle conventions
+ok 34 - uses native executable and application lifecycle conventions
+  ---
+  duration_ms: 0.5644
+  type: 'test'
+  ...
+# Subtest: uses Node fetch on Linux to avoid Chromium shared-memory retention
+ok 35 - uses Node fetch on Linux to avoid Chromium shared-memory retention
+  ---
+  duration_ms: 0.3262
+  type: 'test'
+  ...
+# Subtest: uses the stable X11 backend for Linux unless the operator overrides it
+ok 36 - uses the stable X11 backend for Linux unless the operator overrides it
+  ---
+  duration_ms: 0.3707
+  type: 'test'
+  ...
+# Subtest: disables hardware acceleration by default on Linux VMware hosts
+ok 37 - disables hardware acceleration by default on Linux VMware hosts
+  ---
+  duration_ms: 2.559
+  type: 'test'
+  ...
+# Subtest: allows the hardware acceleration environment setting to override VMware detection
+ok 38 - allows the hardware acceleration environment setting to override VMware detection
+  ---
+  duration_ms: 0.3624
+  type: 'test'
+  ...
+# Subtest: prefers the system Codex when it is at least as new as the bundled copy
+ok 39 - prefers the system Codex when it is at least as new as the bundled copy
+  ---
+  duration_ms: 0.8793
+  type: 'test'
+  ...
+# Subtest: keeps the bundled Codex when the system install is older or missing
+ok 40 - keeps the bundled Codex when the system install is older or missing
+  ---
+  duration_ms: 0.5061
+  type: 'test'
+  ...
+# Subtest: compares Codex versions by numeric semver parts
+ok 41 - compares Codex versions by numeric semver parts
+  ---
+  duration_ms: 0.8157
+  type: 'test'
+  ...
+# Subtest: carries a public mobile request through the desktop reverse tunnel
+ok 42 - carries a public mobile request through the desktop reverse tunnel
+  ---
+  duration_ms: 508.6325
+  type: 'test'
+  ...
+# Subtest: buffers a mobile heartbeat while the local event socket is connecting
+ok 43 - buffers a mobile heartbeat while the local event socket is connecting
+  ---
+  duration_ms: 150.8243
+  type: 'test'
+  ...
+# Subtest: reconnects when a relay socket errors without first closing
+ok 44 - reconnects when a relay socket errors without first closing
+  ---
+  duration_ms: 71.4172
+  type: 'test'
+  ...
+# Subtest: reconnects when a half-open relay stops answering heartbeats
+ok 45 - reconnects when a half-open relay stops answering heartbeats
+  ---
+  duration_ms: 92.238
+  type: 'test'
+  ...
+# Subtest: copies valid Codex conversations without overwriting local sessions
+ok 46 - copies valid Codex conversations without overwriting local sessions
+  ---
+  duration_ms: 94.71
+  type: 'test'
+  ...
+# Subtest: reports Codex conversations skipped by stable thread ID
+ok 47 - reports Codex conversations skipped by stable thread ID
+  ---
+  duration_ms: 42.7843
+  type: 'test'
+  ...
+# Subtest: filters Claude sessions already recorded in the destination
+ok 48 - filters Claude sessions already recorded in the destination
+  ---
+  duration_ms: 40.1763
+  type: 'test'
+  ...
+# Subtest: normalizes imported provider metadata without changing conversation text
+ok 49 - normalizes imported provider metadata without changing conversation text
+  ---
+  duration_ms: 12.3365
+  type: 'test'
+  ...
+# Subtest: normalizes session providers once for the current marker version
+ok 50 - normalizes session providers once for the current marker version
+  ---
+  duration_ms: 42.8515
+  type: 'test'
+  ...
+# Subtest: retries provider normalization after invalid markers and failed runs
+ok 51 - retries provider normalization after invalid markers and failed runs
+  ---
+  duration_ms: 76.3376
+  type: 'test'
+  ...
+# Subtest: prompts for Codex and Claude separately and records the first-launch decision
+ok 52 - prompts for Codex and Claude separately and records the first-launch decision
+  ---
+  duration_ms: 61.8363
+  type: 'test'
+  ...
+# Subtest: ignores transient probe timing when comparing gateway statuses
+ok 53 - ignores transient probe timing when comparing gateway statuses
+  ---
+  duration_ms: 1.5906
+  type: 'test'
+  ...
+# Subtest: resolves the source desktop environment outside model-gateway
+ok 54 - resolves the source desktop environment outside model-gateway
+  ---
+  duration_ms: 0.3098
+  type: 'test'
+  ...
+# Subtest: keeps packaged or external gateway environments inside their root
+ok 55 - keeps packaged or external gateway environments inside their root
+  ---
+  duration_ms: 0.2326
+  type: 'test'
+  ...
+# Subtest: selects the first current gateway location containing a config
+ok 56 - selects the first current gateway location containing a config
+  ---
+  duration_ms: 8.4595
+  type: 'test'
+  ...
+# Subtest: keeps an empty fresh-install gateway stopped without an error
+ok 57 - keeps an empty fresh-install gateway stopped without an error
+  ---
+  duration_ms: 5.5121
+  type: 'test'
+  ...
+# Subtest: writes configured runtime and maximum contexts to the Codex catalog
+ok 58 - writes configured runtime and maximum contexts to the Codex catalog
+  ---
+  duration_ms: 103.153
+  type: 'test'
+  ...
+# Subtest: restores completed image generation results from a rollout
+ok 59 - restores completed image generation results from a rollout
+  ---
+  duration_ms: 27.1805
+  type: 'test'
+  ...
+# Subtest: refreshes a cached rollout path after its file moves
+ok 60 - refreshes a cached rollout path after its file moves
+  ---
+  duration_ms: 12.8157
+  type: 'test'
+  ...
+# Subtest: stores generated image results with a deterministic local path
+ok 61 - stores generated image results with a deterministic local path
+  ---
+  duration_ms: 11.5847
+  type: 'test'
+  ...
+# Subtest: imports valid saved image paths into managed storage and rejects non-image results
+ok 62 - imports valid saved image paths into managed storage and rejects non-image results
+  ---
+  duration_ms: 8.1011
+  type: 'test'
+  ...
+# Subtest: validates and normalizes thread requests
+ok 63 - validates and normalizes thread requests
+  ---
+  duration_ms: 4.6037
+  type: 'test'
+  ...
+# Subtest: rejects malformed thread requests before they reach the runtime
+ok 64 - rejects malformed thread requests before they reach the runtime
+  ---
+  duration_ms: 1.7223
+  type: 'test'
+  ...
+# Subtest: validates turn content, policies, and attachment metadata
+ok 65 - validates turn content, policies, and attachment metadata
+  ---
+  duration_ms: 1.9779
+  type: 'test'
+  ...
+# Subtest: validates credentials, clipboard, approvals, and user answers
+ok 66 - validates credentials, clipboard, approvals, and user answers
+  ---
+  duration_ms: 2.0677
+  type: 'test'
+  ...
+# Subtest: bounds terminal paths, dimensions, identifiers, and writes
+ok 67 - bounds terminal paths, dimensions, identifiers, and writes
+  ---
+  duration_ms: 0.7018
+  type: 'test'
+  ...
+# Subtest: validates skill paths, import sources, and enabled state
+ok 68 - validates skill paths, import sources, and enabled state
+  ---
+  duration_ms: 0.4484
+  type: 'test'
+  ...
+# Subtest: normalizes full OpenAI and Anthropic endpoint URLs
+ok 69 - normalizes full OpenAI and Anthropic endpoint URLs
+  ---
+  duration_ms: 2.7029
+  type: 'test'
+  ...
+# Subtest: auto-detects Chat Completions without sending a real model request
+ok 70 - auto-detects Chat Completions without sending a real model request
+  ---
+  duration_ms: 76.2641
+  type: 'test'
+  ...
+# Subtest: ignores an HTML website route and detects the API under /v1
+ok 71 - ignores an HTML website route and detects the API under /v1
+  ---
+  duration_ms: 41.1659
+  type: 'test'
+  ...
+# Subtest: probes /v1 when a protocol is selected for an origin URL
+ok 72 - probes /v1 when a protocol is selected for an origin URL
+  ---
+  duration_ms: 1.9429
+  type: 'test'
+  ...
+# Subtest: keeps a manually selected protocol when the URL hints at another one
+ok 73 - keeps a manually selected protocol when the URL hints at another one
+  ---
+  duration_ms: 0.7563
+  type: 'test'
+  ...
+# Subtest: does not save a protocol when every endpoint rejects the API key
+ok 74 - does not save a protocol when every endpoint rejects the API key
+  ---
+  duration_ms: 1.5846
+  type: 'test'
+  ...
+# Subtest: uses an explicitly selected full endpoint without probing the network
+ok 75 - uses an explicitly selected full endpoint without probing the network
+  ---
+  duration_ms: 0.4613
+  type: 'test'
+  ...
+# Subtest: registers uploaded files without copying or persisting user data
+ok 76 - registers uploaded files without copying or persisting user data
+  ---
+  duration_ms: 10.0453
+  type: 'test'
+  ...
+# Subtest: copies and persists uploaded images after the temporary source is removed
+ok 77 - copies and persists uploaded images after the temporary source is removed
+  ---
+  duration_ms: 26.205
+  type: 'test'
+  ...
+# Subtest: deduplicates repeated uploaded image records when listing a turn
+ok 78 - deduplicates repeated uploaded image records when listing a turn
+  ---
+  duration_ms: 12.2297
+  type: 'test'
+  ...
+# Subtest: keeps every original image in a multi-image rollout turn
+ok 79 - keeps every original image in a multi-image rollout turn
+  ---
+  duration_ms: 46.1109
+  type: 'test'
+  ...
+# Subtest: collects supported document and image artifacts inside the active project
+ok 80 - collects supported document and image artifacts inside the active project
+  ---
+  duration_ms: 7.6976
+  type: 'test'
+  ...
+# Subtest: lists and opens local conversations when App Server is offline
+ok 81 - lists and opens local conversations when App Server is offline
+  ---
+  duration_ms: 54.666
+  type: 'test'
+  ...
+# Subtest: recovers uploaded rollout images once and hides serialized image path markup
+ok 82 - recovers uploaded rollout images once and hides serialized image path markup
+  ---
+  duration_ms: 51.7217
+  type: 'test'
+  ...
+# Subtest: restores generated image links from local rollout without App Server
+ok 83 - restores generated image links from local rollout without App Server
+  ---
+  duration_ms: 60.0313
+  type: 'test'
+  ...
+# Subtest: hides internal context-compaction handoff messages from local history
+ok 84 - hides internal context-compaction handoff messages from local history
+  ---
+  duration_ms: 28.1604
+  type: 'test'
+  ...
+# Subtest: ignores obsolete event_msg history rows
+ok 85 - ignores obsolete event_msg history rows
+  ---
+  duration_ms: 17.4545
+  type: 'test'
+  ...
+# Subtest: does not cache sparse local fallback as agent-loaded history
+ok 86 - does not cache sparse local fallback as agent-loaded history
+  ---
+  duration_ms: 25.5966
+  type: 'test'
+  ...
+# Subtest: forces resume when local history has fewer assistants than users
+ok 87 - forces resume when local history has fewer assistants than users
+  ---
+  duration_ms: 19.2981
+  type: 'test'
+  ...
+# Subtest: stores validated clipboard images under the managed temp directory
+ok 88 - stores validated clipboard images under the managed temp directory
+  ---
+  duration_ms: 9.5297
+  type: 'test'
+  ...
+# Subtest: rejects empty and unsupported clipboard images
+ok 89 - rejects empty and unsupported clipboard images
+  ---
+  duration_ms: 1.9708
+  type: 'test'
+  ...
+# Subtest: removes stale pasted images while keeping recent files
+ok 90 - removes stale pasted images while keeping recent files
+  ---
+  duration_ms: 4.3759
+  type: 'test'
+  ...
+# [Diagnostics] child process gone; details written to C:\\Users\\Administrator\\AppData\\Local\\Temp\\rhzycode-diagnostics-ISs1RR\\user-data\\diagnostics\\process-events.jsonl
+# [Diagnostics] Could not write process diagnostics: Error: EEXIST: file already exists, mkdir 'C:\\Users\\Administrator\\AppData\\Local\\Temp\\rhzycode-diagnostics-readonly-4Rg7k5\\not-a-directory'
+# Subtest: reads Linux DMI identity without failing on missing fields
+ok 91 - reads Linux DMI identity without failing on missing fields
+  ---
+  duration_ms: 10.1933
+  type: 'test'
+  ...
+# Subtest: parses Linux open file limits
+ok 92 - parses Linux open file limits
+  ---
+  duration_ms: 1.7598
+  type: 'test'
+  ...
+# Subtest: parses Linux process resident memory
+ok 93 - parses Linux process resident memory
+  ---
+  duration_ms: 0.6109
+  type: 'test'
+  ...
+# Subtest: persists resource, process-gone, and crash dump inventory records
+ok 94 - persists resource, process-gone, and crash dump inventory records
+  ---
+  duration_ms: 48.9128
+  type: 'test'
+  ...
+# Subtest: keeps diagnostics best-effort when its directory is not writable
+ok 95 - keeps diagnostics best-effort when its directory is not writable
+  ---
+  duration_ms: 13.2944
+  type: 'test'
+  ...
+# Subtest: does not refresh Electron metrics during periodic procfs sampling
+ok 96 - does not refresh Electron metrics during periodic procfs sampling
+  ---
+  duration_ms: 38.8219
+  type: 'test'
+  ...
+# Subtest: remembers, persists, and forgets existing desktop project directories
+ok 97 - remembers, persists, and forgets existing desktop project directories
+  ---
+  duration_ms: 5.7296
+  type: 'test'
+  ...
+# Subtest: rejects relative paths, roots, missing paths, and files
+ok 98 - rejects relative paths, roots, missing paths, and files
+  ---
+  duration_ms: 3.3464
+  type: 'test'
+  ...
+# Subtest: creates a missing desktop directory and registers it once
+ok 99 - creates a missing desktop directory and registers it once
+  ---
+  duration_ms: 3.3352
+  type: 'test'
+  ...
+# Subtest: configures the Windows uninstaller to remove RHZYCODE user data
+ok 100 - configures the Windows uninstaller to remove RHZYCODE user data
+  ---
+  duration_ms: 1.876
+  type: 'test'
+  ...
+# Subtest: audits a clean release and rejects sensitive ASAR or resource files
+ok 101 - audits a clean release and rejects sensitive ASAR or resource files
+  ---
+  duration_ms: 3951.5788
+  type: 'test'
+  ...
+# Subtest: audits the unpacked macOS application layout
+ok 102 - audits the unpacked macOS application layout
+  ---
+  duration_ms: 30.4068
+  type: 'test'
+  ...
+# Subtest: audits the unpacked Linux application layout
+ok 103 - audits the unpacked Linux application layout
+  ---
+  duration_ms: 26.1868
+  type: 'test'
+  ...
+# Subtest: stores validated mobile attachments under the managed directory
+ok 104 - stores validated mobile attachments under the managed directory
+  ---
+  duration_ms: 21.214
+  type: 'test'
+  ...
+# Subtest: rejects the whole mobile attachment batch before writing invalid data
+ok 105 - rejects the whole mobile attachment batch before writing invalid data
+  ---
+  duration_ms: 2.9726
+  type: 'test'
+  ...
+# Subtest: merges streaming deltas without replacing unchanged history
+ok 106 - merges streaming deltas without replacing unchanged history
+  ---
+  duration_ms: 5.011
+  type: 'test'
+  ...
+# Subtest: shows completed assistant messages even when no streaming delta arrived
+ok 107 - shows completed assistant messages even when no streaming delta arrived
+  ---
+  duration_ms: 0.4805
+  type: 'test'
+  ...
+# Subtest: reconciles a streamed assistant message with its completed text
+ok 108 - reconciles a streamed assistant message with its completed text
+  ---
+  duration_ms: 0.3262
+  type: 'test'
+  ...
+# Subtest: reconciles project removal and re-addition across clients
+ok 109 - reconciles project removal and re-addition across clients
+  ---
+  duration_ms: 1.5561
+  type: 'test'
+  ...
+# Subtest: formats renderer display values
+ok 110 - formats renderer display values
+  ---
+  duration_ms: 0.8027
+  type: 'test'
+  ...
+# Subtest: fits image previews without changing their aspect ratio or upscaling
+ok 111 - fits image previews without changing their aspect ratio or upscaling
+  ---
+  duration_ms: 0.3707
+  type: 'test'
+  ...
+# Subtest: persists valid collapsed projects with path-aware deduplication
+ok 112 - persists valid collapsed projects with path-aware deduplication
+  ---
+  duration_ms: 0.8437
+  type: 'test'
+  ...
+# Subtest: groups all tasks by project and searches across the project tree
+ok 113 - groups all tasks by project and searches across the project tree
+  ---
+  duration_ms: 1.8117
+  type: 'test'
+  ...
+# Subtest: uses every reasoning effort supported by the selected model
+ok 114 - uses every reasoning effort supported by the selected model
+  ---
+  duration_ms: 1.1625
+  type: 'test'
+  ...
+# Subtest: preserves an explicitly empty reasoning effort list
+ok 115 - preserves an explicitly empty reasoning effort list
+  ---
+  duration_ms: 1.0083
+  type: 'test'
+  ...
+# Subtest: groups models by source and naturally sorts versions within each source
+ok 116 - groups models by source and naturally sorts versions within each source
+  ---
+  duration_ms: 1.4351
+  type: 'test'
+  ...
+# Subtest: uses the last available manual model as the next task default
+ok 117 - uses the last available manual model as the next task default
+  ---
+  duration_ms: 0.3867
+  type: 'test'
+  ...
+# Subtest: uses the configured provider name consistently
+ok 118 - uses the configured provider name consistently
+  ---
+  duration_ms: 0.1683
+  type: 'test'
+  ...
+# Subtest: normalizes activity details
+ok 119 - normalizes activity details
+  ---
+  duration_ms: 0.4027
+  type: 'test'
+  ...
+# Subtest: extracts thread identifiers from supported notifications
+ok 120 - extracts thread identifiers from supported notifications
+  ---
+  duration_ms: 0.2289
+  type: 'test'
+  ...
+# Subtest: creates bounded task titles
+ok 121 - creates bounded task titles
+  ---
+  duration_ms: 0.3637
+  type: 'test'
+  ...
+# Subtest: locks the composer only for the selected running thread
+ok 122 - locks the composer only for the selected running thread
+  ---
+  duration_ms: 0.1967
+  type: 'test'
+  ...
+# Subtest: searches task titles and projects but ignores model id substrings
+ok 123 - searches task titles and projects but ignores model id substrings
+  ---
+  duration_ms: 0.8436
+  type: 'test'
+  ...
+# Subtest: recovers only from unexpected renderer exits
+ok 124 - recovers only from unexpected renderer exits
+  ---
+  duration_ms: 2.3349
+  type: 'test'
+  ...
+# Subtest: sends IPC through an attached renderer main frame
+ok 125 - sends IPC through an attached renderer main frame
+  ---
+  duration_ms: 2.4035
+  type: 'test'
+  ...
+# Subtest: does not send while the renderer main frame is unavailable
+ok 126 - does not send while the renderer main frame is unavailable
+  ---
+  duration_ms: 1.1477
+  type: 'test'
+  ...
+# Subtest: does not hide non-lifecycle IPC errors
+ok 127 - does not hide non-lifecycle IPC errors
+  ---
+  duration_ms: 1.2887
+  type: 'test'
+  ...
+# Subtest: reads the latest token count and ignores failed model switches
+ok 128 - reads the latest token count and ignores failed model switches
+  ---
+  duration_ms: 24.4427
+  type: 'test'
+  ...
+# Subtest: returns an empty state for an unknown thread
+ok 129 - returns an empty state for an unknown thread
+  ---
+  duration_ms: 0.5747
+  type: 'test'
+  ...
+# Subtest: restores desktop threads without reviving active RPC states
+ok 130 - restores desktop threads without reviving active RPC states
+  ---
+  duration_ms: 7.0354
+  type: 'test'
+  ...
+# Subtest: starts the agent without waiting for sync startup
+ok 131 - starts the agent without waiting for sync startup
+  ---
+  duration_ms: 2.7502
+  type: 'test'
+  ...
+# Subtest: restarts the Agent Host before retrying a thread that was not submitted
+ok 132 - restarts the Agent Host before retrying a thread that was not submitted
+  ---
+  duration_ms: 4.651
+  type: 'test'
+  ...
+# Subtest: opens a mobile-created empty thread before its rollout exists
+ok 133 - opens a mobile-created empty thread before its rollout exists
+  ---
+  duration_ms: 18.3981
+  type: 'test'
+  ...
+# Subtest: opens an active thread after its new rollout metadata is written
+ok 134 - opens an active thread after its new rollout metadata is written
+  ---
+  duration_ms: 107.7083
+  type: 'test'
+  ...
+# Subtest: reuses a resumed thread detail until the thread changes
+ok 135 - reuses a resumed thread detail until the thread changes
+  ---
+  duration_ms: 3.6646
+  type: 'test'
+  ...
+# Subtest: reads rollout history without resuming until the next turn is sent
+ok 136 - reads rollout history without resuming until the next turn is sent
+  ---
+  duration_ms: 30.8157
+  type: 'test'
+  ...
+# Subtest: resumes sparse local history so assistant replies are not dropped
+ok 137 - resumes sparse local history so assistant replies are not dropped
+  ---
+  duration_ms: 14.5275
+  type: 'test'
+  ...
+# Subtest: prefers recovered assistant history over a longer user-only rollout
+ok 138 - prefers recovered assistant history over a longer user-only rollout
+  ---
+  duration_ms: 13.0466
+  type: 'test'
+  ...
+# Subtest: mobile openThread restores a newest turn missing entirely from a balanced local rollout
+ok 139 - mobile openThread restores a newest turn missing entirely from a balanced local rollout
+  ---
+  duration_ms: 8.2695
+  type: 'test'
+  ...
+# Subtest: mobile openThread retains the newest local question while a completed resume catches up
+ok 140 - mobile openThread retains the newest local question while a completed resume catches up
+  ---
+  duration_ms: 10.1411
+  type: 'test'
+  ...
+# Subtest: mobile openThread returns local sparse history when resume exceeds budget
+ok 141 - mobile openThread returns local sparse history when resume exceeds budget
+  ---
+  duration_ms: 262.2353
+  type: 'test'
+  ...
+# Subtest: hydrates historical messages for mobile thread opening
+ok 142 - hydrates historical messages for mobile thread opening
+  ---
+  duration_ms: 6.0562
+  type: 'test'
+  ...
+# Subtest: keeps the persisted model when resume reports a different default
+ok 143 - keeps the persisted model when resume reports a different default
+  ---
+  duration_ms: 3.7177
+  type: 'test'
+  ...
+# Subtest: persists a thread model as soon as it is selected
+ok 144 - persists a thread model as soon as it is selected
+  ---
+  duration_ms: 3.571
+  type: 'test'
+  ...
+# Subtest: deletes a local empty thread before its rollout exists
+ok 145 - deletes a local empty thread before its rollout exists
+  ---
+  duration_ms: 2.5341
+  type: 'test'
+  ...
+# Subtest: deletes a local empty thread whose rollout file has no metadata yet
+ok 146 - deletes a local empty thread whose rollout file has no metadata yet
+  ---
+  duration_ms: 1.4096
+  type: 'test'
+  ...
+# Subtest: permanently removes a local thread when only App Server index cleanup fails
+ok 147 - permanently removes a local thread when only App Server index cleanup fails
+  ---
+  duration_ms: 1.1945
+  type: 'test'
+  ...
+# Subtest: permanently deletes a thread rollout from disk
+ok 148 - permanently deletes a thread rollout from disk
+  ---
+  duration_ms: 26.2823
+  type: 'test'
+  ...
+# Subtest: keeps a thread rollout until App Server index cleanup settles
+ok 149 - keeps a thread rollout until App Server index cleanup settles
+  ---
+  duration_ms: 29.2281
+  type: 'test'
+  ...
+# Subtest: permanently deletes every project conversation but keeps source files
+ok 150 - permanently deletes every project conversation but keeps source files
+  ---
+  duration_ms: 27.7137
+  type: 'test'
+  ...
+# Subtest: finishes project deletion when App Server has lost its thread index
+ok 151 - finishes project deletion when App Server has lost its thread index
+  ---
+  duration_ms: 14.693
+  type: 'test'
+  ...
+# Subtest: lists restored disk conversations when App Server index is empty
+ok 152 - lists restored disk conversations when App Server index is empty
+  ---
+  duration_ms: 18.5979
+  type: 'test'
+  ...
+# Subtest: removes resumed rollout copies from the shared control snapshot
+ok 153 - removes resumed rollout copies from the shared control snapshot
+  ---
+  duration_ms: 16.968
+  type: 'test'
+  ...
+# Subtest: restores local images as message previews instead of placeholder text
+ok 154 - restores local images as message previews instead of placeholder text
+  ---
+  duration_ms: 2.2807
+  type: 'test'
+  ...
+# Subtest: stores generated images before forwarding completion events to desktop and mobile
+ok 155 - stores generated images before forwarding completion events to desktop and mobile
+  ---
+  duration_ms: 7.7174
+  type: 'test'
+  ...
+# Subtest: restores generated images from thread history for desktop and mobile
+ok 156 - restores generated images from thread history for desktop and mobile
+  ---
+  duration_ms: 7.6684
+  type: 'test'
+  ...
+# Subtest: restores rollout images omitted by App Server thread history
+ok 157 - restores rollout images omitted by App Server thread history
+  ---
+  duration_ms: 15.6733
+  type: 'test'
+  ...
+# Subtest: publishes a rollout image when App Server completes its turn
+ok 158 - publishes a rollout image when App Server completes its turn
+  ---
+  duration_ms: 13.4241
+  type: 'test'
+  ...
+# Subtest: forwards user answers without storing secret values
+ok 159 - forwards user answers without storing secret values
+  ---
+  duration_ms: 2.0598
+  type: 'test'
+  ...
+# Subtest: publishes agent messages as plain assistant content without user metadata rows
+ok 160 - publishes agent messages as plain assistant content without user metadata rows
+  ---
+  duration_ms: 1.4085
+  type: 'test'
+  ...
+# Subtest: submits remote user input only for pending question IDs
+ok 161 - submits remote user input only for pending question IDs
+  ---
+  duration_ms: 1.9911
+  type: 'test'
+  ...
+# Subtest: grants requested permissions for one turn and denies with an empty profile
+ok 162 - grants requested permissions for one turn and denies with an empty profile
+  ---
+  duration_ms: 2.4373
+  type: 'test'
+  ...
+# Subtest: overrides the model, approval policy, and reasoning effort on an existing thread
+ok 163 - overrides the model, approval policy, and reasoning effort on an existing thread
+  ---
+  duration_ms: 2.2414
+  type: 'test'
+  ...
+# Subtest: compacts an oversized thread with its last successful model before switching
+ok 164 - compacts an oversized thread with its last successful model before switching
+  ---
+  duration_ms: 8.9156
+  type: 'test'
+  ...
+# Subtest: returns one canonical mobile user row with its client message id
+ok 165 - returns one canonical mobile user row with its client message id
+  ---
+  duration_ms: 2.8777
+  type: 'test'
+  ...
+# Subtest: updates Agent Host settings before switching an image thread to a text model
+ok 166 - updates Agent Host settings before switching an image thread to a text model
+  ---
+  duration_ms: 104.9683
+  type: 'test'
+  ...
+# Subtest: resumes an unloaded existing thread through the internal gateway before starting a turn
+ok 167 - resumes an unloaded existing thread through the internal gateway before starting a turn
+  ---
+  duration_ms: 2.0197
+  type: 'test'
+  ...
+# Subtest: routes concurrent turn events to the matching thread
+ok 168 - routes concurrent turn events to the matching thread
+  ---
+  duration_ms: 1.375
+  type: 'test'
+  ...
+# Subtest: finalizes running timeline items when a turn is interrupted
+ok 169 - finalizes running timeline items when a turn is interrupted
+  ---
+  duration_ms: 2.0926
+  type: 'test'
+  ...
+# Subtest: limits workspace-write sandbox roots and maps attachments to App Server input
+ok 170 - limits workspace-write sandbox roots and maps attachments to App Server input
+  ---
+  duration_ms: 12.9729
+  type: 'test'
+  ...
+# Subtest: publishes generated document artifacts as downloadable assistant files
+ok 171 - publishes generated document artifacts as downloadable assistant files
+  ---
+  duration_ms: 11.4509
+  type: 'test'
+  ...
+# Subtest: publishes locally generated image links as inline assistant images
+ok 172 - publishes locally generated image links as inline assistant images
+  ---
+  duration_ms: 10.8512
+  type: 'test'
+  ...
+# Subtest: restores an existing local image link when opening an older thread
+ok 173 - restores an existing local image link when opening an older thread
+  ---
+  duration_ms: 11.5201
+  type: 'test'
+  ...
+# Subtest: keeps repeated App Server item ids unique across restored turns
+ok 174 - keeps repeated App Server item ids unique across restored turns
+  ---
+  duration_ms: 2.0725
+  type: 'test'
+  ...
+# Subtest: does not restore an uploaded file after the user deletes the original
+ok 175 - does not restore an uploaded file after the user deletes the original
+  ---
+  duration_ms: 5.2057
+  type: 'test'
+  ...
+# Subtest: executes remote commands through desktop authority with safe defaults
+ok 176 - executes remote commands through desktop authority with safe defaults
+  ---
+  duration_ms: 6.8299
+  type: 'test'
+  ...
+# Subtest: executes remote thread lifecycle commands and rehydrates restored state
+ok 177 - executes remote thread lifecycle commands and rehydrates restored state
+  ---
+  duration_ms: 10.7905
+  type: 'test'
+  ...
+# Subtest: executes remote conversation compaction through App Server
+ok 178 - executes remote conversation compaction through App Server
+  ---
+  duration_ms: 3.9451
+  type: 'test'
+  ...
+# Subtest: deletes archived remote threads and publishes one removal event
+ok 179 - deletes archived remote threads and publishes one removal event
+  ---
+  duration_ms: 5.2036
+  type: 'test'
+  ...
+# Subtest: keeps archived listings out of the active control snapshot
+ok 180 - keeps archived listings out of the active control snapshot
+  ---
+  duration_ms: 4.2309
+  type: 'test'
+  ...
+# Subtest: forwards server-side thread search and archive operations
+ok 181 - forwards server-side thread search and archive operations
+  ---
+  duration_ms: 2.4881
+  type: 'test'
+  ...
+# Subtest: lists, deduplicates, and sorts skills from App Server
+ok 182 - lists, deduplicates, and sorts skills from App Server
+  ---
+  duration_ms: 1.6459
+  type: 'test'
+  ...
+# Subtest: writes skill enabled state through App Server
+ok 183 - writes skill enabled state through App Server
+  ---
+  duration_ms: 1.0858
+  type: 'test'
+  ...
+# Subtest: renames and permanently deletes threads through App Server
+ok 184 - renames and permanently deletes threads through App Server
+  ---
+  duration_ms: 1.5201
+  type: 'test'
+  ...
+# Subtest: keeps App Server retries running and fails only on the terminal error
+ok 185 - keeps App Server retries running and fails only on the terminal error
+  ---
+  duration_ms: 1.6054
+  type: 'test'
+  ...
+# Subtest: fails a turn when a terminal gateway error receives no App Server completion
+ok 186 - fails a turn when a terminal gateway error receives no App Server completion
+  ---
+  duration_ms: 39.616
+  type: 'test'
+  ...
+# Subtest: discovers only user skill directories in Codex and Claude roots
+ok 187 - discovers only user skill directories in Codex and Claude roots
+  ---
+  duration_ms: 11.0955
+  type: 'test'
+  ...
+# Subtest: installs a local skill atomically and refuses to overwrite it
+ok 188 - installs a local skill atomically and refuses to overwrite it
+  ---
+  duration_ms: 18.9237
+  type: 'test'
+  ...
+# Subtest: rejects a source that contains the managed destination
+ok 189 - rejects a source that contains the managed destination
+  ---
+  duration_ms: 3.5421
+  type: 'test'
+  ...
+# Subtest: imports available skills without replacing existing destinations
+ok 190 - imports available skills without replacing existing destinations
+  ---
+  duration_ms: 29.3591
+  type: 'test'
+  ...
+# Subtest: deletes only direct user skills from the managed destination
+ok 191 - deletes only direct user skills from the managed destination
+  ---
+  duration_ms: 15.4032
+  type: 'test'
+  ...
+# Subtest: keeps Linux startup dialogs visible and restores normal window stacking
+ok 192 - keeps Linux startup dialogs visible and restores normal window stacking
+  ---
+  duration_ms: 3.1379
+  type: 'test'
+  ...
+# Subtest: restores Linux window stacking when a startup dialog fails
+ok 193 - restores Linux window stacking when a startup dialog fails
+  ---
+  duration_ms: 1.0671
+  type: 'test'
+  ...
+# Subtest: does not change window stacking on other desktop platforms
+ok 194 - does not change window stacking on other desktop platforms
+  ---
+  duration_ms: 0.2954
+  type: 'test'
+  ...
+# Subtest: summarizes running and waiting task counts
+ok 195 - summarizes running and waiting task counts
+  ---
+  duration_ms: 3.3641
+  type: 'test'
+  ...
+# Subtest: maps status transitions into activity events
+ok 196 - maps status transitions into activity events
+  ---
+  duration_ms: 0.6788
+  type: 'test'
+  ...
+# Subtest: uses indeterminate progress while tasks are running
+ok 197 - uses indeterminate progress while tasks are running
+  ---
+  duration_ms: 0.5621
+  type: 'test'
+  ...
+# Subtest: pauses progress bar while waiting for confirmation
+ok 198 - pauses progress bar while waiting for confirmation
+  ---
+  duration_ms: 0.3412
+  type: 'test'
+  ...
+# Subtest: shows success taskbar color and notification when a task completes unfocused
+ok 199 - shows success taskbar color and notification when a task completes unfocused
+  ---
+  duration_ms: 0.2824
+  type: 'test'
+  ...
+# Subtest: shows error taskbar color when a task fails
+ok 200 - shows error taskbar color when a task fails
+  ---
+  duration_ms: 0.218
+  type: 'test'
+  ...
+# Subtest: keeps busy chrome when another task is still active after completion
+ok 201 - keeps busy chrome when another task is still active after completion
+  ---
+  duration_ms: 0.3094
+  type: 'test'
+  ...
+# Subtest: builds renderer toast payloads from activity events
+ok 202 - builds renderer toast payloads from activity events
+  ---
+  duration_ms: 0.5408
+  type: 'test'
+  ...
+# Subtest: offers cut, copy, paste, and select all for editable text
+ok 203 - offers cut, copy, paste, and select all for editable text
+  ---
+  duration_ms: 2.307
+  type: 'test'
+  ...
+# Subtest: offers copy without edit actions for selected document text
+ok 204 - offers copy without edit actions for selected document text
+  ---
+  duration_ms: 0.3027
+  type: 'test'
+  ...
+# Subtest: keeps copy disabled when document text is not selected
+ok 205 - keeps copy disabled when document text is not selected
+  ---
+  duration_ms: 0.2101
+  type: 'test'
+  ...
+# Subtest: offers image download through the context menu
+ok 206 - offers image download through the context menu
+  ---
+  duration_ms: 0.2451
+  type: 'test'
+  ...
+# Subtest: publishes the first running update immediately and coalesces later deltas
+ok 207 - publishes the first running update immediately and coalesces later deltas
+  ---
+  duration_ms: 2.7258
+  type: 'test'
+  ...
+# Subtest: terminal status flushes pending running content then publishes completion
+ok 208 - terminal status flushes pending running content then publishes completion
+  ---
+  duration_ms: 0.6896
+  type: 'test'
+  ...
+# Subtest: publishes immediately when the coalesce window has already elapsed
+ok 209 - publishes immediately when the coalesce window has already elapsed
+  ---
+  duration_ms: 0.3287
+  type: 'test'
+  ...
+# Subtest: dispose drops pending timers without publishing
+ok 210 - dispose drops pending timers without publishing
+  ---
+  duration_ms: 0.4568
+  type: 'test'
+  ...
+# Subtest: ships the electron-updater development configuration
+ok 211 - ships the electron-updater development configuration
+  ---
+  duration_ms: 2.7709
+  type: 'test'
+  ...
+# Subtest: tracks a configured update through check, download, and install
+ok 212 - tracks a configured update through check, download, and install
+  ---
+  duration_ms: 45.5687
+  type: 'test'
+  ...
+# Subtest: keeps updates disabled when no signed channel is configured
+ok 213 - keeps updates disabled when no signed channel is configured
+  ---
+  duration_ms: 0.9748
+  type: 'test'
+  ...
+# Subtest: does not ask electron-updater to download metadata when the manifest version is current
+ok 214 - does not ask electron-updater to download metadata when the manifest version is current
+  ---
+  duration_ms: 0.8944
+  type: 'test'
+  ...
+# Subtest: selects the macOS feed for a macOS desktop
+ok 215 - selects the macOS feed for a macOS desktop
+  ---
+  duration_ms: 1.2338
+  type: 'test'
+  ...
+# Subtest: runs periodic desktop checks every two hours only from 10:00 until 20:00
+ok 216 - runs periodic desktop checks every two hours only from 10:00 until 20:00
+  ---
+  duration_ms: 1.327
+  type: 'test'
+  ...
+1..216
+# tests 216
+# suites 0
+# pass 216
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 13142.8582
+
+> @rhzycode/mobile@0.1.41 test
+> tsx --test test/*.test.ts
+
+TAP version 13
+# Subtest: parses Codex composer commands without intercepting escaped or multiline prompts
+ok 1 - parses Codex composer commands without intercepting escaped or multiline prompts
+  ---
+  duration_ms: 3.093
+  type: 'test'
+  ...
+# Subtest: hides separator-only assistant noise while a reply is running
+ok 2 - hides separator-only assistant noise while a reply is running
+  ---
+  duration_ms: 0.5234
+  type: 'test'
+  ...
+# Subtest: loads history only while an existing selected thread is opening
+ok 3 - loads history only while an existing selected thread is opening
+  ---
+  duration_ms: 0.2056
+  type: 'test'
+  ...
+# Subtest: keeps the composer editable while history loads but waits before sending
+ok 4 - keeps the composer editable while history loads but waits before sending
+  ---
+  duration_ms: 0.2305
+  type: 'test'
+  ...
+# Subtest: keeps a newly started thread selected while its server summary is delayed
+ok 5 - keeps a newly started thread selected while its server summary is delayed
+  ---
+  duration_ms: 0.2827
+  type: 'test'
+  ...
+# Subtest: reloads authoritative history only after a mobile-started turn stops
+ok 6 - reloads authoritative history only after a mobile-started turn stops
+  ---
+  duration_ms: 0.2635
+  type: 'test'
+  ...
+# Subtest: captures deliberate horizontal page swipes without stealing vertical scrolling
+ok 7 - captures deliberate horizontal page swipes without stealing vertical scrolling
+  ---
+  duration_ms: 0.1993
+  type: 'test'
+  ...
+# Subtest: switches pages for a short flick or a clear horizontal drag
+ok 8 - switches pages for a short flick or a clear horizontal drag
+  ---
+  duration_ms: 0.2225
+  type: 'test'
+  ...
+# Subtest: expands the rendered history before jumping to a conversation outline turn
+ok 9 - expands the rendered history before jumping to a conversation outline turn
+  ---
+  duration_ms: 0.605
+  type: 'test'
+  ...
+# Subtest: builds result entries only for the selected thread
+ok 10 - builds result entries only for the selected thread
+  ---
+  duration_ms: 17.4321
+  type: 'test'
+  ...
+# Subtest: keeps protocol timeline messages without client-side content filtering
+ok 11 - keeps protocol timeline messages without client-side content filtering
+  ---
+  duration_ms: 0.4631
+  type: 'test'
+  ...
+# Subtest: keeps generated image references in assistant result entries
+ok 12 - keeps generated image references in assistant result entries
+  ---
+  duration_ms: 0.2227
+  type: 'test'
+  ...
+# Subtest: keeps downloadable generated files in assistant result entries
+ok 13 - keeps downloadable generated files in assistant result entries
+  ---
+  duration_ms: 0.212
+  type: 'test'
+  ...
+# Subtest: replaces an attachment pending row with the matching server timeline row
+ok 14 - replaces an attachment pending row with the matching server timeline row
+  ---
+  duration_ms: 0.5501
+  type: 'test'
+  ...
+# Subtest: claims repeated prompts one-to-one using the echoed client message id
+ok 15 - claims repeated prompts one-to-one using the echoed client message id
+  ---
+  duration_ms: 0.46
+  type: 'test'
+  ...
+# Subtest: reconciles in-flight and failed optimistic rows when recent server history omits the client message id
+ok 16 - reconciles in-flight and failed optimistic rows when recent server history omits the client message id
+  ---
+  duration_ms: 0.4259
+  type: 'test'
+  ...
+# Subtest: does not match a new optimistic send to old identical history
+ok 17 - does not match a new optimistic send to old identical history
+  ---
+  duration_ms: 0.248
+  type: 'test'
+  ...
+# Subtest: reuses the latest failed pending id only for the same payload
+ok 18 - reuses the latest failed pending id only for the same payload
+  ---
+  duration_ms: 0.361
+  type: 'test'
+  ...
+# Subtest: counts activity only for the selected thread
+ok 19 - counts activity only for the selected thread
+  ---
+  duration_ms: 0.2549
+  type: 'test'
+  ...
+# Subtest: skips reopen after the thread history was already loaded
+ok 20 - skips reopen after the thread history was already loaded
+  ---
+  duration_ms: 0.1687
+  type: 'test'
+  ...
+# Subtest: does not open history while offline, archived, or unselected
+ok 21 - does not open history while offline, archived, or unselected
+  ---
+  duration_ms: 0.1353
+  type: 'test'
+  ...
+# Subtest: reopens history after each offline recovery while skipping duplicate online flaps
+ok 22 - reopens history after each offline recovery while skipping duplicate online flaps
+  ---
+  duration_ms: 0.2106
+  type: 'test'
+  ...
+# Subtest: catch-up polling only runs for active remote turns while online
+ok 23 - catch-up polling only runs for active remote turns while online
+  ---
+  duration_ms: 0.1395
+  type: 'test'
+  ...
+# Subtest: resets opened history when the live connection drops
+ok 24 - resets opened history when the live connection drops
+  ---
+  duration_ms: 0.1215
+  type: 'test'
+  ...
+# Subtest: isSparseThreadHistory marks conversations that still lack AI replies
+ok 25 - isSparseThreadHistory marks conversations that still lack AI replies
+  ---
+  duration_ms: 0.1959
+  type: 'test'
+  ...
+# Subtest: shouldRetrySparseThreadHistory bounds flaky openThread catch-up
+ok 26 - shouldRetrySparseThreadHistory bounds flaky openThread catch-up
+  ---
+  duration_ms: 0.2524
+  type: 'test'
+  ...
+# Subtest: shouldRetryOpenThreadHistory retries sparse payloads and retryable errors
+ok 27 - shouldRetryOpenThreadHistory retries sparse payloads and retryable errors
+  ---
+  duration_ms: 0.3396
+  type: 'test'
+  ...
+# Subtest: openThread history retry delays stay bounded
+ok 28 - openThread history retry delays stay bounded
+  ---
+  duration_ms: 0.1901
+  type: 'test'
+  ...
+# Subtest: soft history retries cover sparse payloads and exhausted network errors
+ok 29 - soft history retries cover sparse payloads and exhausted network errors
+  ---
+  duration_ms: 0.3214
+  type: 'test'
+  ...
+# Subtest: uses only the public transfer service for KEY-only access
+ok 30 - uses only the public transfer service for KEY-only access
+  ---
+  duration_ms: 1.2329
+  type: 'test'
+  ...
+# Subtest: accepts only the desktop-generated access KEY format
+ok 31 - accepts only the desktop-generated access KEY format
+  ---
+  duration_ms: 0.8094
+  type: 'test'
+  ...
+# Subtest: loads a validated snapshot with HTTP Bearer authentication
+ok 32 - loads a validated snapshot with HTTP Bearer authentication
+  ---
+  duration_ms: 35.4927
+  type: 'test'
+  ...
+# Subtest: keeps the WebSocket credential in subprotocols and the cursor in the URL
+ok 33 - keeps the WebSocket credential in subprotocols and the cursor in the URL
+  ---
+  duration_ms: 0.4919
+  type: 'test'
+  ...
+# Subtest: builds authenticated generated image sources without exposing the key in the URL
+ok 34 - builds authenticated generated image sources without exposing the key in the URL
+  ---
+  duration_ms: 0.3353
+  type: 'test'
+  ...
+# Subtest: builds authenticated managed file downloads without exposing the key in the URL
+ok 35 - builds authenticated managed file downloads without exposing the key in the URL
+  ---
+  duration_ms: 0.2879
+  type: 'test'
+  ...
+# Subtest: verifies a long-lived KEY before saving and validates events at runtime
+ok 36 - verifies a long-lived KEY before saving and validates events at runtime
+  ---
+  duration_ms: 4.3956
+  type: 'test'
+  ...
+# Subtest: maps HTTP authorization, permission, and conflict statuses
+ok 37 - maps HTTP authorization, permission, and conflict statuses
+  ---
+  duration_ms: 2.6659
+  type: 'test'
+  ...
+# Subtest: distinguishes timeout, certificate, and malformed response failures
+ok 38 - distinguishes timeout, certificate, and malformed response failures
+  ---
+  duration_ms: 3.9037
+  type: 'test'
+  ...
+# Subtest: sends remote task commands with bearer auth and idempotency keys
+ok 39 - sends remote task commands with bearer auth and idempotency keys
+  ---
+  duration_ms: 7.3767
+  type: 'test'
+  ...
+# Subtest: uses caller-owned idempotency keys across weak-network command retries
+ok 40 - uses caller-owned idempotency keys across weak-network command retries
+  ---
+  duration_ms: 1.6685
+  type: 'test'
+  ...
+# Subtest: validates archived thread command responses
+ok 41 - validates archived thread command responses
+  ---
+  duration_ms: 1.362
+  type: 'test'
+  ...
+# Subtest: lists and opens synchronized desktop project directories
+ok 42 - lists and opens synchronized desktop project directories
+  ---
+  duration_ms: 2.7942
+  type: 'test'
+  ...
+# Subtest: browses desktop directories remotely without a desktop dialog
+ok 43 - browses desktop directories remotely without a desktop dialog
+  ---
+  duration_ms: 1.2202
+  type: 'test'
+  ...
+# Subtest: loads the model catalog from the selected desktop
+ok 44 - loads the model catalog from the selected desktop
+  ---
+  duration_ms: 1.6421
+  type: 'test'
+  ...
+# Subtest: retries transient snapshot failures while a VPN route is settling
+ok 45 - retries transient snapshot failures while a VPN route is settling
+  ---
+  duration_ms: 2.8967
+  type: 'test'
+  ...
+# Subtest: does not retry rejected credentials
+ok 46 - does not retry rejected credentials
+  ---
+  duration_ms: 0.9531
+  type: 'test'
+  ...
+# Subtest: caps background reconnects at a short foreground interval
+ok 47 - caps background reconnects at a short foreground interval
+  ---
+  duration_ms: 0.2522
+  type: 'test'
+  ...
+# Subtest: encodes heartbeat pings and accepts only matching pong frames
+ok 48 - encodes heartbeat pings and accepts only matching pong frames
+  ---
+  duration_ms: 2.3118
+  type: 'test'
+  ...
+# Subtest: retries a burst of offline and timeout failures before succeeding
+ok 49 - retries a burst of offline and timeout failures before succeeding
+  ---
+  duration_ms: 0.6704
+  type: 'test'
+  ...
+# Subtest: stops after repeated offline failures exhaust reconnect-style attempts
+ok 50 - stops after repeated offline failures exhaust reconnect-style attempts
+  ---
+  duration_ms: 0.5425
+  type: 'test'
+  ...
+# Subtest: grows reconnect backoff across many drops and stays capped
+ok 51 - grows reconnect backoff across many drops and stays capped
+  ---
+  duration_ms: 0.4702
+  type: 'test'
+  ...
+# Subtest: pauses realtime work in background and starts a clean connection on resume
+ok 52 - pauses realtime work in background and starts a clean connection on resume
+  ---
+  duration_ms: 0.195
+  type: 'test'
+  ...
+# Subtest: classifies duplicate, contiguous, and missing event sequences
+ok 53 - classifies duplicate, contiguous, and missing event sequences
+  ---
+  duration_ms: 0.432
+  type: 'test'
+  ...
+# Subtest: retries transient commands without changing the caller-owned request
+ok 54 - retries transient commands without changing the caller-owned request
+  ---
+  duration_ms: 0.9369
+  type: 'test'
+  ...
+# Subtest: does not retry command conflicts
+ok 55 - does not retry command conflicts
+  ---
+  duration_ms: 0.3939
+  type: 'test'
+  ...
+# Subtest: merges all nine AgentEvent variants
+ok 56 - merges all nine AgentEvent variants
+  ---
+  duration_ms: 2.9386
+  type: 'test'
+  ...
+# Subtest: upserts duplicate ids and never moves the sequence backwards
+ok 57 - upserts duplicate ids and never moves the sequence backwards
+  ---
+  duration_ms: 0.2803
+  type: 'test'
+  ...
+# Subtest: removing missing state is idempotent
+ok 58 - removing missing state is idempotent
+  ---
+  duration_ms: 0.3518
+  type: 'test'
+  ...
+# Subtest: hydrates complete thread history without dropping concurrent events
+ok 59 - hydrates complete thread history without dropping concurrent events
+  ---
+  duration_ms: 17.1897
+  type: 'test'
+  ...
+# Subtest: keeps opened thread history when a refresh returns only the live timeline
+ok 60 - keeps opened thread history when a refresh returns only the live timeline
+  ---
+  duration_ms: 0.7592
+  type: 'test'
+  ...
+# Subtest: drops retained history after its thread is removed
+ok 61 - drops retained history after its thread is removed
+  ---
+  duration_ms: 0.2413
+  type: 'test'
+  ...
+# Subtest: preserves fresher streamed content when hydrate returns a stale item
+ok 62 - preserves fresher streamed content when hydrate returns a stale item
+  ---
+  duration_ms: 0.5472
+  type: 'test'
+  ...
+# Subtest: merge keeps longer local stream content over a shorter snapshot payload
+ok 63 - merge keeps longer local stream content over a shorter snapshot payload
+  ---
+  duration_ms: 0.3695
+  type: 'test'
+  ...
+# Subtest: a terminal notice replaces an earlier retry notice even when it is shorter
+ok 64 - a terminal notice replaces an earlier retry notice even when it is shorter
+  ---
+  duration_ms: 0.5603
+  type: 'test'
+  ...
+# Subtest: survives repeated reconnect cycles without regressing streamed content
+ok 65 - survives repeated reconnect cycles without regressing streamed content
+  ---
+  duration_ms: 0.9818
+  type: 'test'
+  ...
+# Subtest: keeps historical messages across reconnect snapshots that only carry live items
+ok 66 - keeps historical messages across reconnect snapshots that only carry live items
+  ---
+  duration_ms: 0.5921
+  type: 'test'
+  ...
+# Subtest: an out-of-order snapshot cannot drop a newer thread or move its cursor backwards
+ok 67 - an out-of-order snapshot cannot drop a newer thread or move its cursor backwards
+  ---
+  duration_ms: 0.1836
+  type: 'test'
+  ...
+# Subtest: an out-of-order snapshot cannot resurrect a thread removed by a newer event
+ok 68 - an out-of-order snapshot cannot resurrect a thread removed by a newer event
+  ---
+  duration_ms: 0.1564
+  type: 'test'
+  ...
+# Subtest: collapses provisional user rows after history catch-up while keeping intentional repeats
+ok 69 - collapses provisional user rows after history catch-up while keeping intentional repeats
+  ---
+  duration_ms: 0.842
+  type: 'test'
+  ...
+# Subtest: a new server stream replaces state from the previous process
+ok 70 - a new server stream replaces state from the previous process
+  ---
+  duration_ms: 0.2328
+  type: 'test'
+  ...
+# Subtest: stable logical ids collapse live and historical ids without content guessing
+ok 71 - stable logical ids collapse live and historical ids without content guessing
+  ---
+  duration_ms: 0.2298
+  type: 'test'
+  ...
+# Subtest: collapses desktop runtime user rows without client ids one-to-one
+ok 72 - collapses desktop runtime user rows without client ids one-to-one
+  ---
+  duration_ms: 0.4269
+  type: 'test'
+  ...
+# Subtest: collapses unscoped live assistant rows into turn-scoped history rows
+ok 73 - collapses unscoped live assistant rows into turn-scoped history rows
+  ---
+  duration_ms: 0.2372
+  type: 'test'
+  ...
+# Subtest: keeps similar assistant replies from different turns
+ok 74 - keeps similar assistant replies from different turns
+  ---
+  duration_ms: 0.2323
+  type: 'test'
+  ...
+# Subtest: connects the mobile client to the real desktop control contract
+ok 75 - connects the mobile client to the real desktop control contract
+  ---
+  duration_ms: 361.4179
+  type: 'test'
+  ...
+# Subtest: keeps two desktop event streams connected and isolated
+ok 76 - keeps two desktop event streams connected and isolated
+  ---
+  duration_ms: 43.7885
+  type: 'test'
+  ...
+# Subtest: replays one accepted turn after multiple lost mobile responses without duplicating it
+ok 77 - replays one accepted turn after multiple lost mobile responses without duplicating it
+  ---
+  duration_ms: 72.4356
+  type: 'test'
+  ...
+# Subtest: restores accepted command results after a desktop restart
+ok 78 - restores accepted command results after a desktop restart
+  ---
+  duration_ms: 49.3629
+  type: 'test'
+  ...
+# Subtest: recovers one user row and the completed AI reply after socket and HTTP loss
+ok 79 - recovers one user row and the completed AI reply after socket and HTTP loss
+  ---
+  duration_ms: 33.8136
+  type: 'test'
+  ...
+# Subtest: retries a newly published generated image until the authenticated route is ready
+ok 80 - retries a newly published generated image until the authenticated route is ready
+  ---
+  duration_ms: 2.5377
+  type: 'test'
+  ...
+# Subtest: returns the last image download error after retries are exhausted
+ok 81 - returns the last image download error after retries are exhausted
+  ---
+  duration_ms: 0.9348
+  type: 'test'
+  ...
+# Subtest: compares stable semantic versions
+ok 82 - compares stable semantic versions
+  ---
+  duration_ms: 1.5942
+  type: 'test'
+  ...
+# Subtest: detects an available Android APK from the transfer server manifest
+ok 83 - detects an available Android APK from the transfer server manifest
+  ---
+  duration_ms: 31.8473
+  type: 'test'
+  ...
+# Subtest: reports the installed Android version as current
+ok 84 - reports the installed Android version as current
+  ---
+  duration_ms: 0.7971
+  type: 'test'
+  ...
+# Subtest: uses Android versionCode when the visible version is unchanged
+ok 85 - uses Android versionCode when the visible version is unchanged
+  ---
+  duration_ms: 0.8822
+  type: 'test'
+  ...
+# Subtest: makes a downloaded Android update retryable after returning from the installer
+ok 86 - makes a downloaded Android update retryable after returning from the installer
+  ---
+  duration_ms: 1.1484
+  type: 'test'
+  ...
+# Subtest: rejects malformed Android update metadata
+ok 87 - rejects malformed Android update metadata
+  ---
+  duration_ms: 1.2916
+  type: 'test'
+  ...
+# Subtest: detects an iOS App Store update by version and build number
+ok 88 - detects an iOS App Store update by version and build number
+  ---
+  duration_ms: 1.6184
+  type: 'test'
+  ...
+# Subtest: groups remote models using desktop supplied source metadata
+ok 89 - groups remote models using desktop supplied source metadata
+  ---
+  duration_ms: 2.5501
+  type: 'test'
+  ...
+# Subtest: preserves an explicitly empty remote reasoning effort list
+ok 90 - preserves an explicitly empty remote reasoning effort list
+  ---
+  duration_ms: 0.2615
+  type: 'test'
+  ...
+# Subtest: uses only reasoning efforts declared by the desktop
+ok 91 - uses only reasoning efforts declared by the desktop
+  ---
+  duration_ms: 0.366
+  type: 'test'
+  ...
+# Subtest: uses the last available manual model as the next conversation default
+ok 92 - uses the last available manual model as the next conversation default
+  ---
+  duration_ms: 0.3362
+  type: 'test'
+  ...
+# Subtest: shows only project directories still registered by the desktop
+ok 93 - shows only project directories still registered by the desktop
+  ---
+  duration_ms: 2.4628
+  type: 'test'
+  ...
+# Subtest: sorts conversations by latest update without changing their project order
+ok 94 - sorts conversations by latest update without changing their project order
+  ---
+  duration_ms: 17.4292
+  type: 'test'
+  ...
+# Subtest: creates a conversation in the explicitly requested empty project
+ok 95 - creates a conversation in the explicitly requested empty project
+  ---
+  duration_ms: 0.2279
+  type: 'test'
+  ...
+# Subtest: searches titles and project paths but ignores model id substrings
+ok 96 - searches titles and project paths but ignores model id substrings
+  ---
+  duration_ms: 0.5913
+  type: 'test'
+  ...
+# Subtest: starts without a configured computer
+ok 97 - starts without a configured computer
+  ---
+  duration_ms: 2.6819
+  type: 'test'
+  ...
+# Subtest: saves multiple computers with separate secure KEY values
+ok 98 - saves multiple computers with separate secure KEY values
+  ---
+  duration_ms: 1.403
+  type: 'test'
+  ...
+# Subtest: keeps multiple KEY-only computers on the shared transfer endpoint
+ok 99 - keeps multiple KEY-only computers on the shared transfer endpoint
+  ---
+  duration_ms: 0.6732
+  type: 'test'
+  ...
+# Subtest: updates an existing computer by id instead of duplicating it
+ok 100 - updates an existing computer by id instead of duplicating it
+  ---
+  duration_ms: 0.5725
+  type: 'test'
+  ...
+# Subtest: persists the last project and thread separately for each computer
+ok 101 - persists the last project and thread separately for each computer
+  ---
+  duration_ms: 0.7321
+  type: 'test'
+  ...
+# Subtest: loads older navigation and filters malformed collapsed project paths
+ok 102 - loads older navigation and filters malformed collapsed project paths
+  ---
+  duration_ms: 0.3745
+  type: 'test'
+  ...
+# Subtest: persists only compact command receipts for restart-safe idempotency
+ok 103 - persists only compact command receipts for restart-safe idempotency
+  ---
+  duration_ms: 2.0005
+  type: 'test'
+  ...
+# Subtest: clears or removes only the selected computer
+ok 104 - clears or removes only the selected computer
+  ---
+  duration_ms: 1.1817
+  type: 'test'
+  ...
+# Subtest: rejects connection metadata from obsolete direct-endpoint versions
+ok 105 - rejects connection metadata from obsolete direct-endpoint versions
+  ---
+  duration_ms: 0.6015
+  type: 'test'
+  ...
+1..105
+# tests 105
+# suites 0
+# pass 105
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3280.0763
+
+> @rhzycode/transferserver@0.1.0 test
+> node --test test/*.test.mjs
+
+TAP version 13
+# Subtest: forwards control requests only while the matching desktop is online
+ok 1 - forwards control requests only while the matching desktop is online
+  ---
+  duration_ms: 300.9022
+  type: 'test'
+  ...
+# Subtest: forwards a large desktop snapshot without exhausting the server stack
+ok 2 - forwards a large desktop snapshot without exhausting the server stack
+  ---
+  duration_ms: 468.3515
+  type: 'test'
+  ...
+# Subtest: compresses large JSON relay responses for slow mobile links
+ok 3 - compresses large JSON relay responses for slow mobile links
+  ---
+  duration_ms: 124.821
+  type: 'test'
+  ...
+# Subtest: forwards event frames and exposes no raw KEY in public status
+ok 4 - forwards event frames and exposes no raw KEY in public status
+  ---
+  duration_ms: 18.8472
+  type: 'test'
+  ...
+# Subtest: serves only a validated update manifest
+ok 5 - serves only a validated update manifest
+  ---
+  duration_ms: 28.9309
+  type: 'test'
+  ...
+# Subtest: defaults to port 8000 and fails closed for unsafe public listeners
+ok 6 - defaults to port 8000 and fails closed for unsafe public listeners
+  ---
+  duration_ms: 2.4198
+  type: 'test'
+  ...
+# Subtest: requires TLS, validates Host, and sets hardened response headers
+ok 7 - requires TLS, validates Host, and sets hardened response headers
+  ---
+  duration_ms: 172.5014
+  type: 'test'
+  ...
+# Subtest: rejects browser-origin WebSocket connections unless explicitly allowed
+ok 8 - rejects browser-origin WebSocket connections unless explicitly allowed
+  ---
+  duration_ms: 26.4761
+  type: 'test'
+  ...
+# Subtest: allows native app WebSocket origins for the authenticated event stream
+ok 9 - allows native app WebSocket origins for the authenticated event stream
+  ---
+  duration_ms: 22.8785
+  type: 'test'
+  ...
+# Subtest: rate limits repeated authentication failures
+ok 10 - rate limits repeated authentication failures
+  ---
+  duration_ms: 41.8315
+  type: 'test'
+  ...
+# Subtest: caps the number of registered desktops
+ok 11 - caps the number of registered desktops
+  ---
+  duration_ms: 30.3692
+  type: 'test'
+  ...
+# Subtest: rejects malformed desktop responses without forwarding them
+ok 12 - rejects malformed desktop responses without forwarding them
+  ---
+  duration_ms: 71.6353
+  type: 'test'
+  ...
+# Subtest: rejects an oversized update manifest before parsing
+ok 13 - rejects an oversized update manifest before parsing
+  ---
+  duration_ms: 16.9409
+  type: 'test'
+  ...
+1..13
+# tests 13
+# suites 0
+# pass 13
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1769.3243
+
+> @rhzycode/update-contract@0.1.0 test
+> node --test test/*.test.mjs
+
+TAP version 13
+# Subtest: parses a partial cross-platform update manifest
+ok 1 - parses a partial cross-platform update manifest
+  ---
+  duration_ms: 2.1485
+  type: 'test'
+  ...
+# Subtest: selects and normalizes one platform
+ok 2 - selects and normalizes one platform
+  ---
+  duration_ms: 0.2823
+  type: 'test'
+  ...
+# Subtest: reports missing platform metadata
+ok 3 - reports missing platform metadata
+  ---
+  duration_ms: 0.6114
+  type: 'test'
+  ...
+# Subtest: compares app versions and Apple build numbers
+ok 4 - compares app versions and Apple build numbers
+  ---
+  duration_ms: 1.498
+  type: 'test'
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 4
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 473.06

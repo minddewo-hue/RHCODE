@@ -10,6 +10,7 @@ import {
   remoteThreadMutationResultSchema,
   remoteThreadOpenResultSchema,
   remoteThreadStartResultSchema,
+  remoteTimelineDeltaResultSchema,
   remoteTurnInterruptResultSchema,
   remoteTurnStartResultSchema,
   remoteUserInputSubmitResultSchema,
@@ -28,6 +29,7 @@ import {
   type RemoteThreadMutationResult,
   type RemoteThreadOpenResult,
   type RemoteThreadStartResult,
+  type RemoteTimelineDeltaResult,
   type RemoteTurnInterruptResult,
   type RemoteTurnStartResult,
   type RemoteUserInputSubmitResult,
@@ -258,6 +260,33 @@ export class ControlClient {
       timeoutMs,
     );
     const result = remoteThreadOpenResultSchema.safeParse(value);
+    if (!result.success) throw invalidResponse("The desktop returned an invalid conversation history.");
+    return result.data;
+  }
+
+  /**
+   * Incremental timeline delta for one thread: items with
+   * `orderKey > afterOrderKey` (see sync plan §3.2 支柱三). `result.maxOrderKey`
+   * is the server-side largest key of the FULL rebuild — when it is smaller
+   * than the stored cursor the desktop restarted the scale (thread rebuilt
+   * from scratch) and the caller must fall back to a full `openThread`.
+   */
+  async fetchThreadTimeline(
+    threadId: string,
+    afterOrderKey = 0,
+    limit = 1_000,
+    timeoutMs = 60_000,
+  ): Promise<RemoteTimelineDeltaResult> {
+    const url = new URL(`${this.controlUrl}/v1/commands/threads/${encodeURIComponent(threadId)}/timeline`);
+    url.searchParams.set("afterOrderKey", String(Math.max(0, Math.floor(afterOrderKey))));
+    url.searchParams.set("limit", String(Math.max(1, Math.min(5_000, Math.floor(limit)))));
+    const value = await requestJson(
+      this.fetchImpl,
+      url.toString(),
+      { headers: this.authorizedHeaders() },
+      timeoutMs,
+    );
+    const result = remoteTimelineDeltaResultSchema.safeParse(value);
     if (!result.success) throw invalidResponse("The desktop returned an invalid conversation history.");
     return result.data;
   }

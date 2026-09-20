@@ -15,6 +15,7 @@ import {
   remoteThreadStartRequestSchema,
   remoteThreadStartResultSchema,
   remoteThreadOpenResultSchema,
+  remoteTimelineDeltaResultSchema,
   remoteThreadMutationResultSchema,
   remoteThreadModelRequestSchema,
   remoteThreadRenameRequestSchema,
@@ -35,6 +36,7 @@ import {
   type RemoteDirectoryBrowseResult,
   type RemoteThreadMutationResult,
   type RemoteThreadOpenResult,
+  type RemoteTimelineDeltaResult,
   type RemoteThreadModelRequest,
   type RemoteThreadRenameRequest,
   type RemoteThreadStartRequest,
@@ -523,6 +525,41 @@ export async function createControlPlane(options: ControlPlaneOptions = {}): Pro
     }
   });
 
+  // Incremental timeline delta: only items with orderKey > afterOrderKey, so
+  // mobile catch-up avoids re-fetching the whole thread (see sync plan §3.2 支柱三).
+  app.get("/v1/commands/threads/:threadId/timeline", async (request, reply) => {
+    if (!mobileAccess) return reply.code(404).send({ error: "Remote task control is not enabled." });
+    const client = mobileCommandClient(request, mobileAccess);
+    if (!client) return reply.code(401).send({ error: "Missing mobile access identity." });
+    if (!commands) return reply.code(503).send({ error: "Desktop task control is unavailable." });
+    const params = z.object({ threadId: z.string().min(1).max(500) }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: "Invalid remote thread timeline request." });
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const afterOrderKey = parseTimelineDeltaQuery(query, "afterOrderKey", 0);
+    const limit = parseTimelineDeltaQuery(query, "limit", 1_000, 5_000);
+    if (afterOrderKey === null || limit === null || limit < 1) {
+      return reply.code(400).send({ error: "Invalid timeline delta cursor." });
+    }
+    try {
+      const opened = remoteThreadOpenResultSchema.parse(
+        await commands.openThread(params.data.threadId, { client }),
+      );
+      const delta = opened.timeline.filter((item) => (item.orderKey ?? 0) > afterOrderKey);
+      // Cursor semantics: `maxOrderKey` is the largest key in the FULL rebuild,
+      // not the page. Mobile compares it against its stored cursor to detect a
+      // scale reset (maxOrderKey < cursor → fall back to a full openThread).
+      const result: RemoteTimelineDeltaResult = {
+        threadId: params.data.threadId,
+        timeline: delta.slice(0, limit),
+        maxOrderKey: opened.timeline.reduce((max, item) => Math.max(max, item.orderKey ?? 0), 0),
+        hasMore: delta.length > limit,
+      };
+      return reply.send(remoteTimelineDeltaResultSchema.parse(result));
+    } catch (error) {
+      return sendCommandError(reply, error);
+    }
+  });
+
   app.post("/v1/commands/threads/:threadId/turns/start", async (request, reply) => {
     if (!mobileAccess) return reply.code(404).send({ error: "Remote task control is not enabled." });
     const client = mobileCommandClient(request, mobileAccess);
@@ -895,6 +932,25 @@ function parseIdempotencyKey(value: string | string[] | undefined): string | nul
   if (typeof value !== "string") return null;
   const normalized = value.trim();
   return /^[A-Za-z0-9._:-]{8,200}$/.test(normalized) ? normalized : null;
+}
+
+/**
+ * Parse an integer query parameter for the timeline delta route. Returns the
+ * fallback when the param is absent, or null when present but not a valid
+ * non-negative integer (optionally bounded by `max`).
+ */
+function parseTimelineDeltaQuery(
+  query: Record<string, unknown>,
+  key: string,
+  fallback: number,
+  max = Number.MAX_SAFE_INTEGER,
+): number | null {
+  const value = query[key];
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value !== "string") return null;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > max) return null;
+  return parsed;
 }
 
 function turnClientMessageId(idempotencyKey: string): string | undefined {

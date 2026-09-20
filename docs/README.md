@@ -12,6 +12,7 @@
 | 排查删除对话后输入框失焦 | [删除对话焦点故障复盘](desktop-conversation-delete-focus-incident.md) |
 | 开发 Android/iOS 应用 | [移动端开发](mobile-development.md) |
 | 理解 KEY、快照、事件流和中转 | [移动连接](mobile-connection.md) |
+| 排查/改进桌面到手机的对话同步（顺序/重复/全量） | [对话同步改进方案](mobile-conversation-sync-improvement.md) |
 | 协调桌面与移动并行开发 | [并行开发约定](parallel-development.md) |
 | 构建和签名桌面/移动产物 | [发布流程](release.md) |
 | 暂存、部署和验证升级包 | [更新系统](update-system.md) |

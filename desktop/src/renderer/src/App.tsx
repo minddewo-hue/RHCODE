@@ -96,6 +96,7 @@ import {
   isActiveThreadStatus,
   isComposerRunning,
   isSameProjectPath,
+  isUsableThreadModel,
   mergeActivityDeltas,
   mergeStreamingMessageDeltas,
   modelReasoningEfforts,
@@ -115,6 +116,7 @@ import {
   storedSelectedModel,
   storeCollapsedProjectPaths,
   storeLastThread,
+  storeSelectedModel,
   summarizePrompt,
   updateStateLabel,
   type ActivityDelta,
@@ -313,6 +315,7 @@ export function App() {
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const selectedModelRef = useRef(selectedModel);
   const preferredModelRef = useRef(selectedModel);
+  const modelsRef = useRef<ModelOption[]>([]);
   const selectedProjectPathRef = useRef(projectPath);
   const selectedThreadIdRef = useRef<string | null>(null);
   const loadedThreadIdRef = useRef<string | null>(null);
@@ -349,6 +352,10 @@ export function App() {
   useEffect(() => {
     selectedModelRef.current = selectedModel;
   }, [selectedModel]);
+
+  useEffect(() => {
+    modelsRef.current = models;
+  }, [models]);
 
   useEffect(() => {
     recentProjectsRef.current = recentProjects;
@@ -453,7 +460,7 @@ export function App() {
   function ensurePreferredModel(availableModels: ModelOption[] = models): string {
     const nextModel = preferredModelFromCatalog(availableModels, preferredModelRef.current);
     preferredModelRef.current = nextModel;
-    if (nextModel) localStorage.setItem("rhzycode.selectedModel", nextModel);
+    if (nextModel) storeSelectedModel(nextModel);
     return nextModel;
   }
 
@@ -849,6 +856,28 @@ export function App() {
     resetConversation();
   }
 
+  // The model selector is bound to the open conversation: opening a thread
+  // restores the model stored for that thread instead of the global default.
+  function applyThreadModel(model: string): void {
+    if (!isUsableThreadModel(model)) {
+      applyPreferredModel();
+      return;
+    }
+    const available = modelsRef.current;
+    const resolved = available.some((entry) => entry.model === model)
+      ? model
+      : preferredModelFromCatalog(available, model) || model;
+    preferredModelRef.current = resolved;
+    selectedModelRef.current = resolved;
+    setSelectedModel(resolved);
+  }
+
+  function applyPreferredModel(): void {
+    const nextModel = ensurePreferredModel(modelsRef.current);
+    selectedModelRef.current = nextModel;
+    setSelectedModel(nextModel);
+  }
+
   function applyThreadDetail(detail: ThreadDetail): void {
     discardPendingStreamingUpdates();
     const changedThread = selectedThreadIdRef.current !== detail.thread.id
@@ -869,6 +898,7 @@ export function App() {
     });
     setWorkspaceProject(detail.thread.projectPath);
     setWorkspaceThread(detail.thread.id);
+    applyThreadModel(detail.thread.model);
     loadedThreadIdRef.current = detail.thread.id;
     setMessages(detail.messages);
     setActivities(nextActivities);
@@ -1275,13 +1305,17 @@ export function App() {
     resetConversation();
   }
 
+  // A manual selection updates the model of the open conversation only; with
+  // no conversation open it records the default used for new tasks.
   function changeSelectedModel(nextModel: string) {
-    selectedModelRef.current = nextModel;
-    preferredModelRef.current = nextModel;
-    setSelectedModel(nextModel);
-    localStorage.setItem("rhzycode.selectedModel", nextModel);
     const selectedThread = selectedThreadIdRef.current;
-    if (!selectedThread) return;
+    preferredModelRef.current = nextModel;
+    selectedModelRef.current = nextModel;
+    setSelectedModel(nextModel);
+    if (!selectedThread) {
+      storeSelectedModel(nextModel);
+      return;
+    }
     void window.rhzycode.setThreadModel(selectedThread, nextModel)
       .then((updated) => {
         setThreads((current) => current.map((thread) => thread.id === updated.id ? updated : thread));
@@ -2064,6 +2098,7 @@ export function App() {
     if (event.type === "thread.updated") {
       const active = isActiveThreadStatus(event.thread.status);
       markThreadActive(event.thread.id, active);
+      if (selectedThreadIdRef.current === event.thread.id) applyThreadModel(event.thread.model);
       setThreads((current) => {
         const existingIndex = current.findIndex((thread) => thread.id === event.thread.id);
         if (existingIndex === -1) return [event.thread, ...current];

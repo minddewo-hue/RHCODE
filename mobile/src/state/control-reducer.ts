@@ -1,4 +1,4 @@
-import type { AgentEvent, ControlSnapshot, RemoteThreadOpenResult, TimelineItem } from "@rhzycode/protocol";
+import type { AgentEvent, ControlSnapshot, RemoteThreadOpenResult, RemoteTimelineDeltaResult, TimelineItem } from "@rhzycode/protocol";
 import { dedupeTimelineItems, mergeDuplicateTimelineItems, preferTimelineItem } from "@rhzycode/protocol";
 
 export const emptyControlSnapshot: ControlSnapshot = {
@@ -101,6 +101,35 @@ function normalizeSnapshot(snapshot: ControlSnapshot): ControlSnapshot {
     ...snapshot,
     timeline: dedupeTimelineItems(snapshot.timeline.filter((item) => threadIds.has(item.threadId))),
   };
+}
+
+/**
+ * Merge an incremental thread timeline delta (GET /timeline?afterOrderKey=N)
+ * into the snapshot. Same identity rules as the live upsert path: provisional
+ * and canonical rows collapse through `dedupeTimelineItems`.
+ */
+export function mergeTimelineDelta(
+  snapshot: ControlSnapshot,
+  result: RemoteTimelineDeltaResult,
+): ControlSnapshot {
+  if (!result.timeline.length) return snapshot;
+  const timeline = new Map(snapshot.timeline.map((item) => [timelineIdentity(item), item]));
+  for (const item of result.timeline) {
+    const key = timelineIdentity(item);
+    const current = timeline.get(key);
+    timeline.set(key, current ? mergeDuplicateTimelineItems(current, item) : item);
+  }
+  return { ...snapshot, timeline: dedupeTimelineItems([...timeline.values()]) };
+}
+
+/** Largest orderKey the local timeline holds for a thread (0 = none/legacy). */
+export function localThreadMaxOrderKey(timeline: TimelineItem[], threadId: string): number {
+  let max = 0;
+  for (const item of timeline) {
+    if (item.threadId !== threadId) continue;
+    if (typeof item.orderKey === "number" && item.orderKey > max) max = item.orderKey;
+  }
+  return max;
 }
 
 function timelineIdentity(item: TimelineItem): string {

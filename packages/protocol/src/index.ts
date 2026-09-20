@@ -71,8 +71,38 @@ export const timelineItemSchema = z.object({
   })).max(10).optional(),
   files: z.array(conversationFileSchema.omit({ path: true })).max(20).optional(),
   createdAt: z.string().datetime(),
+  /**
+   * Authoritative per-thread generation order, assigned once by the desktop
+   * when the item is first created (live publish or history rebuild) and
+   * persisted with the item. Sorting/dedup must prefer this over `createdAt`,
+   * which has different semantics per data path and is display-only.
+   * Optional for compatibility: legacy items without it fall back to the
+   * legacy `createdAt`-based ordering.
+   */
+  orderKey: z.number().int().nonnegative().optional(),
 });
 export type TimelineItem = z.infer<typeof timelineItemSchema>;
+
+/**
+ * Authoritative timeline ordering. Items that both carry an `orderKey`
+ * (assigned in generation order by the desktop) are ordered by it; anything
+ * else falls back to the legacy `createdAt` → `id` ordering so pre-migration
+ * data and legacy clients merge without reshuffling.
+ */
+export function compareTimelineOrder(left: TimelineItem, right: TimelineItem): number {
+  if (left.threadId === right.threadId
+    && left.orderKey !== undefined
+    && right.orderKey !== undefined) {
+    return left.orderKey - right.orderKey || left.id.localeCompare(right.id);
+  }
+  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+}
+
+function minDefinedOrderKey(left: number | undefined, right: number | undefined): number | undefined {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  return Math.min(left, right);
+}
 
 /**
  * Choose the better version of a timeline item when the same id is upserted from
@@ -114,6 +144,8 @@ export function preferTimelineItem(current: TimelineItem, incoming: TimelineItem
     title: base.title || current.title || incoming.title,
     images,
     files,
+    // First-assigned generation order wins; never reshuffle on merge.
+    orderKey: minDefinedOrderKey(current.orderKey, incoming.orderKey),
     // Keep the earliest timestamp so streaming updates do not reshuffle history.
     createdAt: current.createdAt <= incoming.createdAt ? current.createdAt : incoming.createdAt,
   };
@@ -169,6 +201,8 @@ export function mergeDuplicateTimelineItems(current: TimelineItem, incoming: Tim
     title: base.title || other.title,
     images,
     files,
+    // First-assigned generation order wins; never reshuffle on merge.
+    orderKey: minDefinedOrderKey(current.orderKey, incoming.orderKey),
     createdAt: current.createdAt <= incoming.createdAt ? current.createdAt : incoming.createdAt,
   };
 }
@@ -194,16 +228,14 @@ export function dedupeTimelineItems(items: TimelineItem[]): TimelineItem[] {
   for (const threadItems of byThread.values()) {
     result.push(...dedupeThreadTimelineItems(threadItems));
   }
-  return result.sort((left, right) => (
-    left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)
-  ));
+  return result.sort(compareTimelineOrder);
 }
 
 function dedupeThreadTimelineItems(items: TimelineItem[]): TimelineItem[] {
   const users = items.filter((item) => item.kind === "user")
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    .sort(compareTimelineOrder);
   const assistants = items.filter((item) => item.kind === "assistant")
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    .sort(compareTimelineOrder);
   const rest = items.filter((item) => item.kind !== "user" && item.kind !== "assistant");
 
   return [
@@ -328,6 +360,11 @@ export const conversationMessageSchema = z.object({
     generated: z.boolean().optional(),
   })).optional(),
   files: z.array(conversationFileSchema).max(20).optional(),
+  /**
+   * Authoritative generation order within the thread, assigned by the
+   * desktop during history rebuild (same scale as TimelineItem.orderKey).
+   */
+  orderKey: z.number().int().nonnegative().optional(),
 });
 export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
 
@@ -527,6 +564,21 @@ export const remoteThreadOpenResultSchema = z.object({
   timeline: z.array(timelineItemSchema).max(50_000),
 });
 export type RemoteThreadOpenResult = z.infer<typeof remoteThreadOpenResultSchema>;
+
+/**
+ * Incremental timeline delta for a single thread. The desktop rebuilds the
+ * thread (openThread) and returns only items whose `orderKey` is greater than
+ * `afterOrderKey`, so the mobile client can catch up without re-fetching the
+ * whole thread. `maxOrderKey` is the next cursor; `hasMore` signals a partial
+ * page. Items without an `orderKey` (legacy) are treated as key 0.
+ */
+export const remoteTimelineDeltaResultSchema = z.object({
+  threadId: z.string().min(1),
+  timeline: z.array(timelineItemSchema).max(50_000),
+  maxOrderKey: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+});
+export type RemoteTimelineDeltaResult = z.infer<typeof remoteTimelineDeltaResultSchema>;
 
 export const remoteTurnAttachmentSchema = z.object({
   name: z.string().trim().min(1).max(240),

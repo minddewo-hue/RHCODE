@@ -354,6 +354,15 @@ export function reconcilePendingMessages(
 }
 
 function compareChatEntries(left: ChatEntry, right: ChatEntry): number {
+  // Authoritative generation order: when both rows carry an orderKey assigned
+  // by the desktop, it beats wall-clock createdAt (whose meaning differs
+  // between live and history rows). Legacy rows without it keep the old order.
+  if (left.type === "timeline" && right.type === "timeline"
+    && left.item.orderKey !== undefined
+    && right.item.orderKey !== undefined) {
+    return left.item.orderKey - right.item.orderKey
+      || left.id.localeCompare(right.id);
+  }
   const byTime = left.createdAt.localeCompare(right.createdAt);
   if (byTime) return byTime;
   // Keep stable ordering when timestamps collide during weak-network merges.

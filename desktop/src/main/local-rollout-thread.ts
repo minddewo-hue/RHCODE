@@ -135,6 +135,12 @@ export async function loadLocalRolloutThread(
   }
   messages.sort((left, right) =>
     left.createdAt.localeCompare(right.createdAt) || left.order - right.order);
+  // The sorted position IS the local generation order. Assign the same order
+  // scale toThreadDetail uses so local and resumed history merge onto one
+  // ruler (min wins on identity merges).
+  messages.forEach((entry, index) => {
+    entry.message.orderKey = index + 1;
+  });
 
   return {
     thread,

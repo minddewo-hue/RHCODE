@@ -817,6 +817,9 @@ export class DesktopRuntime extends EventEmitter {
     const cached = !requireAgent || this.loadedThreadIds.has(threadId)
       ? this.threadDetailCache.get(threadId)
       : null;
+    // Capture the last known scale before any clearing below so the rebuild
+    // that follows can stabilize its orderKeys against it.
+    const previous = this.threadDetailCache.get(threadId) ?? null;
     if (cached) {
       // Never treat sparse local fallback as an agent-backed load. A flaky
       // resume must not permanently hide assistant replies behind this cache.
@@ -853,7 +856,7 @@ export class DesktopRuntime extends EventEmitter {
     }
   }
 
-  private async loadThreadForDisplay(threadId: string): Promise<ThreadDetail> {
+  private async loadThreadForDisplay(threadId: string, previous: ThreadDetail | null = null): Promise<ThreadDetail> {
     const localThread = this.threads.get(threadId);
     const localDetail = localThread
       ? await this.loadLocalThreadDetail(localThread)
@@ -870,7 +873,7 @@ export class DesktopRuntime extends EventEmitter {
 
     try {
       const resumed = await this.resumeThread(threadId);
-      return preferRicherThreadDetail(localDetail, resumed);
+      return preferRicherThreadDetail(localDetail, resumed, previous);
     } catch (error) {
       if (localDetail) {
         this.activeThreadId = threadId;
@@ -1814,6 +1817,9 @@ export class DesktopRuntime extends EventEmitter {
     if (!this.threads.has(threadId)) throw new ControlCommandError("not_found");
     try {
       const localThread = this.threads.get(threadId)!;
+      // Last known merged scale: anchors the stabilized orderKeys so the
+      // mobile incremental cursor stays valid across opens.
+      const previous = this.threadDetailCache.get(threadId) ?? null;
       const localDetail = await this.loadLocalThreadDetail(localThread);
       // Mobile only receives this payload. Always ask App Server for its
       // authoritative history: a local rollout can look balanced while still
@@ -1827,7 +1833,7 @@ export class DesktopRuntime extends EventEmitter {
           mobileOpenResumeBudgetMs(),
           "Mobile openThread resume",
         );
-        detail = preferRicherThreadDetail(localDetail, resumed);
+        detail = preferRicherThreadDetail(localDetail, resumed, previous);
       } catch (error) {
         if (!localDetail) throw error;
         detail = localDetail;
@@ -1853,9 +1859,22 @@ export class DesktopRuntime extends EventEmitter {
         const current = timelineById.get(item.id);
         timelineById.set(item.id, current ? preferTimelineItem(current, item) : item);
       }
+      const items = [...timelineById.values()];
+      // Anchor the live counter above this rebuild so the next published item
+      // continues after the whole history instead of colliding with it.
+      const maxOrderKey = items.reduce(
+        (max, item) => Math.max(max, item.orderKey ?? 0),
+        0,
+      );
+      if (maxOrderKey > 0) this.controlPlane?.store.noteOrderBaseline(threadId, maxOrderKey);
+      // Cache the merged detail: it is the orderKey anchor for the next open
+      // (stable mobile cursor) and lets openThread(true) skip resume when the
+      // history is complete.
+      this.rememberThreadDetail(threadId, detail);
+      if (!isIncompleteRolloutHistory(detail)) this.loadedThreadIds.add(threadId);
       return {
         thread: detail.thread,
-        timeline: dedupeTimelineItems([...timelineById.values()]),
+        timeline: dedupeTimelineItems(items),
       };
     } catch (error) {
       if (error instanceof ControlCommandError) throw error;
@@ -2200,6 +2219,11 @@ export class DesktopRuntime extends EventEmitter {
   private rememberThreadDetail(threadId: string, detail: ThreadDetail): void {
     this.threadDetailCache.delete(threadId);
     this.threadDetailCache.set(threadId, detail);
+    // Anchor the live orderKey counter above the rebuilt history so the next
+    // live item continues after the whole history instead of colliding with
+    // the keys assigned during the rebuild.
+    const baseline = maxDetailOrderKey(detail);
+    if (baseline > 0) this.controlPlane?.store.noteOrderBaseline(threadId, baseline);
     while (this.threadDetailCache.size > MAX_CACHED_THREAD_DETAILS) {
       const oldestId = this.threadDetailCache.keys().next().value;
       if (typeof oldestId !== "string") break;
@@ -2366,6 +2390,11 @@ function toThreadDetail(
   const messages: ConversationMessage[] = [];
   const timeline: TimelineItem[] = [];
   const pendingRolloutImages = new Map(rolloutGeneratedImages.map((image) => [image.id, image]));
+  // The rollout item order IS the generation order. Every visible row (body
+  // message or activity) consumes one key on a single per-thread scale so the
+  // rebuilt history and the live stream share the same ruler.
+  let orderCounter = 0;
+  const nextOrderKey = () => ++orderCounter;
 
   for (const turn of thread.turns || []) {
     const firstMessageIndex = messages.length;
@@ -2383,6 +2412,7 @@ function toThreadDetail(
         messages.push({
           id: itemId,
           role: "user",
+          orderKey: nextOrderKey(),
           content: stripAttachedFileInstructions(describeUserContent(item.content)),
           ...(images.length ? { images } : {}),
           ...(uploadedFiles.length ? {
@@ -2392,13 +2422,13 @@ function toThreadDetail(
         continue;
       }
       if (itemType === "agentMessage") {
-        messages.push({ id: itemId, role: "assistant", content: String(item.text || "") });
+        messages.push({ id: itemId, role: "assistant", orderKey: nextOrderKey(), content: String(item.text || "") });
         continue;
       }
       if (itemType === "imageGeneration") {
         const image = materializeGeneratedImage(generatedImageDirectory, item);
         if (image) {
-          messages.push({ id: itemId, role: "assistant", content: "", images: [image] });
+          messages.push({ id: itemId, role: "assistant", orderKey: nextOrderKey(), content: "", images: [image] });
         }
         pendingRolloutImages.delete(rawItemId);
         continue;
@@ -2406,6 +2436,7 @@ function toThreadDetail(
       timeline.push({
         id: itemId,
         threadId: summary.id,
+        orderKey: nextOrderKey(),
         kind: timelineKind(itemType),
         status: timelineStatus(item, turn.status),
         title: timelineTitle(itemType),
@@ -2447,6 +2478,7 @@ function toThreadDetail(
       messages.push({
         id: turnScopedItemId(generated.turnId, generated.id),
         role: "assistant",
+        orderKey: nextOrderKey(),
         content: "",
         images: [generated.image],
       });
@@ -2458,12 +2490,20 @@ function toThreadDetail(
     messages.push({
       id: turnScopedItemId(generated.turnId, generated.id),
       role: "assistant",
+      orderKey: nextOrderKey(),
       content: "",
       images: [generated.image],
     });
   }
 
   return { thread: summary, messages, timeline };
+}
+
+function maxDetailOrderKey(detail: ThreadDetail): number {
+  let max = 0;
+  for (const message of detail.messages) max = Math.max(max, message.orderKey ?? 0);
+  for (const item of detail.timeline) max = Math.max(max, item.orderKey ?? 0);
+  return max;
 }
 
 function isVisibleHistoryMessage(message: ConversationMessage): boolean {
@@ -2507,6 +2547,91 @@ function historyCompletenessScore(detail: ThreadDetail): number {
 }
 
 function preferRicherThreadDetail(
+  localDetail: ThreadDetail | null,
+  resumed: ThreadDetail,
+  previous: ThreadDetail | null = null,
+): ThreadDetail {
+  // Merging two independent rebuilds collides their per-rebuild 1..n orderKey
+  // scales; stabilize the merged structure against the authoritative scales
+  // before returning.
+  return stabilizeThreadDetailKeys(localDetail, previous, selectMergedThreadDetail(localDetail, resumed));
+}
+
+/**
+ * Make the per-thread orderKey scale monotonic across openThread calls so a
+ * mobile client can use "largest orderKey" as an incremental cursor
+ * (GET /timeline?afterOrderKey=N). Rows that already had a key keep it; only
+ * never-seen rows receive new keys, always above every key seen so far.
+ *
+ * Key resolution per row:
+ *  1. local rollout key — rollout file order IS the generation order and the
+ *     rollout survives desktop restarts, so it is the most stable ruler;
+ *  2. previously cached merged detail key — keeps keys already handed to
+ *     mobile for rows absent from the local rollout (resumed-only replies);
+ *  3. a fresh key above all recorded keys, in merged array order.
+ *
+ * With no anchors at all (first observation) this falls back to the
+ * position-based renumbering below.
+ */
+function stabilizeThreadDetailKeys(
+  local: ThreadDetail | null,
+  previous: ThreadDetail | null,
+  merged: ThreadDetail,
+): ThreadDetail {
+  if (!local && !previous) return renumberThreadDetail(merged);
+
+  const messageKeys = new Map<string, number>();
+  const timelineKeys = new Map<string, number>();
+  let next = 0;
+  const record = (detail: ThreadDetail | null, fillGaps: boolean) => {
+    if (!detail) return;
+    for (const message of detail.messages) {
+      if (typeof message.orderKey !== "number" || message.orderKey <= 0) continue;
+      const existing = messageKeys.get(message.id);
+      if (existing === undefined || !fillGaps) {
+        messageKeys.set(message.id, message.orderKey);
+        next = Math.max(next, message.orderKey);
+      }
+    }
+    for (const item of detail.timeline) {
+      if (typeof item.orderKey !== "number" || item.orderKey <= 0) continue;
+      const id = `${item.threadId}\u0000${item.logicalId || item.id}`;
+      const existing = timelineKeys.get(id);
+      if (existing === undefined || !fillGaps) {
+        timelineKeys.set(id, item.orderKey);
+        next = Math.max(next, item.orderKey);
+      }
+    }
+  };
+  record(local, false);
+  record(previous, true);
+  const assign = () => ++next;
+
+  const messages = merged.messages.map((message) => ({
+    ...message,
+    orderKey: messageKeys.get(message.id) ?? assign(),
+  }));
+  const timeline = merged.timeline.map((item) => ({
+    ...item,
+    orderKey: timelineKeys.get(`${item.threadId}\u0000${item.logicalId || item.id}`) ?? assign(),
+  }));
+  return { ...merged, messages, timeline };
+}
+
+/**
+ * First-observation numbering: body rows keep the merged array order (which
+ * IS the generation order) on keys 1..m; activity rows follow on m+1.. so the
+ * rebuilt history and the live stream share one ruler.
+ */
+function renumberThreadDetail(detail: ThreadDetail): ThreadDetail {
+  let counter = 0;
+  const nextKey = () => ++counter;
+  const messages = detail.messages.map((message) => ({ ...message, orderKey: nextKey() }));
+  const timeline = detail.timeline.map((item) => ({ ...item, orderKey: nextKey() }));
+  return { ...detail, messages, timeline };
+}
+
+function selectMergedThreadDetail(
   localDetail: ThreadDetail | null,
   resumed: ThreadDetail,
 ): ThreadDetail {
@@ -2627,6 +2752,9 @@ function remoteMessageTimeline(
       content: message.content,
       ...(images?.length ? { images } : {}),
       ...(files?.length ? { files } : {}),
+      // The authoritative order comes from the rebuild walk; the synthetic
+      // timestamp below only feeds display/legacy fallbacks.
+      ...(message.orderKey !== undefined ? { orderKey: message.orderKey } : {}),
       createdAt: new Date(baseTimestamp + index).toISOString(),
     };
   });

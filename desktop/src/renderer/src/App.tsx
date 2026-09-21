@@ -105,6 +105,14 @@ import {
   providerDisplayName,
   providerCredentialPresentation,
   reconcileProjectRegistry,
+  summarizePrompt,
+  updateStateLabel,
+  type ActivityDelta,
+  type ActivityEntry,
+  type ChatMessage,
+} from "./app-utils";
+import {
+  removeStoredLastThread,
   storedApprovalPolicy,
   storedCollapsedProjectPaths,
   storedForgottenProjects,
@@ -114,15 +122,22 @@ import {
   storedReasoningEffort,
   storedSandboxMode,
   storedSelectedModel,
+  storedThemeMode,
+  storedThemePreset,
+  storeApprovalPolicy,
   storeCollapsedProjectPaths,
+  storeForgottenProjects,
+  storeLastProject,
   storeLastThread,
+  storeReasoningEffort,
+  storeRecentProjects,
+  storeSandboxMode,
   storeSelectedModel,
-  summarizePrompt,
-  updateStateLabel,
-  type ActivityDelta,
-  type ActivityEntry,
-  type ChatMessage,
-} from "./app-utils";
+  storeThemeMode,
+  storeThemePreset,
+  type ThemeMode,
+  type ThemePreset,
+} from "./renderer-preferences";
 
 interface ComposerDraft {
   text: string;
@@ -151,8 +166,6 @@ type AppDialogView = "settings" | "skills" | "transfer" | "export";
 type DeleteConfirmation =
   | { type: "conversation"; threadId: string; title: string }
   | { type: "project"; path: string; name: string };
-type ThemeMode = "light" | "dark";
-type ThemePreset = "forest" | "studio" | "glass" | "noir" | "rose" | "ocean";
 const THEME_PRESETS: Array<{ id: ThemePreset; label: string }> = [
   { id: "forest", label: "Forest" },
   { id: "studio", label: "Studio" },
@@ -161,7 +174,6 @@ const THEME_PRESETS: Array<{ id: ThemePreset; label: string }> = [
   { id: "rose", label: "Rose" },
   { id: "ocean", label: "Ocean" },
 ];
-const THEME_PRESET_IDS = new Set<string>(THEME_PRESETS.map((item) => item.id));
 
 interface ExportProjectGroup {
   key: string;
@@ -223,23 +235,22 @@ const emptySkills: SkillsStatus = {
   },
 };
 
-function storedThemeMode(): ThemeMode {
-  const mode = localStorage.getItem("rhzycode.themeMode") === "light" ? "light" : "dark";
-  document.documentElement.dataset.theme = mode;
-  document.documentElement.style.colorScheme = mode;
-  return mode;
+function initialThemeMode(): ThemeMode {
+  const value = storedThemeMode();
+  document.documentElement.dataset.theme = value;
+  document.documentElement.style.colorScheme = value;
+  return value;
 }
 
-function storedThemePreset(): ThemePreset {
-  const preset = localStorage.getItem("rhzycode.themePreset");
-  const value = THEME_PRESET_IDS.has(preset ?? "") ? (preset as ThemePreset) : "forest";
+function initialThemePreset(): ThemePreset {
+  const value = storedThemePreset();
   document.documentElement.dataset.preset = value;
   return value;
 }
 
 export function App() {
-  const [themeMode, setThemeMode] = useState<ThemeMode>(storedThemeMode);
-  const [themePreset, setThemePreset] = useState<ThemePreset>(storedThemePreset);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(initialThemeMode);
+  const [themePreset, setThemePreset] = useState<ThemePreset>(initialThemePreset);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>({ state: "connecting", error: null });
   const [gatewayStatus, setGatewayStatus] = useState<GatewayStatus>(emptyGateway);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(emptySync);
@@ -341,12 +352,12 @@ export function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode;
     document.documentElement.style.colorScheme = themeMode;
-    localStorage.setItem("rhzycode.themeMode", themeMode);
+    storeThemeMode(themeMode);
   }, [themeMode]);
 
   useEffect(() => {
     document.documentElement.dataset.preset = themePreset;
-    localStorage.setItem("rhzycode.themePreset", themePreset);
+    storeThemePreset(themePreset);
   }, [themePreset]);
 
   useEffect(() => {
@@ -367,7 +378,7 @@ export function App() {
 
   useEffect(() => {
     selectedProjectPathRef.current = projectPath;
-    if (projectPath) localStorage.setItem("rhzycode.lastProject", projectPath);
+    if (projectPath) storeLastProject(projectPath);
   }, [projectPath]);
 
   useEffect(() => {
@@ -420,13 +431,13 @@ export function App() {
         forgottenProjectPathsRef.current = synchronized.forgottenProjects;
         setRecentProjects(synchronized.projects);
         setForgottenProjectPaths(synchronized.forgottenProjects);
-        localStorage.setItem("rhzycode.recentProjects", JSON.stringify(synchronized.projects));
-        localStorage.setItem("rhzycode.forgottenProjects", JSON.stringify(synchronized.forgottenProjects));
+        storeRecentProjects(synchronized.projects);
+        storeForgottenProjects(synchronized.forgottenProjects);
 
         if (synchronized.removedProjects.some((path) =>
           isSameProjectPath(path, selectedProjectPathRef.current))) {
           navigationRevisionRef.current += 1;
-          localStorage.removeItem("rhzycode.lastProject");
+          storeLastProject("");
           setWorkspaceProject("");
           resetConversation();
         }
@@ -673,7 +684,7 @@ export function App() {
       ? reasoningEffort
       : reasoningEfforts[0] || "high";
     if (next !== reasoningEffort) setReasoningEffort(next);
-    localStorage.setItem("rhzycode.reasoningEffort", next);
+    storeReasoningEffort(next);
   }, [reasoningEffort, reasoningEfforts]);
 
   useEffect(() => {
@@ -766,7 +777,7 @@ export function App() {
   function setWorkspaceProject(path: string): void {
     selectedProjectPathRef.current = path;
     setProjectPath(path);
-    if (path) localStorage.setItem("rhzycode.lastProject", path);
+    if (path) storeLastProject(path);
   }
 
   function setWorkspaceThread(id: string | null): void {
@@ -1088,17 +1099,17 @@ export function App() {
 
   function rememberProject(path: string) {
     if (isSameProjectPath(selectedProjectPathRef.current, path)) {
-      localStorage.setItem("rhzycode.lastProject", path);
+      storeLastProject(path);
     }
     setRecentProjects((current) => {
       const next = current.some((entry) => isSameProjectPath(entry, path)) ? current : [...current, path].slice(0, 50);
-      localStorage.setItem("rhzycode.recentProjects", JSON.stringify(next));
+      storeRecentProjects(next);
       return next;
     });
     setForgottenProjectPaths((current) => {
       const next = current.filter((entry) => !isSameProjectPath(entry, path));
       if (next.length === current.length) return current;
-      localStorage.setItem("rhzycode.forgottenProjects", JSON.stringify(next));
+      storeForgottenProjects(next);
       return next;
     });
     void window.rhzycode.rememberProject(path).catch(() => undefined);
@@ -1120,25 +1131,17 @@ export function App() {
       for (const key of composerDraftsRef.current.keys()) {
         if (isSameProjectPath(key.split("\0", 1)[0] || "", path)) composerDraftsRef.current.delete(key);
       }
-      try {
-        const lastThreads = JSON.parse(localStorage.getItem("rhzycode.lastThreads") || "{}") as Record<string, unknown>;
-        const remaining = Object.fromEntries(
-          Object.entries(lastThreads).filter(([project]) => !isSameProjectPath(project, path)),
-        );
-        localStorage.setItem("rhzycode.lastThreads", JSON.stringify(remaining));
-      } catch {
-        localStorage.removeItem("rhzycode.lastThreads");
-      }
+      removeStoredLastThread(path);
       setForgottenProjectPaths((current) => {
         const next = current.some((entry) => isSameProjectPath(entry, path))
           ? current
           : [...current, path].slice(-50);
-        localStorage.setItem("rhzycode.forgottenProjects", JSON.stringify(next));
+        storeForgottenProjects(next);
         return next;
       });
       setRecentProjects((current) => {
         const next = current.filter((entry) => !isSameProjectPath(entry, path));
-        localStorage.setItem("rhzycode.recentProjects", JSON.stringify(next));
+        storeRecentProjects(next);
         return next;
       });
       setCollapsedProjectPaths((current) => {
@@ -1148,7 +1151,7 @@ export function App() {
       });
 
       if (isSameProjectPath(selectedProjectPathRef.current, path)) {
-        localStorage.removeItem("rhzycode.lastProject");
+        storeLastProject("");
         const fallback = projectGroups.find((group) => !isSameProjectPath(group.path, path));
         if (fallback) void selectProject(fallback.path);
         else {
@@ -2512,7 +2515,7 @@ export function App() {
                     onChange={(event) => {
                       const next = event.target.value as SandboxMode;
                       setSandboxMode(next);
-                      localStorage.setItem("rhzycode.sandboxMode", next);
+                      storeSandboxMode(next);
                     }}
                   >
                     <option value="read-only">Read only</option>
@@ -2528,7 +2531,7 @@ export function App() {
                     onChange={(event) => {
                       const next = event.target.value as ApprovalPolicy;
                       setApprovalPolicy(next);
-                      localStorage.setItem("rhzycode.approvalPolicy", next);
+                      storeApprovalPolicy(next);
                     }}
                   >
                     <option value="on-request">Ask as needed</option>
@@ -2545,7 +2548,7 @@ export function App() {
                       onChange={(event) => {
                         const next = event.target.value as ReasoningEffort;
                         setReasoningEffort(next);
-                        localStorage.setItem("rhzycode.reasoningEffort", next);
+                        storeReasoningEffort(next);
                       }}
                     >
                       {reasoningEfforts.map((effort) => (

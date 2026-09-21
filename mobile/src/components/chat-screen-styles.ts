@@ -1,4 +1,4 @@
-import { StyleSheet } from "react-native";
+import { Platform, StyleSheet } from "react-native";
 import { createThemedStyles } from "../ui/theme";
 
 export const chatScreenStyles = createThemedStyles((colors) => ({
@@ -73,8 +73,30 @@ export const chatScreenStyles = createThemedStyles((colors) => ({
   previewClose: { position: "absolute", top: 48, right: 20 },
   pendingLabel: { color: colors.inkFaint, fontSize: 10, lineHeight: 14, marginTop: 5, letterSpacing: 0 },
   failedLabel: { color: colors.danger },
-  assistantRow: { minWidth: 0, marginBottom: 20 },
-  assistantText: { color: colors.ink, fontSize: 15, lineHeight: 23, letterSpacing: 0 },
+  assistantRow: { width: "100%", minWidth: 0, marginBottom: 20 },
+  assistantContent: { width: "100%", minWidth: 0, gap: 11 },
+  assistantText: { width: "100%", minWidth: 0, flexShrink: 1, color: colors.ink, fontSize: 15, lineHeight: 23, letterSpacing: 0 },
+  markdownHeadingLarge: { marginTop: 5, fontSize: 19, lineHeight: 26, fontWeight: "700" },
+  markdownHeading: { marginTop: 3, fontSize: 16, lineHeight: 23, fontWeight: "700" },
+  markdownStrong: { fontWeight: "700" },
+  markdownInlineCode: { color: colors.ink, fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }), fontSize: 13, backgroundColor: colors.subtle },
+  markdownLink: { color: colors.info, textDecorationLine: "underline" },
+  markdownFileReference: { color: colors.info, fontWeight: "600" },
+  markdownQuote: { width: "100%", minWidth: 0, paddingLeft: 11, paddingVertical: 3, borderLeftWidth: 3, borderLeftColor: colors.borderStrong },
+  markdownQuoteText: { width: "100%", minWidth: 0, flexShrink: 1, color: colors.inkMuted, fontSize: 14, lineHeight: 22, letterSpacing: 0 },
+  markdownList: { width: "100%", minWidth: 0, gap: 6 },
+  markdownListRow: { width: "100%", minWidth: 0, flexDirection: "row", alignItems: "flex-start" },
+  markdownListMarker: { width: 25, flexShrink: 0, color: colors.inkMuted, fontSize: 14, lineHeight: 22, textAlign: "right", paddingRight: 8 },
+  markdownListText: { flex: 1, minWidth: 0, flexShrink: 1, color: colors.ink, fontSize: 15, lineHeight: 22, letterSpacing: 0 },
+  markdownCodeBlock: { width: "100%", minWidth: 0, overflow: "hidden", paddingHorizontal: 11, paddingVertical: 10, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, borderRadius: 7, backgroundColor: colors.subtle },
+  markdownCodeLanguage: { color: colors.inkFaint, fontSize: 9, lineHeight: 13, fontWeight: "600", textTransform: "uppercase", marginBottom: 5, letterSpacing: 0.4 },
+  markdownCodeText: { width: "100%", minWidth: 0, flexShrink: 1, color: colors.ink, fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }), fontSize: 12, lineHeight: 18 },
+  markdownRule: { width: "100%", height: StyleSheet.hairlineWidth, marginVertical: 3, backgroundColor: colors.border },
+  markdownTable: { width: "100%", minWidth: 0, gap: 8 },
+  markdownTableCard: { width: "100%", minWidth: 0, overflow: "hidden", borderWidth: 1, borderColor: colors.border, borderRadius: 7, backgroundColor: colors.surface },
+  markdownTableField: { width: "100%", minWidth: 0, paddingHorizontal: 10, paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  markdownTableLabel: { width: "100%", minWidth: 0, flexShrink: 1, color: colors.inkMuted, fontSize: 10, lineHeight: 14, fontWeight: "600", letterSpacing: 0 },
+  markdownTableValue: { width: "100%", minWidth: 0, flexShrink: 1, marginTop: 2, color: colors.ink, fontSize: 13, lineHeight: 19, letterSpacing: 0 },
   generatedImages: { width: "100%", marginTop: 8, gap: 8 },
   generatedImageButton: { width: "100%", maxWidth: 420, aspectRatio: 4 / 3, overflow: "hidden", borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, borderRadius: 7, backgroundColor: colors.subtle },
   generatedImagePressed: { opacity: 0.88 },

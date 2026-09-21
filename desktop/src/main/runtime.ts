@@ -1920,23 +1920,38 @@ export class DesktopRuntime extends EventEmitter {
 
   private async listRemoteModels(): Promise<RemoteModelListResult> {
     try {
+      if (this.gateway.getStatus().state !== "running") {
+        throw new Error("Model gateway is not running.");
+      }
+      // The mobile control plane can come online before the Agent Host
+      // finishes its (re)start, and a crashed Agent Host otherwise stays dead.
+      // Wait for a connected host so a cold desktop does not break model pickup.
+      if (this.agent.getStatus().state !== "connected") await this.startAgent();
       const response = await this.listModels();
       const gatewayModels = new Map(this.gateway.getStatus().models.flatMap((model) => [
         [model.id, model] as const,
         [model.upstreamModel, model] as const,
       ]));
       return {
-        models: (response.data || []).map((model) => {
+        // A single model that drifted out of the live gateway catalog must not
+        // make the whole remote list unavailable, so skip it with a warning.
+        models: (response.data || []).flatMap((model) => {
           const gatewayModel = gatewayModels.get(model.model) || gatewayModels.get(model.id);
-          if (!gatewayModel) throw new Error(`Model ${model.model} is missing from the current gateway catalog.`);
+          if (!gatewayModel) {
+            this.emit(
+              "agent:diagnostic",
+              `Model ${model.model} is missing from the current gateway catalog; hiding it from the mobile model list.`,
+            );
+            return [];
+          }
           const { supportedReasoningEfforts: _supportedReasoningEfforts, ...remoteModel } = model;
-          return {
+          return [{
             ...remoteModel,
             source: gatewayModelSourceName(gatewayModel),
-            sourceModelName: gatewayModel.upstreamModel,
+            sourceModelName: gatewayModel.upstreamModel || model.model,
             reasoningEfforts: supportedReasoningEfforts(model),
             isDefault: model.isDefault === true,
-          };
+          }];
         }),
       };
     } catch {
@@ -2327,7 +2342,7 @@ export class DesktopRuntime extends EventEmitter {
 const reasoningEffortValues = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 
 function gatewayModelSourceName(model: { ownedBy: string; providerId: string }): string {
-  const ownedBy = model.ownedBy.trim();
+  const ownedBy = (model.ownedBy || "").trim();
   if (ownedBy && ownedBy.toLocaleLowerCase() !== model.providerId.toLocaleLowerCase()) return ownedBy;
   if (model.providerId === "sub2api") return "Sub2API";
   return ownedBy || model.providerId;

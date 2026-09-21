@@ -1903,6 +1903,7 @@ test("does not restore an uploaded file after the user deletes the original", as
 test("executes remote commands through desktop authority with safe defaults", async () => {
   const { runtime, internals, store } = createRuntimeHarness();
   const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+  runtime.agent.getStatus = () => ({ state: "connected", error: null });
   runtime.agent.request = async (method, params) => {
     requests.push({ method, params: params as Record<string, unknown> });
     if (method === "thread/start") return { thread: { id: "thread-remote" } } as never;
@@ -2051,6 +2052,90 @@ test("executes remote commands through desktop authority with safe defaults", as
     params: { threadId: "thread-remote", turnId: "turn-remote" },
   });
   assert.equal(requests[3]?.method, "model/list");
+});
+
+test("keeps the remote model list available while the agent host restarts or a model drifts out of the catalog", async () => {
+  const { runtime } = createRuntimeHarness();
+  let agentState: "disconnected" | "connected" = "disconnected";
+  let agentStarts = 0;
+  const diagnostics: string[] = [];
+  runtime.on("agent:diagnostic", (message: string) => diagnostics.push(message));
+  runtime.agent.getStatus = () => ({ state: agentState, error: null });
+  runtime.agent.start = async () => {
+    agentStarts += 1;
+    agentState = "connected";
+  };
+  runtime.gateway.getStatus = () => ({
+    state: "running",
+    transport: "internal",
+    providerCount: 1,
+    modelCount: 1,
+    configSource: "test",
+    providers: [],
+    models: [{
+      id: "sub2api/gpt-test",
+      ownedBy: "sub2api",
+      capabilities: {},
+      providerId: "sub2api",
+      upstreamModel: "gpt-test",
+      protocol: "responses",
+      contextWindow: null,
+      runtimeInstructions: null,
+    }],
+    error: null,
+  });
+  runtime.gateway.getCatalogPath = () => "/tmp/rhzycode-remote-model-catalog.json";
+  runtime.gateway.getBaseUrl = () => "http://127.0.0.1:4000/v1";
+  runtime.agent.request = async (method) => {
+    if (method === "model/list") return {
+      data: [
+        {
+          id: "sub2api/gpt-test",
+          model: "sub2api/gpt-test",
+          displayName: "Codex - GPT Test",
+          description: "Test model",
+          defaultReasoningEffort: "high",
+          supportedReasoningEfforts: [],
+          isDefault: false,
+        },
+        {
+          id: "provider-9/ghost-model",
+          model: "provider-9/ghost-model",
+          displayName: "Ghost - Ghost Model",
+          description: "Drifted out of the gateway catalog",
+          defaultReasoningEffort: "high",
+          supportedReasoningEfforts: [],
+          isDefault: false,
+        },
+      ],
+    } as never;
+    return {} as never;
+  };
+
+  const commands = runtime.remoteCommandHandlers();
+  const result = await commands.listModels?.(remoteContext());
+
+  assert.equal(agentStarts, 1);
+  assert.equal(agentState, "connected");
+  assert.deepEqual(result, {
+    models: [{
+      id: "sub2api/gpt-test",
+      model: "sub2api/gpt-test",
+      displayName: "Codex - GPT Test",
+      source: "Sub2API",
+      sourceModelName: "gpt-test",
+      description: "Test model",
+      defaultReasoningEffort: "high",
+      reasoningEfforts: [],
+      isDefault: false,
+    }],
+  });
+  assert.equal(diagnostics.length, 1);
+  assert.match(diagnostics[0], /provider-9\/ghost-model/);
+
+  const repeated = await commands.listModels?.(remoteContext());
+  assert.deepEqual(repeated, result);
+  assert.equal(agentStarts, 1);
 });
 
 test("executes remote thread lifecycle commands and rehydrates restored state", async () => {

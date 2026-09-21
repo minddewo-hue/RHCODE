@@ -116,7 +116,7 @@ import {
   type PendingApproval,
 } from "./approval-protocol";
 
-const DEFAULT_TRANSFER_SERVER_URL = "http://218.201.210.211:8000";
+const DEFAULT_TRANSFER_SERVER_URL = "http://10.0.10.120:8000";
 
 interface RpcMessage {
   id?: number | string;

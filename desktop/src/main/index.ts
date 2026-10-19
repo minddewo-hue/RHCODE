@@ -89,6 +89,13 @@ const relayLoopbackFetch = (shouldUseNodeFetchForRelayLoopback()
 const userDataOverride = process.env.RHZYCODE_USER_DATA_DIR?.trim();
 if (userDataOverride) app.setPath("userData", resolve(userDataOverride));
 
+// Select the backend before Electron initializes Chromium's password store.
+// Existing keyring-encrypted data must be migrated before enabling this mode.
+if (process.platform === "linux" && process.env.RHZYCODE_DISABLE_KEYRING === "1") {
+  app.commandLine.appendSwitch("password-store", "basic");
+  safeStorage.setUsePlainTextEncryption(true);
+}
+
 const accelerationPolicy = hardwareAccelerationPolicy(
   process.platform,
   process.env.RHZYCODE_DISABLE_HARDWARE_ACCELERATION,

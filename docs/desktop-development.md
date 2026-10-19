@@ -76,6 +76,7 @@ npm run dev:desktop
 | `RHZYCODE_STARTUP_TRACE` | 写入不含秘密的启动诊断 |
 | `RHZYCODE_OZONE_PLATFORM` | Linux Chromium 后端；默认 `x11`，已验证原生 Wayland 时可设为 `wayland` |
 | `RHZYCODE_DISABLE_HARDWARE_ACCELERATION` | `1` 强制禁用、`0` 强制启用；未设置时 Linux VMware 主机默认禁用 |
+| `RHZYCODE_DISABLE_KEYRING` | Linux 设置为 `1` 时 Electron 使用本地 basic 存储，Codex 登录与 MCP OAuth 凭据使用文件存储；启用前须迁移已有加密数据 |
 
 Provider Key 的变量名由 `desktop/gateway.config.json` 声明。不要在文档、日志或测试输出中枚举真实值。
 
@@ -93,6 +94,10 @@ npm run test:ui --workspace @rhzycode/desktop
 Ubuntu 安装使用 `scripts/install-ubuntu.sh`，运行使用 `scripts/launch-ubuntu.sh`。安装包与启动器默认强制 Electron 使用 X11/Xwayland，避免 VMware Wayland 会话中的指针事件和 surface-role 故障；仅在已验证的原生 Wayland 主机上设置 `RHZYCODE_OZONE_PLATFORM=wayland`。Linux VMware 主机还会默认关闭硬件加速；诊断事件和本地 Crashpad 转储分别保存在 Electron `userData/diagnostics/process-events.jsonl` 和 `userData/diagnostics/crash-dumps`，不会自动上传。
 
 Linux 首次环境迁移使用原生模态框。显示期间主窗口会临时置顶，确保迁移框不会隐藏在主窗口或其他工作区后面；响应或失败后必须恢复普通窗口层级。
+
+远程桌面的 D-Bus 会话与已有 GNOME Keyring 不一致时，密钥环初始化可能阻塞启动并导致 Chromium 网络服务超时。需要免密钥环启动的 Linux 环境可在启动器中设置 `RHZYCODE_DISABLE_KEYRING=1`。该模式使用 Electron basic 存储，凭据不再受系统密钥环保护，依赖本地文件权限。已有 `gateway-credentials.json`、`control-state.bin`、`mobile-access-state.bin` 和 `project-directories.bin` 必须先备份，并在原密钥环仍可用时解密后转换为 basic 格式；不能直接切换后覆盖旧数据。
+
+该开关也会为 Codex App Server 传入 `cli_auth_credentials_store="file"` 和 `mcp_oauth_credentials_store="file"`，仅影响应用启动的子进程，不修改用户的 Codex 配置。只关闭 Electron 密钥环仍可能使 `thread/start` 在 MCP 初始化读取系统凭据时阻塞，最终报 `thread/start timed out.`。如果原来将 Codex 或 MCP OAuth 登录凭据保存在系统密钥环中，切换后需要在文件存储模式下重新登录；原密钥环凭据不会被删除。配置含义见 [OpenAI 官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 
 共享协议或控制面有变化时运行：
 

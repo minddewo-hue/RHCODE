@@ -39,6 +39,7 @@ import {
   verifyControlAccess,
 } from "./api/control-client";
 import { isRetryableConnectionError, runControlCommandWithRetry } from "./api/control-connection-model";
+import { refreshThreadTimeline } from "./api/timeline-refresh";
 import {
   normalizeAccessKey,
 } from "./auth/control-access";
@@ -568,9 +569,8 @@ function AppContent() {
       };
 
       // Local timeline cache (sync plan §3.2 支柱三): render the cached body
-      // instantly, then catch up with the delta endpoint instead of
-      // re-fetching the whole thread. A scale reset (delta.maxOrderKey below
-      // the stored cursor) falls back to the full openThread path below.
+      // instantly, then refresh all positions: orderKey cannot detect edits
+      // to an existing streaming row. A scale reset falls back to openThread.
       let cache: ThreadTimelineCache | null = null;
       if (session) {
         try {
@@ -589,28 +589,22 @@ function AppContent() {
         }
         clearOpeningIndicator();
         try {
-          let cursor = cached.maxOrderKey;
           let mergedBody = cached.timeline;
-          let pages = 0;
-          while (!cancelled && pages < 20) {
-            const delta = await runControlCommandWithRetry(
-              () => taskClient.fetchThreadTimeline(threadId, cursor),
+          const cursor = await refreshThreadTimeline(
+            (afterOrderKey) => runControlCommandWithRetry(
+              () => taskClient.fetchThreadTimeline(threadId, afterOrderKey),
               { attempts: 2 },
-            );
-            if (cancelled) return;
-            if (delta.maxOrderKey < cursor) {
-              scaleReset = true;
-              break;
-            }
-            if (delta.timeline.length) {
-              control.applyTimelineDelta(delta);
-              mergedBody = bodyCacheItems(mergedBody, delta.timeline);
-            }
-            cursor = delta.maxOrderKey;
-            pages += 1;
-            if (!delta.hasMore) break;
-          }
-          if (cancelled) return;
+            ),
+            (delta) => {
+              if (delta.timeline.length) {
+                control.applyTimelineDelta(delta);
+                mergedBody = bodyCacheItems(mergedBody, delta.timeline);
+              }
+            },
+            () => cancelled,
+          );
+          if (cancelled || cursor === null) return;
+          scaleReset = cursor < cached.maxOrderKey;
           if (!scaleReset) {
             persistTimelineCache(upsertCachedThread(cache!, threadId, cursor, mergedBody));
             sparseHistoryAttemptsRef.current.delete(threadId);

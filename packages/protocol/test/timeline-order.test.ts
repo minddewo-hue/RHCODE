@@ -13,6 +13,43 @@ function item(
   return { title: "", createdAt: "2026-07-30T00:00:00.000Z", ...partial };
 }
 
+for (const content of ["I", "I will run the command first."]) {
+  test(`keeps independent same-turn assistant identities when their text overlaps: ${content}`, () => {
+    const commentary = item({
+      id: "turn-1::commentary", threadId: "t1", kind: "assistant",
+      status: "completed", content: "I will run the command first.", orderKey: 1,
+    });
+    const answer = item({
+      id: "turn-1::answer", threadId: "t1", kind: "assistant",
+      status: "running", content, orderKey: 3,
+    });
+    const merged = dedupeTimelineItems([commentary, answer]);
+    assert.deepEqual(merged.map((row) => row.id), [commentary.id, answer.id]);
+    assert.deepEqual(merged.map((row) => row.content), [commentary.content, content]);
+    assert.equal(merged[1]?.status, "running");
+  });
+}
+
+test("keeps distinct logical identities even for unscoped streaming messages", () => {
+  const rows = ["commentary", "answer"].map((id) => item({
+    id, logicalId: `stable-${id}`, threadId: "t1", kind: "assistant",
+    status: "running", content: "Hello",
+  }));
+  assert.equal(dedupeTimelineItems(rows).length, 2);
+});
+
+test("reconciles positional history aliases without merging separate canonical messages", () => {
+  const rows = [
+    item({ id: "turn-1::item-2", logicalId: "turn-1::item-2", threadId: "t1", kind: "assistant", status: "completed", content: "I will run the command first.", orderKey: 2 }),
+    item({ id: "turn-1::msg-commentary", logicalId: "turn-1::msg-commentary", threadId: "t1", kind: "assistant", status: "completed", content: "I will run the command first.", orderKey: 3 }),
+    item({ id: "turn-1::msg-answer", logicalId: "turn-1::msg-answer", threadId: "t1", kind: "assistant", status: "running", content: "I", orderKey: 5 }),
+  ];
+  const merged = dedupeTimelineItems(rows);
+  assert.deepEqual(merged.map((row) => row.id), ["turn-1::msg-commentary", "turn-1::msg-answer"]);
+  assert.deepEqual(merged.map((row) => row.content), ["I will run the command first.", "I"]);
+  assert.equal(merged[0]?.orderKey, 2);
+});
+
 test("orders same-thread items by orderKey even when createdAt disagrees", () => {
   const items = [
     item({ id: "a", threadId: "t1", kind: "user", status: "completed", content: "u", orderKey: 1, createdAt: "2026-07-30T00:00:03.000Z" }),

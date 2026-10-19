@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import type { ProcessMetric } from "electron";
 
@@ -8,6 +9,8 @@ const DMI_IDENTITY_PATHS = [
   "/sys/class/dmi/id/board_vendor",
 ];
 const DEFAULT_RESOURCE_SAMPLE_INTERVAL_MS = 5 * 60 * 1000;
+const EVENT_LOOP_WATCHDOG_MS = 10_000;
+const WINDOWS_HANDLE_PRESSURE_THRESHOLD = 10_000;
 const MAX_CRASH_DUMPS_IN_INVENTORY = 20;
 
 export interface ProcessDiagnosticPaths {
@@ -31,13 +34,31 @@ interface DiagnosticProcessMetric {
   cpuPercent: number | null;
   workingSetSizeKb: number;
   peakWorkingSetSizeKb: number;
+  handleCount: number | null;
+  privateBytes: number | null;
+  virtualBytes: number | null;
   fileDescriptors: FileDescriptorUsage;
+}
+
+export interface WindowsProcessResources {
+  processes: Record<string, {
+    handleCount: number | null;
+    privateBytes: number | null;
+    virtualBytes: number | null;
+  }>;
+  system?: {
+    committedBytes: number | null;
+    commitLimitBytes: number | null;
+  };
 }
 
 export interface ProcessDiagnosticsOptions {
   paths: ProcessDiagnosticPaths;
   getAppMetrics?: () => ProcessMetric[];
+  platform?: NodeJS.Platform;
   procRoot?: string;
+  readWindowsProcessResources?: (pids: readonly number[])
+    => Promise<WindowsProcessResources | null>;
   sampleIntervalMs?: number;
   now?: () => Date;
 }
@@ -77,18 +98,28 @@ export function parseOpenFileLimits(value: string): { softLimit: number; hardLim
 export class ProcessDiagnostics {
   private readonly paths: ProcessDiagnosticPaths;
   private readonly getAppMetrics?: () => ProcessMetric[];
+  private readonly platform?: NodeJS.Platform;
   private readonly procRoot: string;
+  private readonly readWindowsProcessResources: (pids: readonly number[])
+    => Promise<WindowsProcessResources | null>;
   private readonly sampleIntervalMs: number;
   private readonly now: () => Date;
   private readonly canSampleProc: boolean;
   private processMetrics = new Map<number, ProcessMetric>();
   private sampleTimer: NodeJS.Timeout | null = null;
+  private eventLoopWatchdogTimer: NodeJS.Timeout | null = null;
+  private windowsResourceQueryInFlight = false;
   private writeFailureReported = false;
 
   constructor(options: ProcessDiagnosticsOptions) {
     this.paths = options.paths;
     this.getAppMetrics = options.getAppMetrics;
+    this.platform = options.platform;
     this.procRoot = options.procRoot || "/proc";
+    this.readWindowsProcessResources = options.readWindowsProcessResources
+      || ((pids) => (this.platform === "win32"
+        ? queryWindowsProcessResources(pids)
+        : Promise.resolve(null)));
     this.sampleIntervalMs = options.sampleIntervalMs || DEFAULT_RESOURCE_SAMPLE_INTERVAL_MS;
     this.now = options.now || (() => new Date());
     this.canSampleProc = fs.existsSync(this.procRoot);
@@ -99,42 +130,53 @@ export class ProcessDiagnostics {
     }
   }
 
-  start(details: Record<string, unknown>): void {
+  async start(details: Record<string, unknown>): Promise<void> {
     this.record("diagnostics_started", {
       ...details,
       eventLog: this.paths.eventLog,
       crashDumps: this.paths.crashDumps,
       existingCrashDumps: listCrashDumps(this.paths.crashDumps),
     });
-    this.recordResourceSnapshot("startup");
-    if (this.sampleTimer) return;
-    this.sampleTimer = setInterval(
-      () => this.recordResourceSnapshot("periodic"),
-      this.sampleIntervalMs,
-    );
-    this.sampleTimer.unref();
+    if (!this.sampleTimer) {
+      this.sampleTimer = setInterval(
+        () => {
+          void this.recordResourceSnapshot("periodic");
+          this.probeEventLoopLag();
+        },
+        this.sampleIntervalMs,
+      );
+      this.sampleTimer.unref();
+    }
+    await this.recordResourceSnapshot("startup");
+    this.probeEventLoopLag();
   }
 
   stop(): void {
     if (!this.sampleTimer) return;
     clearInterval(this.sampleTimer);
     this.sampleTimer = null;
+    if (this.eventLoopWatchdogTimer) {
+      clearTimeout(this.eventLoopWatchdogTimer);
+      this.eventLoopWatchdogTimer = null;
+    }
   }
 
   recordProcessGone(kind: "renderer" | "child", details: Record<string, unknown>): void {
     const resources = this.captureResources(true);
     this.record(`${kind}_process_gone`, { ...details, resources });
+    void this.recordWindowsResourceSnapshot(`${kind}_process_gone`, resources.processes);
     console.error(
       `[Diagnostics] ${kind} process gone; details written to ${this.paths.eventLog}`,
     );
   }
 
-  recordResourceSnapshot(
+  async recordResourceSnapshot(
     trigger: "startup" | "renderer-ready" | "periodic" | "shutdown" | "manual",
-  ): void {
-    // Avoid polling Electron's process monitor. On Linux, repeated refreshes can
-    // retain Chromium shared-memory handles; procfs still supplies fresh RSS/FD data.
-    const refreshProcessInventory = trigger !== "periodic" || !this.canSampleProc;
+  ): Promise<void> {
+    // Avoid polling Electron's process monitor during periodic Windows sampling.
+    // Windows resource data is collected independently; reusing the cached
+    // process inventory prevents Chromium handle growth in the main process.
+    const refreshProcessInventory = trigger !== "periodic" || (this.platform !== "win32" && !this.canSampleProc);
     const resources = this.captureResources(refreshProcessInventory);
     this.record("resource_snapshot", { trigger, resources });
     const pressured = resources.processes.filter((metric) =>
@@ -145,6 +187,26 @@ export class ProcessDiagnostics {
         `[Diagnostics] File descriptor utilization is at least 75%; details written to ${this.paths.eventLog}`,
       );
     }
+    await this.recordWindowsResourceSnapshot(trigger, resources.processes);
+  }
+
+  recordRendererResponsiveness(
+    state: "unresponsive" | "responsive",
+    details: Record<string, unknown>,
+  ): void {
+    this.record(`renderer_${state}`, details);
+  }
+
+  recordRelayForwardFailure(details: {
+    method: string;
+    path: string;
+    localOrigin: string;
+    errorName: string;
+    errorCode: string | null;
+    errorMessage: string;
+    timedOut: boolean;
+  }): void {
+    this.record("relay_forward_failed", details);
   }
 
   private captureResources(refreshProcessInventory: boolean): {
@@ -190,10 +252,45 @@ export class ProcessDiagnostics {
           workingSetSizeKb: procMemory?.workingSetSizeKb ?? metric.memory.workingSetSize,
           peakWorkingSetSizeKb: procMemory?.peakWorkingSetSizeKb
             ?? metric.memory.peakWorkingSetSize,
+          handleCount: null,
+          privateBytes: null,
+          virtualBytes: null,
           fileDescriptors: readFileDescriptorUsage(metric.pid, this.procRoot),
         };
       }),
     };
+  }
+
+  private async recordWindowsResourceSnapshot(
+    trigger: string,
+    processes: readonly DiagnosticProcessMetric[],
+  ): Promise<void> {
+    if (this.platform !== "win32" || this.windowsResourceQueryInFlight) return;
+    this.windowsResourceQueryInFlight = true;
+    try {
+      const windows = await this.readWindowsProcessResources(
+        processes.map((process) => process.pid),
+      );
+      if (!windows) return;
+      this.record("windows_resource_snapshot", { trigger, ...windows });
+      const pressured = Object.entries(windows.processes)
+        .filter(([, value]) => (value.handleCount ?? 0) >= WINDOWS_HANDLE_PRESSURE_THRESHOLD)
+        .map(([pid, value]) => ({ pid: Number(pid), ...value }));
+      if (pressured.length > 0) {
+        this.record("windows_handle_pressure", {
+          trigger,
+          threshold: WINDOWS_HANDLE_PRESSURE_THRESHOLD,
+          processes: pressured,
+        });
+        console.warn(
+          `[Diagnostics] Windows process handle count reached ${WINDOWS_HANDLE_PRESSURE_THRESHOLD}; details written to ${this.paths.eventLog}`,
+        );
+      }
+    } catch {
+      // Windows metadata is supplementary and must not affect application diagnostics.
+    } finally {
+      this.windowsResourceQueryInFlight = false;
+    }
   }
 
   private record(event: string, details: Record<string, unknown>): void {
@@ -211,6 +308,99 @@ export class ProcessDiagnostics {
       console.error(`[Diagnostics] Could not write process diagnostics: ${String(error)}`);
     }
   }
+
+  private probeEventLoopLag(): void {
+    const scheduledAt = process.hrtime.bigint();
+    const watchdog = setTimeout(() => {
+      this.eventLoopWatchdogTimer = null;
+      this.record("event_loop_watchdog_fired", { thresholdMs: EVENT_LOOP_WATCHDOG_MS });
+    }, EVENT_LOOP_WATCHDOG_MS);
+    watchdog.unref();
+    this.eventLoopWatchdogTimer = watchdog;
+    setImmediate(() => {
+      clearTimeout(watchdog);
+      if (this.eventLoopWatchdogTimer === watchdog) this.eventLoopWatchdogTimer = null;
+      const lagMs = Number(process.hrtime.bigint() - scheduledAt) / 1_000_000;
+      if (lagMs >= 500) this.record("event_loop_lag", { durationMilliseconds: lagMs });
+    });
+  }
+}
+
+export function parseWindowsProcessResources(value: string): WindowsProcessResources | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const source = parsed as {
+    processes?: Record<string, unknown>;
+    system?: Record<string, unknown>;
+  };
+  if (typeof source.processes !== "object" || source.processes === null) return null;
+  const processes: WindowsProcessResources["processes"] = {};
+  for (const [pid, value] of Object.entries(source.processes)) {
+    if (typeof value !== "object" || value === null) continue;
+    const metric = value as Record<string, unknown>;
+    processes[pid] = {
+      handleCount: parseNullableFiniteNumber(metric.handleCount),
+      privateBytes: parseNullableFiniteNumber(metric.privateBytes),
+      virtualBytes: parseNullableFiniteNumber(metric.virtualBytes),
+    };
+  }
+  return {
+    processes,
+    ...(source.system ? {
+      system: {
+        committedBytes: parseNullableFiniteNumber(source.system.committedBytes),
+        commitLimitBytes: parseNullableFiniteNumber(source.system.commitLimitBytes),
+      },
+    } : {}),
+  };
+}
+
+function parseNullableFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function queryWindowsProcessResources(
+  pids: readonly number[],
+): Promise<WindowsProcessResources | null> {
+  const uniquePids = [...new Set(pids)].filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+  if (uniquePids.length === 0) return Promise.resolve(null);
+  const idList = uniquePids.join(",");
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$resources = @{}",
+    `foreach ($id in @(${idList})) {`,
+    "  $process = Get-Process -Id $id -ErrorAction SilentlyContinue",
+    "  if ($process) { $resources[[string]$id] = @{ handleCount = $process.HandleCount; privateBytes = $process.PrivateMemorySize64; virtualBytes = $process.VirtualMemorySize64 } }",
+    "}",
+    "$os = Get-CimInstance Win32_OperatingSystem | Select-Object -First 1",
+    "$committed = if ($os) { ($os.TotalVirtualMemorySize - $os.FreeVirtualMemory) * 1KB } else { $null }",
+    "$limit = if ($os) { $os.TotalVirtualMemorySize * 1KB } else { $null }",
+    "[pscustomobject]@{ processes = $resources; system = @{ committedBytes = $committed; commitLimitBytes = $limit } } | ConvertTo-Json -Depth 4 -Compress",
+  ].join("\n");
+  return new Promise((resolve) => {
+    const child = spawn("powershell.exe", ["-NoProfile", "-Command", script], {
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    const timeout = setTimeout(() => child.kill(), 10_000);
+    const finish = (result: WindowsProcessResources | null) => {
+      clearTimeout(timeout);
+      resolve(result);
+    };
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.once("error", () => finish(null));
+    child.once("close", (code) => {
+      finish(code === 0 ? parseWindowsProcessResources(stdout) : null);
+    });
+  });
 }
 
 function readFileDescriptorUsage(pid: number, procRoot: string): FileDescriptorUsage {

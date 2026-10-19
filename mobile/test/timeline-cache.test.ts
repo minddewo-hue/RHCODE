@@ -45,13 +45,20 @@ test("treats a corrupt cache file as empty", async () => {
   assert.deepEqual(await store.load(), {});
 });
 
-test("treats a wrong-version cache as empty", async () => {
+test("discards v1 caches that may contain incorrectly merged assistant text", async () => {
   const values = new Map<string, string>([[
     "timeline-cache",
-    JSON.stringify({ version: 2, threads: {} }),
+    JSON.stringify({
+      version: 1,
+      threads: { "thread-1": entry(5, now) },
+    }),
   ]]);
   const store = createInMemoryTimelineCacheStore(values);
   assert.deepEqual(await store.load(), {});
+  const fresh = upsertCachedThread({}, "thread-1", 6, [item("assistant-6", 6)]);
+  await store.save(fresh);
+  assert.equal(JSON.parse(values.get("timeline-cache")!).version, 2);
+  assert.deepEqual(await store.load(), fresh);
 });
 
 test("LRU keeps only the most recently updated threads", () => {

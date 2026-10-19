@@ -706,6 +706,32 @@ test("localThreadMaxOrderKey tracks the largest per-thread cursor", () => {
   ], "thread-1"), 7);
 });
 
+test("history refresh cannot swallow a same-turn commentary when the final answer starts with its prefix", () => {
+  const commentary = {
+    ...timeline, id: "turn-1::commentary", kind: "assistant" as const,
+    status: "completed" as const, content: "I will run the command first.", orderKey: 1,
+  };
+  const partial = {
+    ...commentary, id: "turn-1::answer", status: "running" as const,
+    content: "I", orderKey: 3,
+  };
+  let snapshot = hydrateThreadSnapshot(emptyControlSnapshot, { thread, timeline: [commentary, partial] });
+  snapshot = mergeControlSnapshot(snapshot, {
+    ...emptyControlSnapshot, threads: [thread], timeline: [commentary, partial], lastSequence: 1,
+  });
+  snapshot = mergeTimelineDelta(snapshot, {
+    threadId: thread.id, timeline: [partial], maxOrderKey: 3, hasMore: false,
+  });
+  snapshot = applyAgentEvent(snapshot, {
+    type: "timeline.upserted", sequence: 2,
+    item: { ...partial, content: "I have finished the command.", status: "completed" },
+  });
+  assert.deepEqual(snapshot.timeline.map((row) => [row.id, row.content, row.status]), [
+    [commentary.id, commentary.content, "completed"],
+    [partial.id, "I have finished the command.", "completed"],
+  ]);
+});
+
 test("keeps similar assistant replies from different turns", () => {
   const hydrated = hydrateThreadSnapshot({
     ...emptyControlSnapshot,

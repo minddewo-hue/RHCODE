@@ -293,9 +293,14 @@ function sameUserPayload(left: TimelineItem, right: TimelineItem): boolean {
 function isStreamingContentDuplicate(left: TimelineItem, right: TimelineItem): boolean {
   if (left.threadId !== right.threadId || left.kind !== right.kind) return false;
   if (left.id === right.id) return true;
+  // Content prefixes are only a fallback for legacy/provisional identities.
+  // Distinct stable messages (e.g. commentary and final answer in one turn)
+  // often start with the same token and must never consume each other.
+  const hasFallbackIdentity = isFallbackTimelineIdentity(left) || isFallbackTimelineIdentity(right);
+  if (!hasFallbackIdentity && left.logicalId && right.logicalId && left.logicalId !== right.logicalId) return false;
   const leftTurnId = timelineItemTurnId(left.id);
   const rightTurnId = timelineItemTurnId(right.id);
-  if (leftTurnId && rightTurnId && leftTurnId !== rightTurnId) return false;
+  if (leftTurnId && rightTurnId && (leftTurnId !== rightTurnId || !hasFallbackIdentity)) return false;
   const leftContent = left.content || "";
   const rightContent = right.content || "";
   if (!leftContent && !rightContent) {
@@ -311,6 +316,14 @@ function isStreamingContentDuplicate(left: TimelineItem, right: TimelineItem): b
 function timelineItemTurnId(itemId: string): string | null {
   const separator = itemId.indexOf("::");
   return separator > 0 ? itemId.slice(0, separator) : null;
+}
+
+function isFallbackTimelineIdentity(item: TimelineItem): boolean {
+  // App Server can assign positional ids while a turn is still being written;
+  // local rollout parsing also has a positional fallback for missing ids.
+  const separator = item.id.lastIndexOf("::");
+  const rawId = separator < 0 ? item.id : item.id.slice(separator + 2);
+  return /^(?:item-\d+|offline-message-\d+)$/.test(rawId);
 }
 
 function normalizeTimelineText(value: string): string {
@@ -331,7 +344,7 @@ function timelineAttachmentSignature(item: TimelineItem): string {
 
 function timelineIdentityScore(item: TimelineItem): number {
   let score = 0;
-  if (item.id.includes("::")) score += 100;
+  if (item.id.includes("::") && !isFallbackTimelineIdentity(item)) score += 100;
   if (!isProvisionalUserTimelineItem(item)) score += 20;
   if (item.status === "completed" || item.status === "failed") score += 10;
   else if (item.status === "running") score += 5;

@@ -9,11 +9,17 @@ import {
 } from "../../desktop/src/main/control-plane/app";
 import { ControlClient, ControlClientError } from "../src/api/control-client";
 import { runControlCommandWithRetry } from "../src/api/control-connection-model";
-import { buildChatEntries, type PendingMessage } from "../src/components/chat-screen-model";
+import { refreshThreadTimeline } from "../src/api/timeline-refresh";
+import {
+  assistantDisplayContent,
+  buildChatEntries,
+  type PendingMessage,
+} from "../src/components/chat-screen-model";
 import {
   emptyControlSnapshot,
   hydrateThreadSnapshot,
   mergeControlSnapshot,
+  mergeTimelineDelta,
 } from "../src/state/control-reducer";
 
 test("connects the mobile client to the real desktop control contract", async () => {
@@ -64,6 +70,112 @@ test("connects the mobile client to the real desktop control contract", async ()
       { controlUrl },
     ).getSnapshot();
     assert.equal(replacementSnapshot.hosts.some((host) => host.id === "desktop-integration"), true);
+  } finally {
+    await controlPlane.stop();
+  }
+});
+
+test("round-trips this conversation through desktop openThread and mobile chat state unchanged", async () => {
+  const mobileAccess = new MobileAccessManager();
+  const accessKey = mobileAccess.rotateAccessKey();
+  const acceptedAt = "2026-10-16T08:00:00.000Z";
+  const threadId = "thread-conversation-roundtrip";
+  const thread = {
+    id: threadId,
+    hostId: "desktop-roundtrip",
+    title: "Conversation data round-trip",
+    projectPath: "D:\\work_space\\RHZYCODE",
+    model: "test/model",
+    status: "completed" as const,
+    updatedAt: acceptedAt,
+  };
+  const expectedMessages = [
+    {
+      role: "user" as const,
+      content: "当前的手机版 显示的数据还是不对。   和电脑版生成的 文字内容都  对不上。电脑版是对的。传输到手机版的数据 还是有问题。检查原因",
+    },
+    {
+      role: "assistant" as const,
+      content: "我会先沿着“电脑版生成内容 → 传输/存储 → 手机版读取与渲染”的链路检查，重点比对两端的数据结构、序列化和缓存逻辑；先定位差异来源，再用相关测试验证。",
+    },
+    {
+      role: "user" as const,
+      content: "你可以自己添加一个测试接口，模拟下获取对话。看看返回的数据和实际数据能对得上吗？  就使用本对话的内容就可以 。开始",
+    },
+    {
+      role: "assistant" as const,
+      content: [
+        "现有控制面已经有真实的 `GET /v1/commands/threads/:threadId`，测试可以注入模拟桌面 `openThread`，再让真正的手机 `ControlClient` 发 HTTP 请求；不需要加暴露在生产环境的调试接口。",
+        "",
+        "接下来我会加一条端到端回归测试，使用本对话原文（含中文、空格、换行和 Markdown），逐站断言服务端原始数据、HTTP 返回、手机合并状态及聊天列表文本完全一致。",
+      ].join("\n"),
+    },
+    {
+      role: "user" as const,
+      content: [
+        "微信团队 安全考试 恢复账号 你已完成学习，请仔细阅读以下内容并勾选，完成后即可申请恢复账号:",
+        "1.我已知悉，使用外挂、非官方客户端等违规工具，违反《微信个人账号使用规范》，且此类工具未经安全检测，会带来严重的账号与财产安全风险。 我已了解以上违规行为，并承诺立即纠正。",
+        "2.我清楚知悉，微信对外挂的治理是常态化持续性的，不存在“风头已过\"的说法。若再次违规使用外挂，平台将升级处罚至永久限制。 我已知晓再次违规的严重后果，并保证不再使 用。",
+        "3.我郑重承诺:立即彻底卸载所有相关违规软件，从微信官网或官方应用商店下载正版微信(卸载前务必《备份聊天记录》)，并保证今后自觉遵守平台规范。",
+        "我承诺切实履行以上全部保证，规范使用账 申请恢复",
+        "以上是微信回复申请的 截图内容 微信号 使用插件hook 微信安卓端。 现在触发 了风控。 帮我分析下 有什么办法避免",
+        "你应该能搜索到这个对话吧？  我是这个对话出错的。 继续测试。",
+      ].join("\n"),
+    },
+    {
+      role: "assistant" as const,
+      content: "可以，而且刚才已经做了**接口链路模拟**：模拟桌面返回本对话内容，再验证手机版收到和显示的文本是否一致，结果一致。\n\n但要模拟你遇到的**真实错误**，还需要桌面实际返回的那份对话数据。拿到它后，可以用同一份数据重放接口，并分别检查 HTTP 返回、手机解析、缓存合并和最终显示；也可以人为模拟截断、重复消息、旧缓存覆盖等情况，观察哪种能复现问题。\n\n所以目前验证了“模拟数据传过去没变”，还没验证“真实会话数据传过去没变”。",
+    },
+  ];
+  const timeline = expectedMessages.map((message, index) => ({
+    id: `turn-${index + 1}::message-${index + 1}`,
+    logicalId: `turn-${index + 1}::message-${index + 1}`,
+    turnId: `turn-${index + 1}`,
+    threadId,
+    kind: message.role,
+    status: "completed" as const,
+    title: message.role === "user" ? "You" : "RHZYCODE",
+    content: message.content,
+    createdAt: acceptedAt,
+    orderKey: index + 1,
+  }));
+  const desktopPayload = { thread, timeline };
+  const commands = {
+    async openThread(requestedThreadId: string) {
+      assert.equal(requestedThreadId, threadId);
+      return desktopPayload;
+    },
+  } as Pick<ControlCommandHandlers, "openThread"> as ControlCommandHandlers;
+  const controlPlane = await createControlPlane({ logLevel: "silent", mobileAccess, commands });
+  const address = await controlPlane.start({ host: "127.0.0.1", port: 0 });
+  const client = new ControlClient(accessKey.key, {
+    controlUrl: `http://127.0.0.1:${address.port}`,
+  });
+
+  try {
+    const fetched = await client.openThread(threadId);
+    const mobileState = hydrateThreadSnapshot(emptyControlSnapshot, fetched);
+    const entries = buildChatEntries({
+      selectedThreadId: threadId,
+      timeline: mobileState.timeline,
+      pendingMessages: [],
+      approvals: [],
+      userInputs: [],
+    }, false);
+    const actualMessages = entries.flatMap((entry) => (
+      entry.type === "timeline"
+        ? [{ role: entry.item.kind, content: entry.item.content }]
+        : []
+    ));
+
+    assert.deepEqual(fetched.timeline.map((item) => item.content), expectedMessages.map((item) => item.content));
+    assert.deepEqual(actualMessages, expectedMessages);
+    assert.deepEqual(
+      entries.flatMap((entry) => entry.type === "timeline" && entry.item.kind === "assistant"
+        ? [assistantDisplayContent(entry.item)]
+        : []),
+      expectedMessages.filter((item) => item.role === "assistant").map((item) => item.content),
+    );
   } finally {
     await controlPlane.stop();
   }
@@ -333,6 +445,65 @@ test("recovers one user row and the completed AI reply after socket and HTTP los
   } finally {
     socket.close();
     await controlPlane.stop();
+  }
+});
+
+test("refreshes cached running text over real HTTP across three turns with paginated history", async () => {
+  const mobileAccess = new MobileAccessManager();
+  const key = mobileAccess.rotateAccessKey();
+  const thread = {
+    id: "thread-running-cache",
+    hostId: "local-desktop",
+    title: "Streaming cache regression",
+    projectPath: "D:\\work_space\\RHZYCODE",
+    model: "test/model",
+    status: "running" as const,
+    updatedAt: "2026-10-16T00:00:00.000Z",
+  };
+  let authoritative: ControlSnapshot["timeline"] = [];
+  const commands = {
+    async openThread() { return { thread, timeline: [...authoritative].reverse() }; },
+  } as Pick<ControlCommandHandlers, "openThread"> as ControlCommandHandlers;
+  const plane = await createControlPlane({ logLevel: "silent", mobileAccess, commands });
+  const address = await plane.start({ host: "127.0.0.1", port: 0 });
+  const client = new ControlClient(key.key, { controlUrl: `http://127.0.0.1:${address.port}` });
+  let mobile = emptyControlSnapshot;
+  try {
+    for (let round = 1; round <= 3; round += 1) {
+      const partial = {
+        id: `turn-${round}::assistant`,
+        threadId: thread.id,
+        kind: "assistant" as const,
+        title: "Assistant",
+        content: `round ${round}\n`,
+        status: "running" as const,
+        createdAt: thread.updatedAt,
+        orderKey: round,
+      };
+      authoritative.push(partial);
+      mobile = hydrateThreadSnapshot(mobile, { thread, timeline: [partial] });
+      // Phone loses the socket while this same row grows; no new key is created.
+      const complete = {
+        ...partial,
+        content: partial.content + "Unicode: \u5fae\u4fe1\u56e2\u961f\n".repeat(300),
+        status: "completed" as const,
+      };
+      authoritative = authoritative.map((item) => item.id === complete.id ? complete : item);
+      const oldDelta = await client.fetchThreadTimeline(thread.id, round, 1);
+      assert.equal(oldDelta.timeline.length, 0, "position-only catch-up misses the changed body");
+      const cursors: number[] = [];
+      await refreshThreadTimeline(async (cursor) => {
+        cursors.push(cursor);
+        return client.fetchThreadTimeline(thread.id, cursor, 1);
+      }, (page) => { mobile = mergeTimelineDelta(mobile, page); });
+      assert.deepEqual(cursors, Array.from({ length: round }, (_, index) => index));
+      assert.deepEqual(
+        mobile.timeline.map(({ id, content, status }) => ({ id, content, status })),
+        authoritative.map(({ id, content, status }) => ({ id, content, status })),
+      );
+    }
+  } finally {
+    await plane.stop();
   }
 });
 

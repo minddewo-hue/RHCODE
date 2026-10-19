@@ -43,7 +43,7 @@ if (!fs.statSync(projectRoot).isDirectory()) {
 }
 fs.mkdirSync(outputRoot, { recursive: true });
 
-const runtime = new DesktopRuntime(gatewayRoot, codexHome, "127.0.0.1", 0);
+const runtime = new DesktopRuntime(gatewayRoot, codexHome);
 const startedAt = new Date().toISOString();
 const results: ModelResult[] = [];
 

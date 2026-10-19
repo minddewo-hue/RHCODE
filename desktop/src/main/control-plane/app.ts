@@ -544,7 +544,9 @@ export async function createControlPlane(options: ControlPlaneOptions = {}): Pro
       const opened = remoteThreadOpenResultSchema.parse(
         await commands.openThread(params.data.threadId, { client }),
       );
-      const delta = opened.timeline.filter((item) => (item.orderKey ?? 0) > afterOrderKey);
+      const delta = opened.timeline
+        .filter((item) => (item.orderKey ?? 0) > afterOrderKey)
+        .sort((left, right) => (left.orderKey ?? 0) - (right.orderKey ?? 0));
       // Cursor semantics: `maxOrderKey` is the largest key in the FULL rebuild,
       // not the page. Mobile compares it against its stored cursor to detect a
       // scale reset (maxOrderKey < cursor → fall back to a full openThread).

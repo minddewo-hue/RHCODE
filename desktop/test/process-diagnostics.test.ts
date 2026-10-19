@@ -8,6 +8,7 @@ import {
   ProcessDiagnostics,
   parseOpenFileLimits,
   parseProcMemoryStatus,
+  parseWindowsProcessResources,
   processDiagnosticPaths,
   readLinuxHostIdentity,
 } from "../src/main/process-diagnostics.js";
@@ -47,6 +48,20 @@ test("parses Linux process resident memory", () => {
   assert.equal(parseProcMemoryStatus("Name:\telectron"), null);
 });
 
+test("parses Windows process handles and system commit metrics", () => {
+  assert.deepEqual(parseWindowsProcessResources([
+    "{\"processes\":{\"40908\":{\"handleCount\":17777,\"privateBytes\":536870912,",
+    "\"virtualBytes\":1073741824}},\"system\":{\"committedBytes\":46386606080,",
+    "\"commitLimitBytes\":75598614528}}",
+  ].join("")), {
+    processes: {
+      40908: { handleCount: 17777, privateBytes: 536870912, virtualBytes: 1073741824 },
+    },
+    system: { committedBytes: 46386606080, commitLimitBytes: 75598614528 },
+  });
+  assert.equal(parseWindowsProcessResources("not-json"), null);
+});
+
 test("persists resource, process-gone, and crash dump inventory records", (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-diagnostics-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -81,6 +96,7 @@ test("persists resource, process-gone, and crash dump inventory records", (conte
     reason: "crashed",
     exitCode: 5,
   });
+  diagnostics.recordRendererResponsiveness("responsive", { webContentsId: 17 });
   diagnostics.stop();
 
   const records = fs.readFileSync(paths.eventLog, "utf8")
@@ -91,6 +107,7 @@ test("persists resource, process-gone, and crash dump inventory records", (conte
     "diagnostics_started",
     "resource_snapshot",
     "child_process_gone",
+    "renderer_responsive",
   ]);
   assert.equal(records[0].existingCrashDumps[0].path, dump);
   const processes = records[1].resources.processes as Array<Record<string, any>>;
@@ -98,6 +115,93 @@ test("persists resource, process-gone, and crash dump inventory records", (conte
   assert.equal(processes.find((process) => process.pid === childPid)?.fileDescriptors.softLimit, 256);
   assert.equal(records[2].reason, "crashed");
   assert.equal(records[2].exitCode, 5);
+  assert.equal(records[3].webContentsId, 17);
+});
+
+test("does not refresh Electron metrics during periodic Windows sampling", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-diagnostics-windows-periodic-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = processDiagnosticPaths(path.join(root, "user-data"));
+  let metricReads = 0;
+  const diagnostics = new ProcessDiagnostics({
+    paths,
+    platform: "win32",
+    procRoot: path.join(root, "missing-proc"),
+    getAppMetrics: () => {
+      metricReads += 1;
+      return [{
+        pid: process.pid,
+        type: "Browser",
+        creationTime: Date.now(),
+        cpu: { percentCPUUsage: 1, idleWakeupsPerSecond: 0 },
+        memory: { workingSetSize: 128, peakWorkingSetSize: 256 },
+      }];
+    },
+    readWindowsProcessResources: async () => ({
+      processes: {
+        [String(process.pid)]: {
+          handleCount: 100,
+          privateBytes: 200,
+          virtualBytes: 300,
+        },
+      },
+    }),
+  });
+
+  await diagnostics.start({});
+  await diagnostics.recordResourceSnapshot("periodic");
+  await diagnostics.recordResourceSnapshot("periodic");
+  diagnostics.stop();
+
+  assert.equal(metricReads, 1);
+  const records = fs.readFileSync(paths.eventLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, any>);
+  assert.equal(records.filter((record) => record.event === "windows_resource_snapshot").length, 3);
+});
+
+test("records Windows handles, private memory, and commit pressure", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-diagnostics-windows-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = processDiagnosticPaths(path.join(root, "user-data"));
+  const diagnostics = new ProcessDiagnostics({
+    paths,
+    platform: "win32",
+    getAppMetrics: () => [],
+    readWindowsProcessResources: async (pids) => {
+      if (!pids.includes(process.pid)) return null;
+      return {
+        processes: {
+          [String(process.pid)]: {
+            handleCount: 1370,
+            privateBytes: 152530944,
+            virtualBytes: 220200960,
+          },
+        },
+        system: { committedBytes: 46386606080, commitLimitBytes: 75598614528 },
+      };
+    },
+    sampleIntervalMs: 60_000,
+  });
+
+  await diagnostics.start({});
+  diagnostics.stop();
+  const records = fs.readFileSync(paths.eventLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, any>);
+  const resource = records.find((candidate) => candidate.event === "resource_snapshot");
+  const windows = records.find((candidate) => candidate.event === "windows_resource_snapshot");
+  const main = (resource.resources.processes as Array<Record<string, any>>)[0];
+  assert.equal(main.handleCount, null);
+  assert.equal(windows.processes[String(process.pid)].handleCount, 1370);
+  assert.equal(windows.processes[String(process.pid)].privateBytes, 152530944);
+  assert.equal(windows.processes[String(process.pid)].virtualBytes, 220200960);
+  assert.deepEqual(windows.system, {
+    committedBytes: 46386606080,
+    commitLimitBytes: 75598614528,
+  });
 });
 
 test("keeps diagnostics best-effort when its directory is not writable", (context) => {

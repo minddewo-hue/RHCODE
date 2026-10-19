@@ -209,8 +209,7 @@ export class ControlStore extends EventEmitter {
 
   /**
    * Assign the thread's next orderKey on first creation of an identity;
-   * streaming upserts of an existing identity carry no key and keep the first
-   * one (preferTimelineItem/mergeDuplicateTimelineItems retain the minimum).
+   * streaming upserts retain that key in both the store and emitted events.
    * Items that already carry a key (history rebuilds, restored state) only
    * bump the counter so the live stream continues after them.
    */
@@ -220,7 +219,8 @@ export class ControlStore extends EventEmitter {
       if (item.orderKey > counter) this.orderCounters.set(item.threadId, item.orderKey);
       return item;
     }
-    if (this.timeline.has(timelineIdentityKey(item))) return item;
+    const existing = this.timeline.get(timelineIdentityKey(item));
+    if (existing) return { ...item, orderKey: existing.orderKey };
     const orderKey = counter + 1;
     this.orderCounters.set(item.threadId, orderKey);
     return { ...item, orderKey };

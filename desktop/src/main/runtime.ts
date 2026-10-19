@@ -104,7 +104,10 @@ import {
   resolveArtifactPaths,
   type ManagedFileRecord,
 } from "./managed-file-store";
-import { DesktopRelayClient } from "./desktop-relay-client";
+import {
+  DesktopRelayClient,
+  type RelayForwardFailureDiagnostic,
+} from "./desktop-relay-client";
 import {
   approvalResponse,
   createApprovalRequest,
@@ -284,17 +287,30 @@ export class DesktopRuntime extends EventEmitter {
     private readonly projectDirectories = new ProjectDirectoryRegistry(),
     gatewayConfigPath?: string,
     fetchImpl?: typeof fetch,
+    relayLoopbackFetch = fetchImpl,
   ) {
     super();
     this.gateway = new GatewayModule(gatewayRoot, undefined, gatewayConfigPath, fetchImpl);
     const transferServerUrl = process.env.RHZYCODE_TRANSFER_SERVER_URL?.trim() || DEFAULT_TRANSFER_SERVER_URL;
     this.desktopRelay = mobileAccess && transferServerUrl
-      ? new DesktopRelayClient({ serverUrl: transferServerUrl, fetchImpl })
+      ? new DesktopRelayClient({
+        serverUrl: transferServerUrl,
+        ...(relayLoopbackFetch ? { fetchImpl: relayLoopbackFetch } : {}),
+      })
       : null;
     this.desktopRelay?.on("error", (error) => this.emit(
       "agent:diagnostic",
       `Public relay connection failed: ${error instanceof Error ? error.message : String(error)}`,
     ));
+    this.desktopRelay?.on("forward-failed", (details: RelayForwardFailureDiagnostic) => {
+      this.emit("relay:forward-failed", details);
+      this.emit(
+        "agent:diagnostic",
+        details.timedOut
+          ? "Mobile relay request to this computer timed out."
+          : "Mobile relay could not reach this computer's local control service.",
+      );
+    });
     this.managedFiles = new ManagedFileStore(path.join(codexHome, "attachments"));
     removeRemoteAttachments(path.join(codexHome, "temp", "mobile-attachments"));
     this.syncStatus = {
@@ -566,20 +582,43 @@ export class DesktopRuntime extends EventEmitter {
 
   async listModels(): Promise<ModelListResponse> {
     await this.refreshGatewayModelsForCatalog();
-    const response = await this.agent.request<{
-      data?: Array<Omit<ModelOption, "supportedReasoningEfforts" | "isDefault"> & {
-        supportedReasoningEfforts?: ModelOption["supportedReasoningEfforts"];
-        isDefault?: boolean;
-      }>;
-    }>("model/list", { cursor: null, includeHidden: false, limit: 100 });
-    return {
-      ...response,
-      data: response.data?.map((model) => ({
-        ...model,
-        supportedReasoningEfforts: model.supportedReasoningEfforts || [],
-        isDefault: model.isDefault === true,
-      })),
+    type RawModel = Omit<ModelOption, "supportedReasoningEfforts" | "isDefault"> & {
+      supportedReasoningEfforts?: ModelOption["supportedReasoningEfforts"];
+      isDefault?: boolean;
     };
+    type ModelListPage = { data?: RawModel[]; next_cursor?: string | null };
+    const rawModels: RawModel[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 10; page += 1) {
+      const response: ModelListPage = await this.agent.request<ModelListPage>(
+        "model/list",
+        { cursor, includeHidden: false, limit: 200 },
+      );
+      rawModels.push(...(response.data || []));
+      cursor = typeof response.next_cursor === "string" && response.next_cursor
+        ? response.next_cursor
+        : null;
+      if (!cursor || !(response.data || []).length) break;
+    }
+    const models = rawModels.map((model) => ({
+      ...model,
+      supportedReasoningEfforts: model.supportedReasoningEfforts || [],
+      isDefault: model.isDefault === true,
+    }));
+    const knownModels = new Set(models.map((model) => model.model));
+    for (const gatewayModel of this.gateway.getStatus().models) {
+      if (knownModels.has(gatewayModel.id)) continue;
+      models.push({
+        id: gatewayModel.id,
+        model: gatewayModel.id,
+        displayName: `${gatewayModel.ownedBy} - ${gatewayModel.upstreamModel}`,
+        description: `${gatewayModel.upstreamModel} through the local RHZY gateway.`,
+        defaultReasoningEffort: "none",
+        supportedReasoningEfforts: [],
+        isDefault: false,
+      });
+    }
+    return { data: models };
   }
 
   private async refreshGatewayModelsForCatalog(): Promise<void> {
@@ -2328,6 +2367,8 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   private finalizeThreadTimeline(threadId: string, failed: boolean): void {
+    // Finalize the latest buffered text, not the last coalesced preview.
+    this.timelinePublishCoalescer.flush();
     const items = this.controlPlane?.store.snapshot().timeline || [];
     for (const item of items) {
       if (item.threadId !== threadId || (item.status !== "running" && item.status !== "pending")) continue;

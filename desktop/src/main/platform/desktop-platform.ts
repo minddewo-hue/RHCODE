@@ -67,6 +67,12 @@ export function shouldUseElectronNetFetch(
   return platform !== "linux";
 }
 
+export function shouldUseNodeFetchForRelayLoopback(
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return platform === "win32";
+}
+
 /**
  * Electron 43 is not reliable with the VMware Wayland compositor used by the
  * supported Ubuntu workstation. X11 remains available through Xwayland and

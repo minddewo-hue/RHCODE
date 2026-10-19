@@ -40,6 +40,7 @@ import {
   processDiagnosticPaths,
   readLinuxHostIdentity,
 } from "./process-diagnostics";
+import type { RelayForwardFailureDiagnostic } from "./desktop-relay-client";
 import {
   bundledCodexExecutable,
   desktopUpdatePlatform,
@@ -48,6 +49,7 @@ import {
   preferredCodexPath,
   shouldQuitWhenAllWindowsClose,
   shouldUseElectronNetFetch,
+  shouldUseNodeFetchForRelayLoopback,
 } from "./platform/desktop-platform";
 import {
   resolveTaskWindowChrome,
@@ -80,6 +82,9 @@ const { autoUpdater } = updaterPackage;
 const systemFetch = (shouldUseElectronNetFetch()
   ? net.fetch.bind(net)
   : globalThis.fetch.bind(globalThis)) as typeof fetch;
+const relayLoopbackFetch = (shouldUseNodeFetchForRelayLoopback()
+  ? globalThis.fetch.bind(globalThis)
+  : systemFetch) as typeof fetch;
 
 const userDataOverride = process.env.RHZYCODE_USER_DATA_DIR?.trim();
 if (userDataOverride) app.setPath("userData", resolve(userDataOverride));
@@ -104,6 +109,7 @@ try {
 const processDiagnostics = new ProcessDiagnostics({
   paths: diagnosticPaths,
   getAppMetrics: () => app.getAppMetrics(),
+  platform: process.platform,
 });
 
 let mainWindow: BrowserWindow | null = null;
@@ -223,6 +229,16 @@ function createWindow(): BrowserWindow {
       console.warn("[Renderer] Reloading after an unexpected renderer exit");
       window.webContents.reload();
     }, 250);
+  });
+  window.webContents.on("unresponsive", () => {
+    processDiagnostics.recordRendererResponsiveness("unresponsive", {
+      webContentsId: window.webContents.id,
+    });
+  });
+  window.webContents.on("responsive", () => {
+    processDiagnostics.recordRendererResponsiveness("responsive", {
+      webContentsId: window.webContents.id,
+    });
   });
   window.webContents.on("console-message", (details) => {
     if (details.level === "warning" || details.level === "error") {
@@ -609,6 +625,9 @@ function registerIpc(
   activeRuntime.on("agent:diagnostic", (message) =>
     sendToRenderer(mainWindow, "agent:diagnostic", message),
   );
+  activeRuntime.on("relay:forward-failed", (details: RelayForwardFailureDiagnostic) => {
+    processDiagnostics.recordRelayForwardFailure(details);
+  });
   activeRuntime.on("gateway:status", (status) =>
     sendToRenderer(mainWindow, "gateway:status", status),
   );
@@ -888,6 +907,7 @@ app.whenReady().then(async () => {
     projectDirectories,
     runtimeGatewayConfigPath,
     systemFetch,
+    relayLoopbackFetch,
   );
   traceStartup("runtime-created");
   registerIpc(runtime, codexHome, credentials, updates, mobileAccess, skillsManager, () => ({

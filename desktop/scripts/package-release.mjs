@@ -61,10 +61,10 @@ if (requestedPlatform === "linux") {
     throw new Error(`Unable to generate the ${requestedPlatform} release icon: ${iconResult.stderr.trim()}`);
   }
 }
-const codexPath = resolveCodexPath();
 const expectedVersion = JSON.parse(
   fs.readFileSync(path.join(desktopDir, "codex-version.json"), "utf8"),
 ).cli;
+const codexPath = resolveCodexPath(expectedVersion);
 const actualVersion = spawnSync(codexPath, ["--version"], { encoding: "utf8" });
 if (actualVersion.status !== 0) {
   throw new Error(`Unable to execute the Codex binary at ${codexPath}.`);
@@ -208,15 +208,76 @@ const audit = auditRelease({
 for (const artifact of artifacts) console.log(artifact);
 console.log(audit.manifestPath);
 
-function resolveCodexPath() {
+function resolveCodexPath(expectedVersion) {
   if (process.env.RHZYCODE_CODEX_PATH) return path.resolve(process.env.RHZYCODE_CODEX_PATH);
   const command = process.platform === "win32" ? "where.exe" : "which";
   const result = spawnSync(command, ["codex"], { encoding: "utf8" });
-  const executable = result.stdout.split(/\r?\n/).find(Boolean);
-  if (result.status !== 0 || !executable) {
+  const executables = result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap(resolveCodexExecutableCandidates);
+  const npmCodexExecutable = resolveNpmCodexExecutable();
+  if (npmCodexExecutable) executables.unshift(npmCodexExecutable);
+  if (result.status !== 0 || executables.length === 0) {
     throw new Error("Codex CLI was not found. Set RHZYCODE_CODEX_PATH before packaging.");
   }
-  return path.resolve(executable.trim());
+
+  // A machine can have both an older standalone install and a newer npm install.
+  // Package the candidate matching the version fact source, not the first PATH hit.
+  for (const executable of executables) {
+    const version = spawnSync(executable, ["--version"], { encoding: "utf8", windowsHide: true });
+    if (version.status === 0 && version.stdout.trim().endsWith(expectedVersion)) {
+      return executable;
+    }
+  }
+  return path.resolve(executables[0]);
+}
+
+function resolveCodexExecutableCandidates(commandPath) {
+  const resolved = path.resolve(commandPath);
+  if (process.platform !== "win32") return [resolved];
+
+  // npm creates codex, codex.cmd, and codex.ps1 wrappers. Only the native
+  // executable can be spawned directly and bundled as an extraResource.
+  if (resolved.toLowerCase().endsWith(".exe")) return [resolved];
+  if (!resolved.toLowerCase().endsWith("\\codex.cmd")) return [];
+
+  const platformPackage = process.arch === "arm64" ? "codex-win32-arm64" : "codex-win32-x64";
+  const targetTriple = process.arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc";
+  const executable = path.join(
+    path.dirname(resolved),
+    "node_modules",
+    "@openai",
+    "codex",
+    "node_modules",
+    "@openai",
+    platformPackage,
+    "vendor",
+    targetTriple,
+    "bin",
+    "codex.exe",
+  );
+  return fs.existsSync(executable) ? [executable] : [];
+}
+
+function resolveNpmCodexExecutable() {
+  if (process.platform !== "win32") return null;
+  const prefix = path.resolve(process.env.npm_config_prefix || path.dirname(process.execPath));
+  const executable = path.join(
+    prefix,
+    "node_modules",
+    "@openai",
+    "codex",
+    "node_modules",
+    "@openai",
+    process.arch === "arm64" ? "codex-win32-arm64" : "codex-win32-x64",
+    "vendor",
+    process.arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc",
+    "bin",
+    "codex.exe",
+  );
+  return fs.existsSync(executable) ? executable : null;
 }
 
 function resolveCodexDistributionRoot(codexPath) {

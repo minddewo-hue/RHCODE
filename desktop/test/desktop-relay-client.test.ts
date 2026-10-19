@@ -48,6 +48,51 @@ test("carries a public mobile request through the desktop reverse tunnel", async
   assert.equal(offline.status, 503);
 });
 
+test("reports a sanitized diagnostic when local relay forwarding fails", async (context) => {
+  // transferserver is runtime JavaScript and intentionally has no TypeScript build step.
+  // @ts-expect-error Cross-workspace JavaScript module has no declaration file.
+  const { createTransferServer } = await import("../../transferserver/app.mjs");
+  const { app } = await createTransferServer({ requireTls: false });
+  await app.listen({ host: "127.0.0.1", port: 0 });
+  context.after(() => app.close());
+  const relayAddress = app.server.address();
+  assert.ok(relayAddress && typeof relayAddress === "object");
+  const relayUrl = `http://127.0.0.1:${relayAddress.port}`;
+  const failedFetch = async (): Promise<Response> => {
+    const error = new Error(`Fetch failed for http://127.0.0.1:8790/v1/snapshot?key=${key} Bearer ${key}`) as Error & { code?: string };
+    error.name = "FetchError";
+    error.code = "ECONNRESET";
+    throw error;
+  };
+  const client = new DesktopRelayClient({ serverUrl: relayUrl, fetchImpl: failedFetch as typeof fetch });
+  client.on("error", () => undefined);
+  let diagnostic: unknown = null;
+  client.once("forward-failed", (value) => { diagnostic = value; });
+  client.start("http://127.0.0.1:8790", key);
+  context.after(() => client.stop());
+  await waitFor(async () => (await fetch(`${relayUrl}/health`)).json().then((value) => value.onlineDesktops === 1));
+
+  const response = await fetch(`${relayUrl}/control/v1/snapshot`, {
+    headers: { Authorization: `Bearer ${key}` },
+  });
+
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), {
+    error: "desktop_relay_failed",
+    message: "Local request failed.",
+  });
+  assert.deepEqual(diagnostic, {
+    method: "GET",
+    path: "/v1/snapshot",
+    localOrigin: "http://127.0.0.1:8790",
+    errorName: "FetchError",
+    errorCode: "ECONNRESET",
+    errorMessage: "Fetch failed for http://127.0.0.1:8790/v1/snapshot Bearer [redacted]",
+    timedOut: false,
+  });
+  assert.doesNotMatch(JSON.stringify(diagnostic), new RegExp(key));
+});
+
 test("buffers a mobile heartbeat while the local event socket is connecting", async (context) => {
   const local = createServer((_request, response) => {
     response.statusCode = 404;

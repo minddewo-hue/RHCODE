@@ -1618,6 +1618,33 @@ test("routes concurrent turn events to the matching thread", () => {
   assert.equal((forwarded[0]?.params as Record<string, unknown>)?.threadId, "thread-2");
 });
 
+for (const status of ["completed", "interrupted", "failed"]) {
+  test(`flushes buffered assistant text before finalizing a ${status} turn`, () => {
+    const { internals, store } = createRuntimeHarness();
+    internals.activeTurns.set("thread-1", "turn-buffered");
+    for (const delta of ["first", " second", " third"]) {
+      internals.handleAgentMessage({
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-buffered",
+          itemId: "assistant-buffered",
+          delta,
+        },
+      });
+    }
+    internals.handleAgentMessage({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-buffered", status } },
+    });
+    const row = store.snapshot().timeline.find((item) => item.id === "turn-buffered::assistant-buffered");
+    assert.equal(row?.content, "first second third");
+    assert.equal(row?.status, status === "failed" ? "failed" : "completed");
+    const frames = store.listEvents(0).filter((event) => event.type === "timeline.upserted");
+    assert.equal(frames.every((event) => event.type === "timeline.upserted" && event.item.orderKey === 1), true);
+  });
+}
+
 test("finalizes running timeline items when a turn is interrupted", async () => {
   const { runtime, internals, store } = createRuntimeHarness();
   internals.activeTurns.set("thread-1", "turn-1");
@@ -2136,6 +2163,46 @@ test("keeps the remote model list available while the agent host restarts or a m
   const repeated = await commands.listModels?.(remoteContext());
   assert.deepEqual(repeated, result);
   assert.equal(agentStarts, 1);
+});
+
+test("keeps manually configured gateway models selectable when the agent catalog omits them", async () => {
+  const { runtime } = createRuntimeHarness();
+  runtime.gateway.getStatus = () => ({
+    state: "running",
+    transport: "internal",
+    providerCount: 1,
+    modelCount: 1,
+    configSource: "test",
+    providers: [],
+    models: [{
+      id: "custom/gemini-3.8-flash-high",
+      ownedBy: "custom",
+      capabilities: {},
+      providerId: "custom",
+      upstreamModel: "gemini-3.8-flash-high",
+      protocol: "chat_completions",
+      contextWindow: null,
+      maxContextWindow: null,
+      effectiveContextWindowPercent: 90,
+      contextWindowSource: null,
+      runtimeInstructions: null,
+    }],
+    error: null,
+  });
+  runtime.agent.request = async (method) => {
+    assert.equal(method, "model/list");
+    return { data: [] } as never;
+  };
+
+  assert.deepEqual((await runtime.listModels()).data, [{
+    id: "custom/gemini-3.8-flash-high",
+    model: "custom/gemini-3.8-flash-high",
+    displayName: "custom - gemini-3.8-flash-high",
+    description: "gemini-3.8-flash-high through the local RHZY gateway.",
+    defaultReasoningEffort: "none",
+    supportedReasoningEfforts: [],
+    isDefault: false,
+  }]);
 });
 
 test("executes remote thread lifecycle commands and rehydrates restored state", async () => {

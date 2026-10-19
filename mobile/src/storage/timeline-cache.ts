@@ -5,8 +5,8 @@ import { z } from "zod";
 /**
  * Per-connection local cache of thread timelines (sync plan §3.2 支柱三).
  * Stores the body rows (user/assistant) plus the largest `orderKey` seen per
- * thread so a cold start can render instantly and then catch up incrementally
- * via GET /timeline?afterOrderKey=N instead of re-fetching every thread.
+ * thread so a cold start can render instantly. Refresh existing positions too:
+ * orderKey tracks message placement, not revisions of a streaming message.
  */
 
 export interface TextFileAdapter {
@@ -29,8 +29,10 @@ const cachedThreadSchema = z.object({
   updatedAt: z.string().datetime(),
 });
 
+// v1 may contain text from independent assistant messages merged by prefix.
+const timelineCacheVersion = 2;
 const cacheSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(timelineCacheVersion),
   threads: z.record(z.string().min(1).max(500), cachedThreadSchema),
 });
 
@@ -54,7 +56,7 @@ export class ThreadTimelineCacheStore {
 
   async save(threads: ThreadTimelineCache): Promise<void> {
     try {
-      await this.adapter.write(JSON.stringify({ version: 1, threads: pruneTimelineCache(threads) }));
+      await this.adapter.write(JSON.stringify({ version: timelineCacheVersion, threads: pruneTimelineCache(threads) }));
     } catch {
       // Best-effort persistence only; the network paths never depend on it.
     }

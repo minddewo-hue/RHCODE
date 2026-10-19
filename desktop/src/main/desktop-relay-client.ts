@@ -18,6 +18,16 @@ interface DesktopRelayClientOptions {
   heartbeatTimeoutMs?: number;
 }
 
+export interface RelayForwardFailureDiagnostic {
+  method: string;
+  path: string;
+  localOrigin: string;
+  errorName: string;
+  errorCode: string | null;
+  errorMessage: string;
+  timedOut: boolean;
+}
+
 export class DesktopRelayClient extends EventEmitter {
   private socket: WebSocket | null = null;
   private eventSockets = new Map<string, WebSocket>();
@@ -159,6 +169,8 @@ export class DesktopRelayClient extends EventEmitter {
         bodyBase64: responseBody.toString("base64"),
       });
     } catch (error) {
+      const failure = relayForwardFailureDiagnostic(method, requestPath, this.localUrl, error);
+      this.emit("forward-failed", failure);
       this.send(relaySocket, {
         type: "response",
         id,
@@ -166,7 +178,7 @@ export class DesktopRelayClient extends EventEmitter {
         headers: { "content-type": "application/json" },
         bodyBase64: Buffer.from(JSON.stringify({
           error: "desktop_relay_failed",
-          message: error instanceof Error && error.name === "AbortError" ? "Local request timed out." : "Local request failed.",
+          message: failure.timedOut ? "Local request timed out." : "Local request failed.",
         })).toString("base64"),
       });
     } finally {
@@ -287,6 +299,57 @@ export class DesktopRelayClient extends EventEmitter {
     }
     socket.send(JSON.stringify(value));
   }
+}
+
+function relayForwardFailureDiagnostic(
+  method: string,
+  requestPath: string,
+  localUrl: string,
+  error: unknown,
+): RelayForwardFailureDiagnostic {
+  const timeout = error instanceof Error && error.name === "AbortError";
+  return {
+    method,
+    path: requestPath.split("?")[0] || "/v1/",
+    localOrigin: localOrigin(localUrl),
+    errorName: error instanceof Error && /^[A-Za-z0-9_.-]{1,120}$/.test(error.name)
+      ? error.name
+      : "Error",
+    errorCode: relayErrorCode(error),
+    errorMessage: sanitizeRelayErrorMessage(error instanceof Error ? error.message : "Local request failed."),
+    timedOut: timeout,
+  };
+}
+
+function relayErrorCode(error: unknown): string | null {
+  const source = error && typeof error === "object"
+    ? error as { code?: unknown; cause?: { code?: unknown } }
+    : null;
+  const candidate = source?.code ?? source?.cause?.code;
+  return typeof candidate === "string" && /^[A-Z0-9_:-]{1,80}$/.test(candidate)
+    ? candidate
+    : null;
+}
+
+function localOrigin(value: string): string {
+  try {
+    const url = new URL(value);
+    return new Set(["127.0.0.1", "::1", "localhost"]).has(url.hostname)
+      ? url.origin
+      : "invalid-local-origin";
+  } catch {
+    return "invalid-local-origin";
+  }
+}
+
+function sanitizeRelayErrorMessage(value: string): string {
+  return value
+    .replace(/rhzy_[A-Za-z0-9_-]{43}/g, "[redacted-key]")
+    .replace(/Bearer\s+[^\s,;]+/gi, "Bearer [redacted]")
+    .replace(/\b(authorization|access[_-]?token|token|key)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
+    .replace(/(https?:\/\/[^\s?#]+)\?[^\s]*/gi, "$1")
+    .replace(/[\r\n\0]/g, " ")
+    .slice(0, 500) || "Local request failed.";
 }
 
 function normalizeLocalUrl(value: string): string {

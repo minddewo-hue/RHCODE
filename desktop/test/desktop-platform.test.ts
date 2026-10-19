@@ -10,6 +10,7 @@ import {
   preferredCodexPath,
   shouldQuitWhenAllWindowsClose,
   shouldUseElectronNetFetch,
+  shouldUseNodeFetchForRelayLoopback,
 } from "../src/main/platform/desktop-platform.js";
 
 test("maps Node desktop platforms to protocol and update platform names", () => {
@@ -32,6 +33,12 @@ test("uses Node fetch on Linux to avoid Chromium shared-memory retention", () =>
   assert.equal(shouldUseElectronNetFetch("linux"), false);
   assert.equal(shouldUseElectronNetFetch("win32"), true);
   assert.equal(shouldUseElectronNetFetch("darwin"), true);
+});
+
+test("uses Node fetch for the Windows relay loopback path", () => {
+  assert.equal(shouldUseNodeFetchForRelayLoopback("win32"), true);
+  assert.equal(shouldUseNodeFetchForRelayLoopback("linux"), false);
+  assert.equal(shouldUseNodeFetchForRelayLoopback("darwin"), false);
 });
 
 test("uses the stable X11 backend for Linux unless the operator overrides it", () => {

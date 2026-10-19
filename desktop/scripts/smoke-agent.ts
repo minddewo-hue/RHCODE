@@ -21,7 +21,7 @@ const switchFromModel = process.env.RHZYCODE_SMOKE_FROM_MODEL || "sub2api/gpt-5.
 const switchToModel = process.env.RHZYCODE_SMOKE_TO_MODEL || "sub2api/gpt-5.4";
 const mode = parseMode(process.argv.slice(2));
 
-const runtime = new DesktopRuntime(gatewayRoot, codexHome, "127.0.0.1", 0);
+const runtime = new DesktopRuntime(gatewayRoot, codexHome);
 
 try {
   await runtime.start();

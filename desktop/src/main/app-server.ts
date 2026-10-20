@@ -24,6 +24,21 @@ interface AppServerStartOptions {
   configOverrides?: Record<string, string | boolean | number>;
 }
 
+export function appServerConfigOverrides(
+  overrides: AppServerStartOptions["configOverrides"] = {},
+  platform: NodeJS.Platform = process.platform,
+  disableKeyring = process.env.RHZYCODE_DISABLE_KEYRING,
+): Record<string, string | boolean | number> {
+  if (platform !== "linux" || disableKeyring !== "1") return { ...overrides };
+  // Electron's password-store switch does not affect the Codex subprocess.
+  // MCP's automatic credential store can block thread/start on Secret Service.
+  return {
+    ...overrides,
+    cli_auth_credentials_store: "file",
+    mcp_oauth_credentials_store: "file",
+  };
+}
+
 export function appServerInitializeParams() {
   return {
     clientInfo: {
@@ -65,7 +80,7 @@ export class AppServerClient extends EventEmitter {
     this.setState("connecting");
     if (options.codexHome) mkdirSync(options.codexHome, { recursive: true });
     const executable = process.env.RHZYCODE_CODEX_PATH || "codex";
-    const configArgs = Object.entries(options.configOverrides || {}).flatMap(([key, value]) => [
+    const configArgs = Object.entries(appServerConfigOverrides(options.configOverrides)).flatMap(([key, value]) => [
       "-c",
       `${key}=${toTomlValue(value)}`,
     ]);

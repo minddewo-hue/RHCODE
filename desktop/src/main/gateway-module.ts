@@ -29,7 +29,6 @@ export class GatewayModule extends EventEmitter {
   private handle: EmbeddedGatewayHandle | null = null;
   private state: GatewayModuleState = "stopped";
   private error: string | null = null;
-  private probeTimer: NodeJS.Timeout | null = null;
   private probeInFlight: Promise<GatewayModuleStatus> | null = null;
   private lastEmittedStatusKey: string | null = null;
   private catalogPath: string | null = null;
@@ -86,7 +85,7 @@ export class GatewayModule extends EventEmitter {
       this.catalogPath = this.writeRuntimeCatalog(this.handle.models);
       this.error = null;
       this.setState("running");
-      this.startProbeLoop();
+      // Probe once at startup; configuration changes restart the gateway and probe again.
       void this.probeProviders();
       return this.getStatus();
     } catch (error) {
@@ -97,7 +96,6 @@ export class GatewayModule extends EventEmitter {
   }
 
   async stop(): Promise<GatewayModuleStatus> {
-    this.stopProbeLoop();
     const handle = this.handle;
     this.handle = null;
     this.catalogPath = null;
@@ -234,18 +232,6 @@ export class GatewayModule extends EventEmitter {
     return this.probeInFlight;
   }
 
-  private startProbeLoop(): void {
-    this.stopProbeLoop();
-    this.probeTimer = setInterval(() => {
-      void this.probeProviders().catch(() => undefined);
-    }, 60_000);
-    this.probeTimer.unref();
-  }
-
-  private stopProbeLoop(): void {
-    if (this.probeTimer) clearInterval(this.probeTimer);
-    this.probeTimer = null;
-  }
 
   private setState(state: GatewayModuleState): void {
     this.state = state;

@@ -10,6 +10,7 @@ import {
   type MobileUpdatePlatform,
   type MobileUpdateStatus,
 } from "./mobile-update";
+import { createMobileUpdateCheckRuntime, type MobileUpdateCheckRuntime } from "./mobile-update-check-runtime";
 
 interface MobileUpdateControllerOptions {
   currentVersion: string;
@@ -24,7 +25,9 @@ export function useMobileUpdate(options: MobileUpdateControllerOptions): {
 } {
   const platform = mobileUpdatePlatform();
   const [status, setStatus] = useState<MobileUpdateStatus>(initialMobileUpdateStatus);
-  const announcedVersion = useRef<string | null>(null);
+  const checkRuntime = useRef<MobileUpdateCheckRuntime | null>(null);
+  const statusRef = useRef(status);
+  statusRef.current = status;
   const pendingInstallPermission = useRef<AndroidUpdate | null>(null);
   const installPermissionScreenOpened = useRef(false);
   const downloadedUpdate = useRef<AndroidUpdate | null>(null);
@@ -122,48 +125,54 @@ export function useMobileUpdate(options: MobileUpdateControllerOptions): {
     return () => subscription.remove();
   }, [installDownloadedUpdate, platform]);
 
-  const check = useCallback(async (announce: boolean) => {
-    if (!platform) return;
-    setStatus((current) => ({ state: "checking", latest: current.latest, error: null }));
-    try {
-      const latestStatus = await fetchMobileUpdate(options.currentVersion, {
+  const check = useCallback((automatic: boolean) => (
+    checkRuntime.current?.check(automatic) || Promise.resolve()
+  ), []);
+
+  useEffect(() => {
+    if (!platform) return undefined;
+    const runtime = createMobileUpdateCheckRuntime({
+      load: () => fetchMobileUpdate(options.currentVersion, {
         platform,
         manifestUrl: options.manifestUrl,
         currentVersionCode: platform === "android" ? Number(options.currentBuildNumber) : undefined,
         currentBuildNumber: platform === "ios" ? options.currentBuildNumber : undefined,
-      });
-      setStatus(latestStatus);
-      if (!announce && latestStatus.state === "current") Alert.alert("当前版本已是最新");
-      if (announce
-        && latestStatus.state === "available"
-        && announcedVersion.current !== latestStatus.latest.version) {
-        announcedVersion.current = latestStatus.latest.version;
-        Alert.alert(
-          "发现新版本",
-          `RHZYCODE ${latestStatus.latest.version} 已可用。`,
-          [
-            { text: "稍后", style: "cancel" },
-            {
-              text: latestStatus.latest.platform === "ios" ? "前往 App Store" : "下载并安装",
-              onPress: () => void install(latestStatus.latest),
-            },
-          ],
-        );
-      }
-    } catch (error) {
-      setStatus((current) => ({
+      }),
+      readAppState: () => AppState.currentState,
+      canCheck: () => !installInFlight.current
+        && !pendingInstallPermission.current
+        && !pendingSystemInstaller.current
+        && !["downloading", "ready_to_install", "awaiting_permission", "installing"].includes(statusRef.current.state),
+      onChecking: () => setStatus((current) => ({ state: "checking", latest: current.latest, error: null })),
+      onResult: setStatus,
+      onCurrent: () => Alert.alert("当前版本已是最新"),
+      onError: (error) => setStatus((current) => ({
         state: "error",
         latest: current.latest,
         error: error instanceof Error ? error.message : "无法检查更新。",
-      }));
-    }
+      })),
+      onAvailable: (update) => {
+        Alert.alert(
+          "发现新版本",
+          `RHZYCODE ${update.version} 已可用。`,
+          [
+            { text: "稍后", style: "cancel" },
+            {
+              text: update.platform === "ios" ? "前往 App Store" : "下载并安装",
+              onPress: () => void install(update),
+            },
+          ],
+        );
+      },
+    });
+    checkRuntime.current = runtime;
+    const subscription = AppState.addEventListener("change", runtime.appStateChanged);
+    return () => {
+      subscription.remove();
+      runtime.dispose();
+      if (checkRuntime.current === runtime) checkRuntime.current = null;
+    };
   }, [install, options.currentBuildNumber, options.currentVersion, options.manifestUrl, platform]);
-
-  useEffect(() => {
-    if (!platform) return undefined;
-    const initialCheck = setTimeout(() => void check(true), 3_000);
-    return () => clearTimeout(initialCheck);
-  }, [check, platform]);
 
   return { status, check, install };
 }

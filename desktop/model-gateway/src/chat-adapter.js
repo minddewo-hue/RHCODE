@@ -63,19 +63,28 @@ function mergeSystemMessages(messages) {
 export function chatToResponse(request, chatResponse, responseId, publicModel) {
   const choice = chatResponse.choices?.[0] || {};
   const message = choice.message || {};
+  const outcome = chatResponseOutcome(choice.finish_reason);
   const output = [];
+  const reasoning = chatReasoningText(message);
+  if (reasoning) output.push({
+    id: `rs_${randomId()}`, type: "reasoning",
+    status: outcome.status === "completed" ? "completed" : "incomplete",
+    summary: [], content: [{ type: "reasoning_text", text: reasoning }],
+  });
 
   if (typeof message.content === "string" && message.content.length > 0) {
     output.push({
       id: `msg_${randomId()}`,
       type: "message",
-      status: "completed",
+      status: outcome.status === "completed" ? "completed" : "incomplete",
       role: "assistant",
       content: [{ type: "output_text", text: message.content, annotations: [] }],
     });
   }
 
-  for (const toolCall of message.tool_calls || []) {
+  const toolCalls = outcome.status === "completed" ? message.tool_calls || [] : [];
+  for (const toolCall of toolCalls) validateToolArguments(toolCall.function?.name, toolCall.function?.arguments);
+  for (const toolCall of toolCalls) {
     output.push(chatToolCallToResponseItem(request, toolCall));
   }
 
@@ -84,7 +93,7 @@ export function chatToResponse(request, chatResponse, responseId, publicModel) {
     responseId,
     publicModel,
     createdAt: chatResponse.created || nowSeconds(),
-    status: "completed",
+    ...outcome,
     output,
     usage: mapUsage(chatResponse.usage),
   });
@@ -99,6 +108,7 @@ export async function streamChatAsResponses({
   publicModel,
   onComplete,
   onError,
+  onFinish,
   debugLog = () => {},
 }) {
   clientRes.writeHead(200, {
@@ -112,10 +122,29 @@ export async function streamChatAsResponses({
   const usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
   let nextOutputIndex = 0;
   let textState = null;
+  let reasoningState = null;
   const toolStates = new Map();
   const customToolNames = getCustomToolNames(request);
   const bridgedToolNames = getBridgedToolNames(request);
   let completed = false;
+  let finishReason = null;
+  let doneReceived = false;
+  let usageReceived = false;
+
+  const reportFinish = (response) => onFinish?.({
+    response_status: response.status,
+    finish_reason: finishReason,
+    terminal_received: finishReason != null,
+    done_received: doneReceived,
+    incomplete_reason: response.incomplete_details?.reason ?? null,
+    error_code: response.error?.code ?? null,
+    tool_call_count: toolStates.size,
+    output_text_chars: textState?.text.length || 0,
+    reasoning_text_chars: reasoningState?.text.length || 0,
+    max_output_tokens: request.max_output_tokens ?? null,
+    usage_received: usageReceived,
+    usage: usageReceived ? { ...usage } : null,
+  });
 
   const baseResponse = makeResponseObject({
     request,
@@ -128,6 +157,34 @@ export async function streamChatAsResponses({
   });
   writeSse(clientRes, "response.created", { response: baseResponse });
   writeSse(clientRes, "response.in_progress", { response: baseResponse });
+
+  const appendReasoning = (text) => {
+    if (!reasoningState) {
+      const item = { id: `rs_${randomId()}`, type: "reasoning", status: "in_progress", summary: [], content: [] };
+      reasoningState = { itemId: item.id, outputIndex: nextOutputIndex++, text: "", item };
+      writeSse(clientRes, "response.output_item.added", { output_index: reasoningState.outputIndex, item });
+      writeSse(clientRes, "response.content_part.added", {
+        item_id: item.id, output_index: reasoningState.outputIndex, content_index: 0,
+        part: { type: "reasoning_text", text: "" },
+      });
+    }
+    reasoningState.text += text;
+    writeSse(clientRes, "response.reasoning_text.delta", {
+      item_id: reasoningState.itemId, output_index: reasoningState.outputIndex, content_index: 0, delta: text,
+    });
+  };
+
+  const finishReasoning = (status) => {
+    if (!reasoningState || reasoningState.done) return;
+    const part = { type: "reasoning_text", text: reasoningState.text };
+    reasoningState.item.status = status;
+    reasoningState.item.content = [part];
+    const location = { item_id: reasoningState.itemId, output_index: reasoningState.outputIndex, content_index: 0 };
+    writeSse(clientRes, "response.reasoning_text.done", { ...location, text: reasoningState.text });
+    writeSse(clientRes, "response.content_part.done", { ...location, part });
+    writeSse(clientRes, "response.output_item.done", { output_index: reasoningState.outputIndex, item: reasoningState.item });
+    reasoningState.done = true;
+  };
 
   const ensureTextState = () => {
     if (textState) return textState;
@@ -195,10 +252,10 @@ export async function streamChatAsResponses({
     });
   };
 
-  const finishText = () => {
+  const finishText = (status = "completed") => {
     if (!textState || textState.done) return;
     const part = { type: "output_text", text: textState.text, annotations: [] };
-    textState.item.status = "completed";
+    textState.item.status = status;
     textState.item.content = [part];
     writeSse(clientRes, "response.output_text.done", {
       item_id: textState.itemId,
@@ -270,6 +327,7 @@ export async function streamChatAsResponses({
 
   const currentOutput = () => {
     const indexed = [];
+    if (reasoningState?.done) indexed.push([reasoningState.outputIndex, reasoningState.item]);
     if (textState?.done) indexed.push([textState.outputIndex, textState.item]);
     for (const state of toolStates.values()) {
       if (state.done) indexed.push([state.outputIndex, state.item]);
@@ -279,19 +337,26 @@ export async function streamChatAsResponses({
 
   const completeResponse = () => {
     if (completed) return;
+    const outcome = chatResponseOutcome(finishReason);
+    if (outcome.status === "completed") {
+      // Validate every call before emitting any executable output_item.done.
+      for (const state of toolStates.values()) validateToolArguments(state.name, state.argumentsText);
+    }
+    finishReasoning(outcome.status === "completed" ? "completed" : "incomplete");
+    finishText(outcome.status === "completed" ? "completed" : "incomplete");
+    if (outcome.status === "completed") finishTools();
     completed = true;
-    finishText();
-    finishTools();
     const response = makeResponseObject({
       request,
       responseId,
       publicModel,
       createdAt: startedAt,
-      status: "completed",
+      ...outcome,
       output: currentOutput(),
       usage,
     });
-    writeSse(clientRes, "response.completed", { response });
+    reportFinish(response);
+    writeSse(clientRes, `response.${outcome.status}`, { response });
     clientRes.write("data: [DONE]\n\n");
     clientRes.end();
     onComplete?.(response);
@@ -300,14 +365,21 @@ export async function streamChatAsResponses({
   try {
     await readSse(reader, firstChunk, (event) => {
       if (event.data === "[DONE]") {
-        completeResponse();
-        return;
+        doneReceived = true;
+        return false;
       }
       const chunk = parseJson(event.data, "upstream stream chunk");
-      if (chunk.usage) Object.assign(usage, mapUsage(chunk.usage));
+      if (chunk.error) throw new Error("Upstream returned an error inside the Chat stream.");
+      if (chunk.usage) {
+        Object.assign(usage, mapUsage(chunk.usage));
+        usageReceived = true;
+      }
 
       for (const choice of chunk.choices || []) {
+        if ((choice.index ?? 0) !== 0) continue;
         const delta = choice.delta || {};
+        const reasoning = chatReasoningText(delta);
+        if (reasoning) appendReasoning(reasoning);
         if (typeof delta.content === "string" && delta.content.length > 0) {
           const state = ensureTextState();
           state.text += delta.content;
@@ -342,11 +414,17 @@ export async function streamChatAsResponses({
             }
           }
         }
-        if (choice.finish_reason) debugLog(`upstream finish_reason=${choice.finish_reason}`);
+        if (choice.finish_reason) {
+          finishReason = choice.finish_reason;
+          debugLog(`upstream finish_reason=${finishReason}`);
+        }
       }
     });
+    completeResponse();
   } catch (error) {
     if (!completed) {
+      finishReasoning("incomplete");
+      finishText("incomplete");
       const response = makeResponseObject({
         request,
         responseId,
@@ -358,9 +436,13 @@ export async function streamChatAsResponses({
         error: {
           message: error?.message || "Streaming proxy error.",
           type: "server_error",
-          code: "proxy_stream_error",
+          code: ["upstream_missing_terminal", "invalid_tool_arguments"].includes(error.code)
+            ? error.code
+            : ["AbortError", "UpstreamTimeoutError"].includes(error.name) ? "upstream_timeout" : "proxy_stream_error",
         },
       });
+      completed = true;
+      reportFinish(response);
       writeSse(clientRes, "response.failed", { response });
       clientRes.write("data: [DONE]\n\n");
       clientRes.end();
@@ -368,7 +450,38 @@ export async function streamChatAsResponses({
     }
     return;
   }
-  completeResponse();
+}
+
+function chatReasoningText(message) {
+  if (typeof message.reasoning_content === "string") return message.reasoning_content;
+  return typeof message.reasoning === "string" ? message.reasoning : "";
+}
+
+export function chatResponseOutcome(finishReason) {
+  if (finishReason === "length" || finishReason === "content_filter") {
+    return {
+      status: "incomplete",
+      incompleteDetails: { reason: finishReason === "length" ? "max_output_tokens" : "content_filter" },
+    };
+  }
+  if (["stop", "tool_calls", "function_call"].includes(finishReason)) return { status: "completed" };
+  const error = new Error(finishReason
+    ? "Upstream Chat response returned an unsupported finish reason."
+    : "Upstream Chat response ended without a finish reason.");
+  error.code = "upstream_missing_terminal";
+  throw error;
+}
+
+function validateToolArguments(name, value) {
+  try {
+    if (!name || name === "unknown") throw new Error("Missing tool name");
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Expected an object");
+  } catch {
+    const error = new Error("Upstream returned incomplete or invalid tool arguments; the tool was not executed.");
+    error.code = "invalid_tool_arguments";
+    throw error;
+  }
 }
 
 export function makeResponseId() {
@@ -602,7 +715,15 @@ function customToolParameters(name) {
   const property = name === "apply_patch" ? "patch" : "input";
   return {
     type: "object",
-    properties: { [property]: { type: "string" } },
+    properties: { [property]: {
+      type: "string",
+      ...(name === "apply_patch" ? { description:
+        "Use the apply_patch format. Start with *** Begin Patch and end with *** End Patch. " +
+        "Add a file with *** Add File: path and +prefixed content lines. " +
+        "Edit a file with *** Update File: path and @@ context hunks. " +
+        "Delete a file with *** Delete File: path. " +
+        "Example: *** Begin Patch\n*** Add File: src/example.js\n+export const value = 1;\n*** End Patch" } : {}),
+    } },
     required: [property],
     additionalProperties: false,
   };
@@ -646,6 +767,7 @@ function makeResponseObject({
   output,
   usage,
   error = null,
+  incompleteDetails = null,
 }) {
   return {
     id: responseId,
@@ -654,7 +776,7 @@ function makeResponseObject({
     status,
     background: false,
     error,
-    incomplete_details: null,
+    incomplete_details: incompleteDetails,
     instructions: request.instructions ?? null,
     max_output_tokens: request.max_output_tokens ?? null,
     max_tool_calls: request.max_tool_calls ?? null,
@@ -694,22 +816,31 @@ function mapUsage(usage) {
 async function readSse(reader, firstChunk, onEvent) {
   const decoder = new TextDecoder();
   let buffer = "";
+  let ended = false;
   const consume = (value) => {
-    buffer += decoder.decode(value, { stream: true }).replaceAll("\r\n", "\n");
+    buffer += decoder.decode(value, { stream: true });
+    buffer = buffer.replaceAll("\r\n", "\n");
     let index;
     while ((index = buffer.indexOf("\n\n")) >= 0) {
       const frame = buffer.slice(0, index);
       buffer = buffer.slice(index + 2);
       const event = parseSseFrame(frame);
-      if (event) onEvent(event);
+      if (event && onEvent(event) === false) {
+        ended = true;
+        return;
+      }
     }
   };
 
   if (firstChunk?.length) consume(firstChunk);
-  while (true) {
+  while (!ended) {
     const { value, done } = await reader.read();
     if (done) break;
     consume(value);
+  }
+  if (ended) {
+    await reader.cancel?.().catch(() => {});
+    return;
   }
   buffer += decoder.decode();
   if (buffer.trim()) {

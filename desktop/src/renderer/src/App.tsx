@@ -457,8 +457,10 @@ export function App() {
   }, []);
 
   async function refreshModels(): Promise<void> {
-    const available = (await window.rhzycode.listModels().catch(() => ({ data: [] }))).data || [];
-    if (!available.length) return;
+    const response = await window.rhzycode.listModels().catch(() => null);
+    if (!response) return;
+    const available = response.data || [];
+    modelsRef.current = available;
     setModels(available);
     const preferredModel = ensurePreferredModel(available);
     setSelectedModel((current) => {

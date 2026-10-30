@@ -43,6 +43,35 @@ test("embedded gateway uses an ephemeral loopback port", async (context) => {
   assert.deepEqual((await response.json()).data.map((model) => model.id), ["local/test"]);
 });
 
+test("logs the requested public model when a removed provider model is rejected", async (context) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-missing-model-"));
+  fs.writeFileSync(path.join(rootDir, "gateway.config.json"), JSON.stringify({
+    providers: { current: { base_url: "http://127.0.0.1:65534/v1", protocol: "responses" } },
+    models: { "current/test": { provider: "current", upstream_model: "test" } },
+  }));
+  const events = [];
+  let upstreamRequests = 0;
+  const gateway = await startEmbeddedGateway({
+    rootDir,
+    onLog: (event) => events.push(event),
+    fetchImpl: async () => { upstreamRequests += 1; throw new Error("Unexpected upstream request"); },
+  });
+  context.after(async () => {
+    await gateway.stop();
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  const response = await fetch(`${gateway.baseUrl}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "removed/test", input: "hello" }),
+  });
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).error.code, "model_not_found");
+  assert.equal(upstreamRequests, 0);
+  assert.equal(events.find((event) => event.event === "request_failed")?.public_model, "removed/test");
+});
+
 test("uses the injected fetch implementation for upstream requests", async (context) => {
   const upstream = http.createServer((request, response) => {
     if (request.method === "GET" && request.url === "/v1/models") {
@@ -276,6 +305,95 @@ test("reroutes image-model compaction through the thread's selected text model",
   assert.equal(rerouteEvent?.thread_id, "thread-switch");
   assert.equal(rerouteEvent?.from_model, "local/gpt-image-2");
   assert.equal(rerouteEvent?.to_model, "local/gpt-text");
+});
+
+test("recovers removed-model compaction only with the same thread's selected text model", async (context) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-removed-compaction-"));
+  fs.writeFileSync(path.join(rootDir, "gateway.config.json"), JSON.stringify({
+    providers: { local: { base_url: "http://127.0.0.1:65534/v1", protocol: "responses" } },
+    models: {
+      "provider-5/gpt-6.1-sol": { provider: "local", upstream_model: "gpt-6.1-sol" },
+      "local/older-text": { provider: "local", upstream_model: "older-text" },
+      "local/gpt-image-2": { provider: "local", upstream_model: "gpt-image-2" },
+    },
+  }));
+  const upstreamBodies = [];
+  const events = [];
+  const gateway = await startEmbeddedGateway({
+    rootDir,
+    onLog: (event) => events.push(event),
+    fetchImpl: async (_url, init) => {
+      upstreamBodies.push(JSON.parse(init.body));
+      return Response.json({ id: "resp_compacted", object: "response", status: "completed", output: [] });
+    },
+  });
+  context.after(async () => {
+    await gateway.stop();
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+  gateway.setThreadModel("selected-thread", "provider-5/gpt-6.1-sol");
+  gateway.setThreadModel("image-thread", "local/gpt-image-2");
+  const compactionInput = [{
+    type: "message", role: "user", content: [{
+      type: "input_text", text: "You are performing a CONTEXT CHECKPOINT COMPACTION. Summarize the thread.",
+    }],
+  }];
+  const removedModel = "provider-4/gpt-6.1-sol";
+  const cases = [
+    {
+      name: "pre-turn compaction after a provider was removed",
+      body: { model: removedModel, input: compactionInput, prompt_cache_key: "selected-thread" },
+      status: 200, upstreamModel: "gpt-6.1-sol",
+    },
+    {
+      name: "metadata-marked compaction without the standard prompt",
+      body: { model: removedModel, input: "summarize", client_metadata: {
+        "x-codex-turn-metadata": JSON.stringify({ request_kind: "compaction", thread_id: "selected-thread" }),
+      } },
+      status: 200, upstreamModel: "gpt-6.1-sol",
+    },
+    {
+      name: "an available previous text model keeps its original route",
+      body: { model: "local/older-text", input: compactionInput, prompt_cache_key: "selected-thread" },
+      status: 200, upstreamModel: "older-text",
+    },
+    {
+      name: "ordinary turns still reject removed model IDs",
+      body: { model: removedModel, input: "continue", prompt_cache_key: "selected-thread" },
+      status: 404,
+    },
+    {
+      name: "a different thread cannot use another thread's selection",
+      body: { model: removedModel, input: compactionInput, prompt_cache_key: "unselected-thread" },
+      status: 404,
+    },
+    {
+      name: "compaction without a thread ID cannot infer a provider",
+      body: { model: removedModel, input: compactionInput },
+      status: 404,
+    },
+    {
+      name: "a selected image model cannot summarize text history",
+      body: { model: removedModel, input: compactionInput, prompt_cache_key: "image-thread" },
+      status: 404,
+    },
+  ];
+  for (const entry of cases) {
+    await context.test(entry.name, async () => {
+      const before = upstreamBodies.length;
+      const response = await fetch(`${gateway.baseUrl}/responses`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(entry.body),
+      });
+      assert.equal(response.status, entry.status);
+      await response.json();
+      assert.equal(upstreamBodies.length - before, entry.upstreamModel ? 1 : 0);
+      if (entry.upstreamModel) assert.equal(upstreamBodies.at(-1).model, entry.upstreamModel);
+    });
+  }
+  const recovered = events.filter((event) => event.event === "compaction_model_rerouted");
+  assert.equal(recovered.length, 2);
+  assert.ok(recovered.every((event) => event.from_model === removedModel
+    && event.to_model === "provider-5/gpt-6.1-sol" && event.thread_id === "selected-thread"));
 });
 
 test("interrupts the active upstream stream for a matching turn", async (context) => {

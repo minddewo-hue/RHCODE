@@ -139,6 +139,9 @@ export class ControlStore extends EventEmitter {
   }
 
   clientMessageIdForTurn(turnId: string): string | undefined {
+    for (const item of this.timeline.values()) {
+      if (item.kind === "user" && item.turnId === turnId && item.clientMessageId) return item.clientMessageId;
+    }
     this.pruneCommandReplays();
     for (const entry of this.commandReplays.values()) {
       if (!entry.clientMessageId || !entry.result || typeof entry.result !== "object") continue;

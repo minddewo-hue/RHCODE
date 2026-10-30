@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -54,6 +54,7 @@ import {
 } from "./control-plane/app";
 import { AppServerClient } from "./app-server";
 import { GatewayModule, type GatewayRequestEvent } from "./gateway-module";
+import { GatewayDiagnostics } from "./gateway-diagnostics";
 import {
   ProjectDirectoryError,
   ProjectDirectoryRegistry,
@@ -140,6 +141,28 @@ interface PendingGatewayFailure {
   threadId: string;
   timer: NodeJS.Timeout;
 }
+
+interface OutputRecovery {
+  request: Record<string, unknown>;
+  model: string | undefined;
+  startedAt: number;
+  attempts: number;
+  outcome?: GatewayRequestEvent;
+  timer?: NodeJS.Timeout;
+  starting?: boolean;
+  completedTurnId?: string;
+  checkingTurnId?: string;
+  checkedTurnId?: string;
+  completionAttempts: number;
+  progress: number;
+  lastContinuedProgress: number;
+  progressKeys: Set<string>;
+  noProgressChecks: number;
+}
+
+const OUTPUT_RECOVERY_MAX_ATTEMPTS = 2;
+const OUTPUT_RECOVERY_MAX_AGE_MS = 30 * 60_000;
+const TASK_COMPLETION_MAX_CONTINUATIONS = 8;
 
 const ROLLOUT_WRITE_RETRY_DELAYS_MS = [25, 50, 100, 200, 400] as const;
 const INTERNAL_MODEL_PROVIDER_ID = "rhzy_gateway";
@@ -269,6 +292,8 @@ export class DesktopRuntime extends EventEmitter {
   private pendingUserInputs = new Map<string, PendingUserInput>();
   private pendingCompactions = new Map<string, PendingCompaction>();
   private pendingGatewayFailures = new Map<string, PendingGatewayFailure>();
+  private outputRecoveries = new Map<string, OutputRecovery>();
+  private readonly gatewayDiagnostics: GatewayDiagnostics;
   private modelRefreshPromise: Promise<void> | null = null;
   private gatewayFailureGraceMs = GATEWAY_FAILURE_GRACE_MS;
   private activeThreadId: string | null = null;
@@ -290,6 +315,7 @@ export class DesktopRuntime extends EventEmitter {
     relayLoopbackFetch = fetchImpl,
   ) {
     super();
+    this.gatewayDiagnostics = new GatewayDiagnostics(path.join(codexHome, "logs"));
     this.gateway = new GatewayModule(gatewayRoot, undefined, gatewayConfigPath, fetchImpl);
     const transferServerUrl = process.env.RHZYCODE_TRANSFER_SERVER_URL?.trim() || DEFAULT_TRANSFER_SERVER_URL;
     this.desktopRelay = mobileAccess && transferServerUrl
@@ -334,7 +360,10 @@ export class DesktopRuntime extends EventEmitter {
 
     this.gateway.on("status", (status) => this.emit("gateway:status", status));
     this.gateway.on("request", (event: GatewayRequestEvent) => this.handleGatewayRequest(event));
-    this.agent.on("status", (status) => this.emit("agent:status", status));
+    this.agent.on("status", (status) => {
+      if (status.state === "disconnected" || status.state === "error") this.clearOutputRecoveries();
+      this.emit("agent:status", status);
+    });
     this.agent.on("diagnostic", (message) => this.emit("agent:diagnostic", message));
     this.agent.on("message", (message) => this.handleAgentMessage(message as RpcMessage));
     this.projectDirectories.on("changed", (projects) => {
@@ -378,6 +407,7 @@ export class DesktopRuntime extends EventEmitter {
     this.desktopRelay?.stop();
     this.terminalSession = null;
     await this.gateway.stop().catch(() => undefined);
+    await this.gatewayDiagnostics.flush();
     await this.stopSyncServer();
     this.syncStatus = { ...this.syncStatus, state: "stopped", url: null, error: null };
     this.emit("sync:status", this.getSyncStatus());
@@ -600,13 +630,24 @@ export class DesktopRuntime extends EventEmitter {
         : null;
       if (!cursor || !(response.data || []).length) break;
     }
-    const models = rawModels.map((model) => ({
-      ...model,
-      supportedReasoningEfforts: model.supportedReasoningEfforts || [],
-      isDefault: model.isDefault === true,
-    }));
+    const gatewayModels = this.gateway.getStatus().models;
+    const availableModelIds = new Set(gatewayModels.map((model) => model.id));
+    const models = rawModels.flatMap((model) => {
+      if (!availableModelIds.has(model.model)) {
+        this.emit(
+          "agent:diagnostic",
+          `Model ${model.model} is missing from the current gateway catalog; hiding it from the model list.`,
+        );
+        return [];
+      }
+      return [{
+        ...model,
+        supportedReasoningEfforts: model.supportedReasoningEfforts || [],
+        isDefault: model.isDefault === true,
+      }];
+    });
     const knownModels = new Set(models.map((model) => model.model));
-    for (const gatewayModel of this.gateway.getStatus().models) {
+    for (const gatewayModel of gatewayModels) {
       if (knownModels.has(gatewayModel.id)) continue;
       models.push({
         id: gatewayModel.id,
@@ -808,6 +849,13 @@ export class DesktopRuntime extends EventEmitter {
       throw new Error("Thread model is invalid.");
     }
     if (!this.threads.has(threadId)) throw new Error("Thread not found.");
+    this.requireAvailableModel(normalized);
+    const recovery = this.outputRecoveries.get(threadId);
+    if (recovery?.timer || recovery?.starting || recovery?.checkingTurnId) {
+      this.activeTurns.delete(threadId);
+      this.updateThread(threadId, { status: "interrupted" });
+    }
+    this.cancelOutputRecovery(threadId);
     this.gateway.setThreadModel(threadId, normalized);
     this.updateThread(threadId, { model: normalized });
     return this.threads.get(threadId)!;
@@ -1061,6 +1109,7 @@ export class DesktopRuntime extends EventEmitter {
     approvalPolicy?: ApprovalPolicy;
     sandboxMode?: SandboxMode;
   }): Promise<{ thread?: { id?: string } }> {
+    if (params.model) this.requireAvailableModel(params.model);
     this.projectDirectories.remember(params.cwd);
     const request = {
       cwd: params.cwd,
@@ -1107,6 +1156,11 @@ export class DesktopRuntime extends EventEmitter {
     reasoningEffort?: ReasoningEffort;
     attachments?: ComposerAttachment[];
   }): Promise<{ turn?: { id?: string }; files?: ConversationFile[] }> {
+    this.cancelOutputRecovery(params.threadId);
+    const requestedModel = params.model || this.threads.get(params.threadId)?.model;
+    if (requestedModel && requestedModel !== "default" && requestedModel !== "previous") {
+      this.requireAvailableModel(requestedModel);
+    }
     if (!this.loadedThreadIds.has(params.threadId)) {
       await this.openThread(params.threadId, true);
     }
@@ -1128,10 +1182,11 @@ export class DesktopRuntime extends EventEmitter {
     }
     const attachments = validateAttachments(params.attachments || []);
     const managedAttachments = this.managedFiles.registerUploads(params.threadId, attachments);
-    this.publishTimeline({
-      id: params.clientMessageId ? `user-${params.clientMessageId}` : `user-${Date.now()}`,
+    const clientMessageId = params.clientMessageId || randomUUID();
+    const userItem: TimelineItem = {
+      id: `user-${clientMessageId}`,
       threadId: params.threadId,
-      ...(params.clientMessageId ? { clientMessageId: params.clientMessageId } : {}),
+      clientMessageId,
       kind: "user",
       status: "completed",
       title: "你",
@@ -1140,7 +1195,8 @@ export class DesktopRuntime extends EventEmitter {
         files: managedAttachments.map((attachment) => managedFileReference(attachment)),
       } : {}),
       createdAt: new Date().toISOString(),
-    });
+    };
+    this.publishTimeline(userItem);
     const filePaths = attachments
       .filter((attachment) => attachment.kind === "file")
       .map((attachment) => attachment.path);
@@ -1156,14 +1212,23 @@ export class DesktopRuntime extends EventEmitter {
     const projectPath = current?.projectPath;
     if (!projectPath) throw new Error("Cannot apply a sandbox policy without a project directory.");
     this.pendingTurnStarts.add(params.threadId);
+    const turnRequest = {
+      threadId: params.threadId,
+      ...(params.model ? { model: params.model } : {}),
+      ...(params.approvalPolicy ? { approvalPolicy: params.approvalPolicy } : {}),
+      ...(params.reasoningEffort ? { effort: params.reasoningEffort } : {}),
+      sandboxPolicy: sandboxPolicyFor(params.sandboxMode || "workspace-write", projectPath),
+    };
+    this.outputRecoveries.set(params.threadId, {
+      request: turnRequest, model: params.model || current?.model,
+      startedAt: Date.now(), attempts: 0,
+      completionAttempts: 0, progress: 0, lastContinuedProgress: 0, progressKeys: new Set(),
+      noProgressChecks: 0,
+    });
     try {
       const response = await this.agent.request<{ turn?: { id?: string } }>("turn/start", {
-        threadId: params.threadId,
+        ...turnRequest,
         input,
-        ...(params.model ? { model: params.model } : {}),
-        ...(params.approvalPolicy ? { approvalPolicy: params.approvalPolicy } : {}),
-        ...(params.reasoningEffort ? { effort: params.reasoningEffort } : {}),
-        sandboxPolicy: sandboxPolicyFor(params.sandboxMode || "workspace-write", projectPath),
       });
       if (params.model && current?.model !== params.model) {
         this.updateThread(params.threadId, { model: params.model });
@@ -1171,12 +1236,16 @@ export class DesktopRuntime extends EventEmitter {
       const turnId = response.turn?.id;
       if (turnId) {
         this.activeTurns.set(params.threadId, turnId);
-        if (params.clientMessageId) this.turnClientMessageIds.set(turnId, params.clientMessageId);
+        this.turnClientMessageIds.set(turnId, clientMessageId);
+        // Bind desktop sends as well as mobile sends to their canonical history
+        // row. Persist the binding before another client opens the active turn.
+        this.publishTimeline({ ...userItem, turnId });
         this.managedFiles.bindTurn(managedAttachments.map((attachment) => attachment.id), turnId);
       }
       const files = managedAttachments.map((attachment) => managedFileReference(attachment, true));
       return { ...response, ...(files.length ? { files } : {}) };
     } catch (error) {
+      this.cancelOutputRecovery(params.threadId);
       this.managedFiles.removeRecords(managedAttachments.map((attachment) => attachment.id));
       this.updateThread(params.threadId, { status: "failed" });
       throw error;
@@ -1186,6 +1255,16 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   async interruptTurn(threadId: string): Promise<unknown> {
+    const recovery = this.outputRecoveries.get(threadId);
+    const betweenTurns = Boolean(recovery?.timer || recovery?.starting || recovery?.checkingTurnId);
+    this.cancelOutputRecovery(threadId);
+    if (betweenTurns) {
+      this.activeTurns.delete(threadId);
+      this.updateThread(threadId, { status: "interrupted" });
+      this.finalizeThreadTimeline(threadId, false);
+      this.clearRemoteAttachments(threadId);
+      return {};
+    }
     const turnId = this.activeTurns.get(threadId);
     if (!turnId) throw new Error("No active turn is available to interrupt.");
     this.clearGatewayFailure(turnId);
@@ -1320,8 +1399,13 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   private handleGatewayRequest(event: GatewayRequestEvent): void {
+    this.gatewayDiagnostics.record(event);
     const turnId = typeof event.turn_id === "string" ? event.turn_id : "";
     if (!turnId) return;
+    const recoveryThread = [...this.activeTurns].find((entry) => entry[1] === turnId)?.[0];
+    const recovery = recoveryThread ? this.outputRecoveries.get(recoveryThread) : undefined;
+    if (recovery && event.event === "request_started") recovery.outcome = undefined;
+    if (recovery && event.event === "chat_response_finished") recovery.outcome = event;
     const status = Number(event.status);
     if (event.event === "request_started"
       || (event.event === "request_completed" && Number.isFinite(status) && status < 500)) {
@@ -1351,6 +1435,7 @@ export class DesktopRuntime extends EventEmitter {
   private failUnresolvedGatewayTurn(threadId: string, turnId: string, detail: string): void {
     this.pendingGatewayFailures.delete(turnId);
     if (this.activeTurns.get(threadId) !== turnId) return;
+    this.cancelOutputRecovery(threadId);
 
     const message = `${detail} Agent Host did not finish the turn after the gateway request ended.`;
     this.gateway.interruptTurn(turnId);
@@ -1390,7 +1475,158 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   private clearAllGatewayFailures(): void {
+    this.clearOutputRecoveries();
     for (const turnId of [...this.pendingGatewayFailures.keys()]) this.clearGatewayFailure(turnId);
+  }
+
+  private cancelOutputRecovery(threadId: string): void {
+    const recovery = this.outputRecoveries.get(threadId);
+    if (recovery?.timer) clearTimeout(recovery.timer);
+    if (recovery?.checkingTurnId) this.gateway.interruptTurn(recovery.checkingTurnId);
+    this.outputRecoveries.delete(threadId);
+  }
+
+  private clearOutputRecoveries(): void {
+    for (const threadId of this.outputRecoveries.keys()) this.cancelOutputRecovery(threadId);
+  }
+
+  private canContinueTruncatedOutput(threadId: string, turnId: string, status: ThreadStatus): boolean {
+    const recovery = this.outputRecoveries.get(threadId);
+    const outcome = recovery?.outcome;
+    if (!recovery || !outcome || outcome.turn_id !== turnId) return false;
+    const waiting = [...this.pendingApprovals.values(), ...this.pendingUserInputs.values()]
+      .some((pending) => pending.threadId === threadId);
+    return status !== "interrupted" && !waiting && !this.stopping
+      && !this.pendingCompactions.has(threadId)
+      && outcome.response_status === "incomplete" && outcome.finish_reason === "length"
+      && outcome.tool_call_count === 0 && Number(outcome.output_text_chars) > 0
+      && recovery.attempts < OUTPUT_RECOVERY_MAX_ATTEMPTS
+      && Date.now() - recovery.startedAt < OUTPUT_RECOVERY_MAX_AGE_MS;
+  }
+
+  private continueTruncatedOutput(threadId: string, turnId: string, status: ThreadStatus): boolean {
+    if (!this.canContinueTruncatedOutput(threadId, turnId, status)) return false;
+    const recovery = this.outputRecoveries.get(threadId)!;
+    recovery.attempts += 1;
+    return this.scheduleTaskContinuation(threadId, turnId, recovery,
+      "上一次输出因长度上限被截断。请从已有内容停止处继续完成原任务，避免重复已完成的文字和操作。执行前先核对已有结果；保持原有权限和审批要求，需要用户补充信息时停下来询问。",
+      `输出达到长度上限，正在从已有内容继续（${recovery.attempts}/${OUTPUT_RECOVERY_MAX_ATTEMPTS}）。`);
+  }
+
+  private scheduleTaskContinuation(threadId: string, turnId: string, recovery: OutputRecovery, prompt: string, notice: string): boolean {
+    recovery.completedTurnId = turnId;
+    recovery.outcome = undefined;
+    this.activeTurns.set(threadId, turnId);
+    this.updateThread(threadId, { status: "running" });
+    this.publishTimeline({
+      id: `output-recovery-${turnId}`,
+      threadId,
+      kind: "notice",
+      status: "completed",
+      title: "正在继续",
+      content: notice,
+      createdAt: new Date().toISOString(),
+    });
+    recovery.timer = setTimeout(() => {
+      recovery.timer = undefined;
+      if (this.outputRecoveries.get(threadId) !== recovery || this.stopping) return;
+      if (this.threads.get(threadId)?.model !== recovery.model) {
+        this.cancelOutputRecovery(threadId);
+        this.activeTurns.delete(threadId);
+        this.updateThread(threadId, { status: "interrupted" });
+        return;
+      }
+      recovery.starting = true;
+      this.pendingTurnStarts.add(threadId);
+      void this.agent.request<{ turn?: { id?: string } }>("turn/start", {
+        ...recovery.request,
+        input: [{
+          type: "text",
+          text: prompt,
+          text_elements: [],
+        }],
+      }).then((response) => {
+        const nextTurnId = response.turn?.id;
+        if (this.outputRecoveries.get(threadId) !== recovery) {
+          if (nextTurnId) {
+            this.gateway.interruptTurn(nextTurnId);
+            void this.agent.request("turn/interrupt", { threadId, turnId: nextTurnId }, 5_000).catch(() => {});
+          }
+          return;
+        }
+        if (!nextTurnId) throw new Error("Agent Host did not return the continued turn.");
+        this.activeTurns.set(threadId, nextTurnId);
+      }).catch((error) => {
+        if (this.outputRecoveries.get(threadId) !== recovery) return;
+        this.cancelOutputRecovery(threadId);
+        this.activeTurns.delete(threadId);
+        this.updateThread(threadId, { status: "failed" });
+        this.clearRemoteAttachments(threadId);
+        const message = error instanceof Error ? error.message : "无法继续被截断的输出。";
+        this.emit("agent:message", {
+          method: "turn/completed",
+          params: { threadId, turn: { id: turnId, status: "failed", error: { message } } },
+        });
+        this.publishTimeline({
+          id: `output-recovery-error-${turnId}`, threadId, kind: "notice", status: "failed",
+          title: "继续失败", content: message,
+          createdAt: new Date().toISOString(),
+        });
+      }).finally(() => {
+        recovery.starting = false;
+        this.pendingTurnStarts.delete(threadId);
+      });
+    }, 250);
+    recovery.timer.unref();
+    return true;
+  }
+
+  private shouldCheckTaskCompletion(threadId: string, turnId: string, status: ThreadStatus): boolean {
+    const recovery = this.outputRecoveries.get(threadId);
+    return status === "completed" && Boolean(recovery && recovery.progress > 0
+      && recovery.checkedTurnId !== turnId && !recovery.checkingTurnId)
+      && !this.stopping && !this.pendingCompactions.has(threadId)
+      && ![...this.pendingApprovals.values(), ...this.pendingUserInputs.values()].some((pending) => pending.threadId === threadId)
+      && this.gateway.canCheckTurnCompletion(turnId);
+  }
+
+  private checkTaskCompletion(threadId: string, turnId: string, message: RpcMessage): void {
+    const recovery = this.outputRecoveries.get(threadId)!;
+    recovery.checkingTurnId = turnId;
+    this.updateThread(threadId, { status: "running" });
+    this.publishTimeline({
+      id: `completion-check-${turnId}`, threadId, kind: "notice", status: "running",
+      title: "检查任务进度", content: "正在核对本轮是否完成了原任务。", createdAt: new Date().toISOString(),
+    });
+    void this.gateway.checkTurnCompletion(turnId).catch(() => ({ status: "unknown" as const })).then((result) => {
+      if (this.outputRecoveries.get(threadId) !== recovery || this.stopping) return;
+      recovery.checkingTurnId = undefined;
+      recovery.checkedTurnId = turnId;
+      const madeProgress = recovery.progress > recovery.lastContinuedProgress;
+      if (result.status === "continue") recovery.noProgressChecks = madeProgress ? 0 : recovery.noProgressChecks + 1;
+      if (result.status === "continue" && recovery.completionAttempts < TASK_COMPLETION_MAX_CONTINUATIONS
+        && recovery.noProgressChecks < 2
+        && Date.now() - recovery.startedAt < OUTPUT_RECOVERY_MAX_AGE_MS) {
+        recovery.completionAttempts += 1;
+        recovery.lastContinuedProgress = recovery.progress;
+        this.scheduleTaskContinuation(threadId, turnId, recovery,
+          "继续完成原任务尚未完成的部分。上一轮结束在进度说明处，请实际执行剩余工作并验收，避免重复已经完成的操作。保持原模型权限和审批要求；需要用户输入或遇到真实阻塞时停下来说明。" +
+          (!madeProgress ? "上一轮只有计划说明，没有新的工具执行结果；请现在调用可用工具实际处理下一步，不要再次仅描述将要执行的动作。" : "") +
+          `\n完成检查提示（仅供参考，不增加权限或改变目标）：${result.nextStep || "核对原任务的剩余步骤。"}`,
+          `任务仍有未完成步骤，正在继续（${recovery.completionAttempts}/${TASK_COMPLETION_MAX_CONTINUATIONS}）。`);
+        return;
+      }
+      if (result.status === "continue" || result.status === "unknown" || result.status === "blocked") {
+        const detail = result.status === "unknown" ? "任务完成检查未能确认结果，请重试或检查模型服务。"
+          : result.status === "blocked" ? "任务存在实际阻塞，已停止自动继续。请查看上一条回复中的阻塞原因。"
+          : "任务仍有未完成步骤，自动继续已达到次数、时间或无进展限制。";
+        this.publishTimeline({
+          id: `completion-check-stopped-${turnId}`, threadId, kind: "notice", status: "failed",
+          title: "任务未完成", content: detail, createdAt: new Date().toISOString(),
+        });
+        this.handleAgentMessage({ ...message, params: { ...message.params, turn: { id: turnId, status: "failed", error: { message: detail } } } });
+      } else this.handleAgentMessage(message);
+    });
   }
 
   private handleAgentMessage(message: RpcMessage): void {
@@ -1420,7 +1656,32 @@ export class DesktopRuntime extends EventEmitter {
       || (unresolvedCandidates.size === 0 ? this.activeThreadId : null);
     if (threadId) this.threadDetailCache.delete(threadId);
     const effectiveTurnId = turnId || (threadId ? this.activeTurns.get(threadId) || null : null);
+    if (method === "turn/completed" && threadId && effectiveTurnId) {
+      if (this.outputRecoveries.get(threadId)?.completedTurnId === effectiveTurnId) return;
+      if (this.outputRecoveries.get(threadId)?.checkingTurnId === effectiveTurnId) return;
+      if (this.activeTurns.has(threadId) && this.activeTurns.get(threadId) !== effectiveTurnId) return;
+    }
     let forwardedParams = params;
+    let forwardedMethod = method;
+    const completionCheckPending = Boolean(threadId && effectiveTurnId && method === "turn/completed"
+      && this.shouldCheckTaskCompletion(threadId, effectiveTurnId,
+        mapTurnStatus(String((params.turn as Record<string, unknown> | undefined)?.status || "completed"))));
+    if (completionCheckPending) {
+      forwardedMethod = "turn/completionCheckStarted";
+      forwardedParams = { ...params };
+    }
+    if (threadId && effectiveTurnId && (method === "error" || method === "turn/completed")
+      && this.canContinueTruncatedOutput(threadId, effectiveTurnId,
+        method === "turn/completed"
+          ? mapTurnStatus(String((params.turn as Record<string, unknown> | undefined)?.status || "completed"))
+          : "failed")) {
+      // Intermediate length failures belong to the ongoing task, not a final failure notification.
+      forwardedMethod = "error";
+      forwardedParams = {
+        ...params, willRetry: true,
+        error: { message: "输出达到长度上限，正在从已有内容继续。" },
+      };
+    }
     let completedGeneratedImage: StoredGeneratedImage | null = null;
     if (method === "item/started" || method === "item/completed") {
       const item = (params.item || {}) as Record<string, unknown>;
@@ -1463,6 +1724,7 @@ export class DesktopRuntime extends EventEmitter {
     this.emit("agent:message", shouldAddThreadId || shouldAddTurnId || forwardedParams !== params
       ? {
           ...message,
+          method: forwardedMethod,
           params: {
             ...forwardedParams,
             ...(shouldAddThreadId ? { threadId } : {}),
@@ -1509,7 +1771,11 @@ export class DesktopRuntime extends EventEmitter {
       const turn = (params.turn || {}) as Record<string, unknown>;
       const completedTurnId = typeof turn.id === "string" ? turn.id : effectiveTurnId;
       if (completedTurnId) this.clearGatewayFailure(completedTurnId);
-      const status = mapTurnStatus(String(turn.status || "completed"));
+      let status = mapTurnStatus(String(turn.status || "completed"));
+      if (completionCheckPending && completedTurnId) {
+        this.checkTaskCompletion(threadId, completedTurnId, message);
+        return;
+      }
       const pendingCompaction = this.pendingCompactions.get(threadId);
       if (pendingCompaction) {
         if (status === "completed") pendingCompaction.resolve();
@@ -1521,9 +1787,23 @@ export class DesktopRuntime extends EventEmitter {
         }
       }
       this.activeTurns.delete(threadId);
-      this.updateThread(threadId, { status });
       this.finalizeThreadTimeline(threadId, status === "failed");
       this.publishRolloutGeneratedImages(threadId, typeof turn.id === "string" ? turn.id : null);
+      if (completedTurnId && this.continueTruncatedOutput(threadId, completedTurnId, status)) return;
+      const outcome = this.outputRecoveries.get(threadId)?.outcome;
+      if (status !== "interrupted" && outcome?.response_status === "incomplete") {
+        status = "failed";
+        this.publishTimeline({
+          id: `output-incomplete-${completedTurnId}`, threadId, kind: "notice", status: "failed",
+          title: "输出未完成",
+          content: outcome.finish_reason === "length"
+            ? "输出达到长度上限，自动继续已停止。请检查输出预算；不完整的工具调用不会执行。"
+            : "模型服务未完整返回本次输出，请检查模型服务的结束原因。",
+          createdAt: new Date().toISOString(),
+        });
+      }
+      this.cancelOutputRecovery(threadId);
+      this.updateThread(threadId, { status });
       this.clearRemoteAttachments(threadId);
     }
     if (method === "item/agentMessage/delta") {
@@ -1580,7 +1860,7 @@ export class DesktopRuntime extends EventEmitter {
     }
     if (method === "error") {
       const error = (params.error || {}) as Record<string, unknown>;
-      const willRetry = Boolean(params.willRetry);
+      const willRetry = Boolean(forwardedParams.willRetry);
       if (effectiveTurnId) this.clearGatewayFailure(effectiveTurnId);
       this.publishTimeline({
         id: `error-${params.turnId || Date.now()}`,
@@ -1619,6 +1899,16 @@ export class DesktopRuntime extends EventEmitter {
       const item = (params.item || {}) as Record<string, unknown>;
       const itemId = turnScopedItemId(effectiveTurnId, item.id || `${method}-${Date.now()}`);
       const itemType = String(item.type || "notice");
+      const recovery = this.outputRecoveries.get(threadId);
+      if (method === "item/completed" && recovery
+        && ((itemType === "commandExecution" && item.exitCode === 0) || (itemType === "fileChange" && item.status === "completed"))) {
+        const fingerprint = createHash("sha256").update(JSON.stringify({ type: itemType,
+          command: item.command, output: item.aggregatedOutput, changes: item.changes })).digest("hex");
+        if (!recovery.progressKeys.has(fingerprint)) {
+          recovery.progressKeys.add(fingerprint);
+          recovery.progress += 1;
+        }
+      }
       if (itemType === "userMessage") return;
       if (itemType === "imageGeneration") {
         if (method === "item/completed" && completedGeneratedImage) {
@@ -1856,34 +2146,43 @@ export class DesktopRuntime extends EventEmitter {
     if (!this.threads.has(threadId)) throw new ControlCommandError("not_found");
     try {
       const localThread = this.threads.get(threadId)!;
+      const active = this.activeTurns.has(threadId) || this.pendingTurnStarts.has(threadId);
       // Last known merged scale: anchors the stabilized orderKeys so the
       // mobile incremental cursor stays valid across opens.
       const previous = this.threadDetailCache.get(threadId) ?? null;
       const localDetail = await this.loadLocalThreadDetail(localThread);
-      // Mobile only receives this payload. Always ask App Server for its
-      // authoritative history: a local rollout can look balanced while still
-      // missing the newest user/assistant pair entirely.
+      // Read active turns without resuming them. Resume reconstructs positional
+      // history while the same turn is still publishing its live item ids.
       let detail: ThreadDetail;
       try {
         // Cap resume so a stuck App Server cannot starve mobile of the local
         // history. A later open can retry when the agent becomes responsive.
+        const history = active
+          ? this.agent.request<{ thread: ServerThread }>("thread/read", { threadId, includeTurns: true })
+            .then(({ thread }) => toThreadDetail(
+              thread, localThread, path.join(this.codexHome, "generated_images"),
+              [], this.managedFiles.listThread(threadId),
+            ))
+          : this.openThread(threadId, true);
         const resumed = await withDeadline(
-          this.openThread(threadId, true),
+          history,
           mobileOpenResumeBudgetMs(),
           "Mobile openThread resume",
         );
         detail = preferRicherThreadDetail(localDetail, resumed, previous);
       } catch (error) {
-        if (!localDetail) throw error;
-        detail = localDetail;
+        if (!localDetail && !active) throw error;
+        detail = localDetail || previous || { thread: localThread, messages: [], timeline: [] };
       }
       // A lagging resume can recover older replies while still omitting the
       // newest local user row. Do not let that balanced-but-stale response
       // poison the next mobile catch-up attempt.
-      if (isIncompleteRolloutHistory(detail)) {
+      if (!active && isIncompleteRolloutHistory(detail)) {
         this.loadedThreadIds.delete(threadId);
         this.threadDetailCache.delete(threadId);
       }
+      const liveTimeline = (this.controlPlane?.store.snapshot().timeline || [])
+        .filter((item) => item.threadId === threadId);
       const timelineById = new Map<string, (typeof detail.timeline)[number]>();
       for (const item of [...detail.timeline, ...remoteMessageTimeline(
         detail,
@@ -1893,12 +2192,21 @@ export class DesktopRuntime extends EventEmitter {
         const current = timelineById.get(item.id);
         timelineById.set(item.id, current ? preferTimelineItem(current, item) : item);
       }
-      for (const item of this.controlPlane?.store.snapshot().timeline || []) {
-        if (item.threadId !== threadId) continue;
+      for (const item of liveTimeline) {
         const current = timelineById.get(item.id);
         timelineById.set(item.id, current ? preferTimelineItem(current, item) : item);
       }
-      const items = [...timelineById.values()];
+      // A rebuilt body uses a denser scale than live activity. Restore the
+      // actual published position and status after collapsing history aliases,
+      // so merely opening a task cannot move or complete a streaming reply.
+      const liveById = new Map(liveTimeline.flatMap((item) => [
+        [item.id, item] as const,
+        [item.logicalId || item.id, item] as const,
+      ]));
+      const items = dedupeTimelineItems([...timelineById.values()]).map((item) => {
+        const live = liveById.get(item.logicalId || item.id) || liveById.get(item.id);
+        return live ? { ...item, orderKey: live.orderKey, status: live.status } : item;
+      });
       // Anchor the live counter above this rebuild so the next published item
       // continues after the whole history instead of colliding with it.
       const maxOrderKey = items.reduce(
@@ -1912,7 +2220,7 @@ export class DesktopRuntime extends EventEmitter {
       this.rememberThreadDetail(threadId, detail);
       if (!isIncompleteRolloutHistory(detail)) this.loadedThreadIds.add(threadId);
       return {
-        thread: detail.thread,
+        thread: this.threads.get(threadId) || detail.thread,
         timeline: dedupeTimelineItems(items),
       };
     } catch (error) {
@@ -1967,15 +2275,12 @@ export class DesktopRuntime extends EventEmitter {
       // Wait for a connected host so a cold desktop does not break model pickup.
       if (this.agent.getStatus().state !== "connected") await this.startAgent();
       const response = await this.listModels();
-      const gatewayModels = new Map(this.gateway.getStatus().models.flatMap((model) => [
-        [model.id, model] as const,
-        [model.upstreamModel, model] as const,
-      ]));
+      const gatewayModels = new Map(this.gateway.getStatus().models.map((model) => [model.id, model]));
       return {
         // A single model that drifted out of the live gateway catalog must not
         // make the whole remote list unavailable, so skip it with a warning.
         models: (response.data || []).flatMap((model) => {
-          const gatewayModel = gatewayModels.get(model.model) || gatewayModels.get(model.id);
+          const gatewayModel = gatewayModels.get(model.model);
           if (!gatewayModel) {
             this.emit(
               "agent:diagnostic",
@@ -2203,6 +2508,8 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   private removeRuntimeThread(threadId: string, ensureEventAfterSequence?: number): void {
+    this.cancelOutputRecovery(threadId);
+    this.activeTurns.delete(threadId);
     this.clearGatewayFailuresForThread(threadId);
     const existed = this.threads.delete(threadId);
     this.loadedThreadIds.delete(threadId);
@@ -2283,6 +2590,14 @@ export class DesktopRuntime extends EventEmitter {
       if (typeof oldestId !== "string") break;
       this.threadDetailCache.delete(oldestId);
     }
+  }
+
+  private requireAvailableModel(modelId: string): void {
+    const status = this.gateway.getStatus();
+    if (status.state !== "running" || status.models.some((model) => model.id === modelId)) return;
+    throw new Error(
+      `Model ${modelId} is no longer available in the current gateway catalog. Refresh the model list and select a configured provider model.`,
+    );
   }
 
   private async prepareThreadModel(threadId: string, targetModel: string): Promise<void> {

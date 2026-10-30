@@ -84,7 +84,7 @@ test("selects protocol separately for every discovered provider model", async (c
       return;
     }
     if (request.url === "/v1/chat/completions" && body.model === "chat-model") {
-      writeJson(response, 200, { choices: [{ message: { role: "assistant", content: "OK" } }] });
+      writeJson(response, 200, { choices: [{ finish_reason: "stop", message: { role: "assistant", content: "OK" } }] });
       return;
     }
     writeJson(response, 400, {
@@ -151,7 +151,7 @@ test("falls back across protocols for models from a custom provider", async (con
     const body = await readJson(request);
     routeCalls.push({ path: request.url, model: body.model });
     if (request.url === "/v1/chat/completions") {
-      writeJson(response, 200, { choices: [{ message: { role: "assistant", content: "OK" } }] });
+      writeJson(response, 200, { choices: [{ finish_reason: "stop", message: { role: "assistant", content: "OK" } }] });
       return;
     }
     writeJson(response, 503, { error: { message: "temporarily unavailable" } });

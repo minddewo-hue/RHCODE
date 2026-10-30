@@ -13,6 +13,23 @@ function item(
   return { title: "", createdAt: "2026-07-30T00:00:00.000Z", ...partial };
 }
 
+test("does not match a repeated prompt to a different known turn or client message", () => {
+  const old = item({id:"turn-old::user",threadId:"t1",kind:"user",status:"completed",content:"continue",clientMessageId:"client-old",turnId:"turn-old",orderKey:1});
+  const next = item({id:"user-client-new",threadId:"t1",kind:"user",status:"completed",content:"continue",clientMessageId:"client-new",turnId:"turn-new",orderKey:3});
+  assert.deepEqual(dedupeTimelineItems([old,next]).map(row=>row.id),[old.id,next.id]);
+});
+
+test("dedupes a physical user id before and after logical identity metadata arrives", () => {
+  const first = item({id:"user-client",threadId:"t1",kind:"user",status:"completed",content:"question"});
+  const enriched = {...first,logicalId:"client-message:client",clientMessageId:"client",turnId:"turn-1"};
+  for (const rows of [[first,enriched,first],[enriched,first,enriched]]) {
+    const merged=dedupeTimelineItems(rows);
+    assert.equal(merged.length,1);
+    assert.equal(merged[0]?.logicalId,enriched.logicalId);
+    assert.equal(merged[0]?.turnId,enriched.turnId);
+  }
+});
+
 for (const content of ["I", "I will run the command first."]) {
   test(`keeps independent same-turn assistant identities when their text overlaps: ${content}`, () => {
     const commentary = item({

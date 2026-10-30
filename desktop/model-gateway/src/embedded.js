@@ -100,6 +100,12 @@ export async function startEmbeddedGateway(options) {
     interruptTurn(turnId) {
       return server.gatewayInterruptTurn?.(turnId) || 0;
     },
+    canCheckTurnCompletion(turnId) {
+      return server.gatewayCanCheckCompletion?.(turnId) || false;
+    },
+    checkTurnCompletion(turnId) {
+      return server.gatewayCheckCompletion?.(turnId) || Promise.resolve({ status: "unknown" });
+    },
     setThreadModel(threadId, modelId) {
       return server.gatewaySetThreadModel?.(threadId, modelId) || false;
     },

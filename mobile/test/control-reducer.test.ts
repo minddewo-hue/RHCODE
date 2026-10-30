@@ -557,6 +557,36 @@ test("stable logical ids collapse live and historical ids without content guessi
   assert.equal(state.timeline[0]?.status, "completed");
 });
 
+test("live positional aliases do not reappear after history canonicalizes a streaming row", () => {
+  const canonical = {
+    ...timeline, id: "turn-1::msg-answer", logicalId: "turn-1::msg-answer",
+    kind: "assistant" as const, status: "running" as const, content: "Answer in progress", orderKey: 2,
+  };
+  let state = hydrateThreadSnapshot(emptyControlSnapshot, { thread, timeline: [canonical] });
+  for (let sequence = 1; sequence <= 5; sequence += 1) {
+    state = applyAgentEvent(state, {
+      type: "timeline.upserted", sequence,
+      item: { ...canonical, id: "turn-1::item-2", logicalId: "turn-1::item-2", content: `Answer in progress${"!".repeat(sequence)}` },
+    });
+    assert.equal(state.timeline.length, 1);
+    assert.equal(state.timeline[0]?.id, canonical.id);
+    assert.equal(state.timeline[0]?.content, `Answer in progress${"!".repeat(sequence)}`);
+  }
+});
+
+test("a live row keeps its identity when history adds a logical id", () => {
+  const live = { ...timeline, id: "turn-1::answer", kind: "assistant" as const, content: "Partial", orderKey: 2 };
+  let state = hydrateThreadSnapshot({ ...emptyControlSnapshot, timeline: [live] }, {
+    thread, timeline: [{ ...live, logicalId: live.id, content: "Partial answer" }],
+  });
+  state = applyAgentEvent(state, {
+    type: "timeline.upserted", sequence: 1,
+    item: { ...live, content: "Partial answer keeps growing" },
+  });
+  assert.equal(state.timeline.length, 1);
+  assert.equal(state.timeline[0]?.content, "Partial answer keeps growing");
+});
+
 test("collapses desktop runtime user rows without client ids one-to-one", () => {
   const liveFirst = {
     ...timeline,

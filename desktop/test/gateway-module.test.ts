@@ -126,6 +126,9 @@ test("writes configured runtime and maximum contexts to the Codex catalog", asyn
         upstream_model: "gpt-5.5",
         protocol: "chat_completions",
       },
+      "provider-2/qwen3.8-27b-uncensored-fp8": {
+        provider: "provider-2", upstream_model: "qwen3.8-27b-uncensored-fp8", protocol: "chat_completions",
+      },
     },
   }));
 
@@ -164,4 +167,8 @@ test("writes configured runtime and maximum contexts to the Codex catalog", asyn
   );
   assert.equal(chatGpt?.supports_reasoning_summaries, false);
   assert.equal(chatGpt?.default_reasoning_summary, "none");
+  const qwen = catalog.models.find((model) => model.slug === "provider-2/qwen3.8-27b-uncensored-fp8");
+  assert.equal(qwen?.default_reasoning_level, "none");
+  assert.equal(qwen?.apply_patch_tool_type, "freeform");
+  assert.deepEqual((qwen?.supported_reasoning_levels as Array<{ effort: string }>).map((option) => option.effort), ["none", "high"]);
 });

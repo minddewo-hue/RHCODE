@@ -2,6 +2,7 @@ import http from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
   chatToResponse,
+  chatResponseOutcome,
   makeResponseId,
   responsesToChatRequest,
   streamChatAsResponses,
@@ -12,6 +13,8 @@ import {
   streamAnthropicAsResponses,
 } from "./anthropic-adapter.js";
 import { applyGemma31bChatRequestPolicy } from "./gemma-31b-policy.js";
+import { applyQwen27bChatRequestPolicy, isQwen27bModel } from "./qwen-27b-policy.js";
+import { taskCompletionContext, taskCompletionCheckRequest, parseTaskCompletionCheck } from "./task-completion-check.js";
 import { sanitizeResponsesRequestBody } from "./sanitize-responses-input.js";
 
 const RUNTIME_LOG_SINK = Symbol("runtimeLogSink");
@@ -24,6 +27,7 @@ export function createGatewayServer(config, options = {}) {
     gammaTurns: new Map(),
     activeRequests: new Map(),
     threadModels: new Map(),
+    completionContexts: new Map(),
     fetchImpl: options.fetchImpl || fetch,
   };
 
@@ -31,6 +35,7 @@ export function createGatewayServer(config, options = {}) {
     const requestId = randomUUID();
     const startedAt = Date.now();
     let requestTurnId = null;
+    let requestModel = null;
     res.setHeader("x-request-id", requestId);
     setCorsHeaders(res);
 
@@ -61,6 +66,7 @@ export function createGatewayServer(config, options = {}) {
         if (!access.authorized) throw unauthorizedError();
         const body = await readJsonBody(req, config.bodyLimit);
         requestTurnId = responseRequestTurnId(body);
+        requestModel = typeof body?.model === "string" ? body.model : null;
         log(config, "debug", {
           event: "request_started",
           request_id: requestId,
@@ -87,6 +93,7 @@ export function createGatewayServer(config, options = {}) {
         status: normalized.status,
         code: normalized.code,
         turn_id: requestTurnId,
+        public_model: requestModel,
         latency_ms: Date.now() - startedAt,
         message: normalized.status >= 500 ? normalized.message : undefined,
       });
@@ -116,6 +123,12 @@ export function createGatewayServer(config, options = {}) {
   Object.defineProperty(server, "gatewaySetThreadModel", {
     value: (threadId, modelId) => setThreadModel(config, state, threadId, modelId),
     enumerable: false,
+  });
+  Object.defineProperty(server, "gatewayCanCheckCompletion", {
+    value: (turnId) => state.completionContexts.has(turnId), enumerable: false,
+  });
+  Object.defineProperty(server, "gatewayCheckCompletion", {
+    value: (turnId) => checkTaskCompletion(turnId, config, state), enumerable: false,
   });
 
   return server;
@@ -159,7 +172,7 @@ async function handleResponses({
       request_id: requestId,
       turn_id: responseRequestTurnId(body),
       thread_id: threadId,
-      from_model: requestedModel?.id,
+      from_model: requestedModel?.id || body.model,
       to_model: reroutedModel.id,
     });
     body = { ...body, model: reroutedModel.id };
@@ -264,7 +277,11 @@ async function handleResponses({
         responseId,
         publicModel: model.id,
         debugLog: (message) => log(config, "debug", { event: "chat_stream", message }),
-        onComplete: () =>
+        onFinish: (outcome) => logChatFinish(config, {
+          requestId, turnId, model, route: selected.route, outcome,
+        }),
+        onComplete: (response) => {
+          rememberCompletionContext(body, response, selected.route, turnId, state);
           logRequest(config, {
             requestId,
             turnId,
@@ -273,7 +290,10 @@ async function handleResponses({
             status: 200,
             startedAt,
             streamed: true,
-          }),
+            usage: response.usage,
+            responseStatus: response.status,
+          });
+        },
         onError: (error) =>
           logStreamTermination({
             selected,
@@ -300,6 +320,27 @@ async function handleResponses({
     const response = selected.route.protocol === "anthropic_messages"
       ? anthropicToResponse(selected.responseRequest || body, upstreamResponse, responseId, model.id)
       : chatToResponse(selected.responseRequest || body, upstreamResponse, responseId, model.id);
+    rememberCompletionContext(body, response, selected.route, turnId, state);
+    if (selected.route.protocol === "chat_completions") {
+      const finishReason = upstreamResponse.choices?.[0]?.finish_reason;
+      logChatFinish(config, {
+        requestId, turnId, model, route: selected.route,
+        outcome: {
+          response_status: chatResponseOutcome(finishReason).status,
+          finish_reason: finishReason,
+          terminal_received: true,
+          done_received: null,
+          incomplete_reason: response.incomplete_details?.reason ?? null,
+          tool_call_count: upstreamResponse.choices?.[0]?.message?.tool_calls?.length || 0,
+          output_text_chars: upstreamResponse.choices?.[0]?.message?.content?.length || 0,
+          reasoning_text_chars: (upstreamResponse.choices?.[0]?.message?.reasoning_content
+            || upstreamResponse.choices?.[0]?.message?.reasoning || "").length,
+          max_output_tokens: body.max_output_tokens ?? null,
+          usage_received: Boolean(upstreamResponse.usage),
+          usage: upstreamResponse.usage ? response.usage : null,
+        },
+      });
+    }
     writeJson(res, 200, response);
     logRequest(config, {
       requestId,
@@ -310,6 +351,7 @@ async function handleResponses({
       startedAt,
       streamed: false,
       usage: response.usage,
+      responseStatus: response.status,
     });
   } catch (error) {
     recordFailure(selected.route, state, config, 502);
@@ -330,6 +372,50 @@ async function handleResponses({
 
 export function resolveRequestedModel(models, requestedId) {
   return models.get(requestedId) || null;
+}
+
+function rememberCompletionContext(request, response, route, turnId, state) {
+  if (!turnId || route.protocol !== "chat_completions" || !isQwen27bModel(route.upstreamModel)
+    || (!route.provider.apiKey && route.provider.forwardClientAuthorization)
+    || response.status !== "completed" || !request.tools?.length
+    || response.output.some((item) => item.type === "function_call" || item.type === "custom_tool_call")
+    || !response.output.some((item) => item.type === "message")) return;
+  for (const [id, context] of state.completionContexts) {
+    if (Date.now() - context.createdAt > 30 * 60_000) state.completionContexts.delete(id);
+  }
+  while (state.completionContexts.size >= 64) state.completionContexts.delete(state.completionContexts.keys().next().value);
+  state.completionContexts.set(turnId, taskCompletionContext(request, response, route));
+}
+
+async function checkTaskCompletion(turnId, config, state) {
+  const context = state.completionContexts.get(turnId);
+  state.completionContexts.delete(turnId);
+  if (!context || Date.now() - context.createdAt > 30 * 60_000) return { status: "unknown" };
+  const controller = new AbortController();
+  const requestId = `completion-check-${randomUUID()}`;
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  timeout.unref?.();
+  state.activeRequests.set(requestId, { turnId, abort: () => controller.abort(), interrupted: false });
+  let result = { status: "unknown" };
+  try {
+    const provider = context.route.provider;
+    const headers = { "Content-Type": "application/json" };
+    if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
+    const response = await state.fetchImpl(`${provider.baseUrl}${context.route.path}`, {
+      method: "POST", headers, body: JSON.stringify(taskCompletionCheckRequest(context)), signal: controller.signal,
+    });
+    if (response.ok) result = parseTaskCompletionCheck(await response.json());
+  } catch {
+    // A failed or cancelled review never authorizes another tool execution.
+  } finally {
+    clearTimeout(timeout);
+    state.activeRequests.delete(requestId);
+  }
+  log(config, result.status === "unknown" ? "warn" : "info", {
+    event: "task_completion_checked", request_id: requestId, turn_id: turnId,
+    public_model: context.route.upstreamModel, verdict: result.status,
+  });
+  return result;
 }
 
 async function selectUpstream({
@@ -384,6 +470,7 @@ async function selectUpstream({
           : responsesToChatRequest(responseRequest, route.upstreamModel);
     if (route.protocol === "chat_completions") {
       requestBody = applyGemma31bChatRequestPolicy(requestBody, route.upstreamModel);
+      requestBody = applyQwen27bChatRequestPolicy(requestBody, route.upstreamModel);
       log(config, "debug", {
         event: "chat_request",
         request_id: requestId,
@@ -931,8 +1018,8 @@ function withStreamIdleTimeout(reader, timeoutMs, abort) {
           reader.read(),
           new Promise((_, reject) => {
             timeout = setTimeout(() => {
-              abort();
               reject(upstreamTimeoutError(`Upstream stream was idle for ${timeoutMs} ms.`));
+              abort();
             }, timeoutMs);
             timeout.unref?.();
           }),
@@ -1029,13 +1116,16 @@ function isImageGenerationModel(model) {
 }
 
 function compactionRerouteModel(body, requestedModel, config, state) {
-  if (!requestedModel || !isImageGenerationModel(requestedModel) || !isCompactionRequest(body)) return null;
+  if (!isCompactionRequest(body)) return null;
+  // Codex may compact with the previous turn's model before sampling with the
+  // selected model. A removed provider must not prevent that turn from starting.
+  if (requestedModel && !isImageGenerationModel(requestedModel)) return null;
   const threadId = responseRequestThreadId(body);
   const preferredModelId = threadId ? state.threadModels.get(threadId) : null;
   const preferredModel = preferredModelId
     ? resolveRequestedModel(config.models, preferredModelId)
     : null;
-  if (!preferredModel || preferredModel.id === requestedModel.id || isImageGenerationModel(preferredModel)) return null;
+  if (!preferredModel || preferredModel.id === requestedModel?.id || isImageGenerationModel(preferredModel)) return null;
   return preferredModel;
 }
 
@@ -1456,7 +1546,20 @@ function logPreOutputRetry(config, requestId, model, route, status, attempt, err
   });
 }
 
-function logRequest(config, { requestId, turnId, model, route, status, startedAt, streamed, usage }) {
+function logChatFinish(config, { requestId, turnId, model, route, outcome }) {
+  log(config, outcome.response_status === "completed" ? "info" : "warn", {
+    event: "chat_response_finished",
+    request_id: requestId,
+    turn_id: turnId,
+    provider: route.provider.id,
+    public_model: model.id,
+    upstream_model: route.upstreamModel,
+    protocol: route.protocol,
+    ...outcome,
+  });
+}
+
+function logRequest(config, { requestId, turnId, model, route, status, startedAt, streamed, usage, responseStatus }) {
   log(config, "info", {
     event: "request_completed",
     request_id: requestId,
@@ -1467,6 +1570,7 @@ function logRequest(config, { requestId, turnId, model, route, status, startedAt
     protocol: route.protocol,
     streamed,
     status,
+    response_status: responseStatus,
     latency_ms: Date.now() - startedAt,
     ...(usage ? { usage } : {}),
   });

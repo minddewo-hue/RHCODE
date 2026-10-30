@@ -141,6 +141,10 @@ export function preferTimelineItem(current: TimelineItem, incoming: TimelineItem
     ...(current.clientMessageId || incoming.clientMessageId
       ? { clientMessageId: current.clientMessageId || incoming.clientMessageId }
       : {}),
+    ...(current.logicalId || incoming.logicalId
+      ? { logicalId: current.logicalId || incoming.logicalId }
+      : {}),
+    ...(current.turnId || incoming.turnId ? { turnId: current.turnId || incoming.turnId } : {}),
     title: base.title || current.title || incoming.title,
     images,
     files,
@@ -210,8 +214,16 @@ export function mergeDuplicateTimelineItems(current: TimelineItem, incoming: Tim
 export function dedupeTimelineItems(items: TimelineItem[]): TimelineItem[] {
   if (items.length < 2) return items.slice();
 
-  const byIdentity = new Map<string, TimelineItem>();
+  // A row can acquire logical/turn metadata after its first live event. Its
+  // physical id still denotes the same row, including for user messages.
+  const byId = new Map<string, TimelineItem>();
   for (const item of items) {
+    const key = `${item.threadId}\u0000${item.id}`;
+    const current = byId.get(key);
+    byId.set(key, current ? preferTimelineItem(current, item) : item);
+  }
+  const byIdentity = new Map<string, TimelineItem>();
+  for (const item of byId.values()) {
     const key = `${item.threadId}\u0000${item.logicalId || item.id}`;
     const current = byIdentity.get(key);
     byIdentity.set(key, current ? mergeDuplicateTimelineItems(current, item) : item);
@@ -258,6 +270,10 @@ function dedupeUserTimelineItems(items: TimelineItem[]): TimelineItem[] {
   for (const provisional of provisionals) {
     const match = canonicals.find((item) => (
       !claimedCanonical.has(item.id)
+      && !(provisional.clientMessageId && item.clientMessageId
+        && provisional.clientMessageId !== item.clientMessageId)
+      && !(provisional.turnId && (item.turnId || timelineItemTurnId(item.id))
+        && provisional.turnId !== (item.turnId || timelineItemTurnId(item.id)))
       && sameUserPayload(provisional, item)
     ));
     if (!match) continue;
@@ -298,8 +314,8 @@ function isStreamingContentDuplicate(left: TimelineItem, right: TimelineItem): b
   // often start with the same token and must never consume each other.
   const hasFallbackIdentity = isFallbackTimelineIdentity(left) || isFallbackTimelineIdentity(right);
   if (!hasFallbackIdentity && left.logicalId && right.logicalId && left.logicalId !== right.logicalId) return false;
-  const leftTurnId = timelineItemTurnId(left.id);
-  const rightTurnId = timelineItemTurnId(right.id);
+  const leftTurnId = left.turnId || timelineItemTurnId(left.id);
+  const rightTurnId = right.turnId || timelineItemTurnId(right.id);
   if (leftTurnId && rightTurnId && (leftTurnId !== rightTurnId || !hasFallbackIdentity)) return false;
   const leftContent = left.content || "";
   const rightContent = right.content || "";

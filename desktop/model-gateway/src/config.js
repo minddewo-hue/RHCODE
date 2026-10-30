@@ -95,7 +95,7 @@ function normalizeConfig(raw, meta) {
     streamIdleTimeoutMs: parsePositiveInteger(
       process.env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS
         || raw.upstream_stream_idle_timeout_ms
-        || 120000,
+        || 300000,
       "upstream_stream_idle_timeout_ms",
     ),
     circuit: {

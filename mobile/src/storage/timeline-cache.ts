@@ -29,8 +29,9 @@ const cachedThreadSchema = z.object({
   updatedAt: z.string().datetime(),
 });
 
-// v1 may contain text from independent assistant messages merged by prefix.
-const timelineCacheVersion = 2;
+// Earlier caches may contain aliases and positions from competing live/history
+// scales. Refill them from the corrected desktop timeline on upgrade.
+const timelineCacheVersion = 3;
 const cacheSchema = z.object({
   version: z.literal(timelineCacheVersion),
   threads: z.record(z.string().min(1).max(500), cachedThreadSchema),

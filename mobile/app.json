@@ -2,7 +2,7 @@
   "expo": {
     "name": "RHZYCODE",
     "slug": "rhzycode",
-    "version": "0.1.45",
+    "version": "0.1.46",
     "icon": "./assets/icon.png",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
@@ -19,7 +19,7 @@
     },
     "android": {
       "package": "ai.rhzy.code",
-      "versionCode": 45,
+      "versionCode": 46,
       "permissions": [
         "REQUEST_INSTALL_PACKAGES"
       ],

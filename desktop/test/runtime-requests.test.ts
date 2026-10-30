@@ -17,6 +17,7 @@ interface RuntimeInternals {
   turnClientMessageIds: Map<string, string>;
   pendingGatewayFailures: Map<string, { threadId: string; timer: NodeJS.Timeout }>;
   gatewayFailureGraceMs: number;
+  outputRecoveries: Map<string, { startedAt: number }>;
   loadedThreadIds: Set<string>;
   startSync(): Promise<void>;
   startGatewayAndAgent(): Promise<void>;
@@ -45,6 +46,28 @@ function createRuntimeHarness(codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 
   return { runtime, internals, store, responses, codexHome };
 }
 
+function useGatewayModels(runtime: DesktopRuntime, modelIds: string[]): void {
+  const status = runtime.gateway.getStatus();
+  runtime.gateway.getStatus = () => ({
+    ...status,
+    state: "running",
+    modelCount: modelIds.length,
+    models: modelIds.map((id) => ({
+      id,
+      ownedBy: id.split("/")[0]!,
+      providerId: id.split("/")[0]!,
+      upstreamModel: id.slice(id.indexOf("/") + 1),
+      protocol: "responses",
+      capabilities: {},
+      contextWindow: null,
+      maxContextWindow: null,
+      effectiveContextWindowPercent: 90,
+      contextWindowSource: null,
+      runtimeInstructions: null,
+    })),
+  });
+}
+
 function remoteContext(): RemoteCommandContext {
   const now = new Date().toISOString();
   return {
@@ -64,6 +87,333 @@ async function waitFor(condition: () => boolean, label: string): Promise<void> {
   }
   throw new Error(`Timed out waiting for ${label}.`);
 }
+
+function emitOutputOutcome(runtime: DesktopRuntime, turnId: string, fields: Record<string, unknown> = {}): void {
+  runtime.gateway.emit("request", {
+    time: new Date().toISOString(), level: "warn", event: "chat_response_finished",
+    turn_id: turnId, response_status: "incomplete", finish_reason: "length",
+    output_text_chars: 100, tool_call_count: 0, ...fields,
+  });
+}
+
+test("opening a running mobile timeline reads history without resuming and retains live order and status", async () => {
+  const { runtime, internals, store } = createRuntimeHarness();
+  const threadId = "thread-1";
+  internals.activeTurns.set(threadId, "turn-live");
+  for (const item of [
+    { id: "turn-live::user", kind: "user" as const, content: "question", status: "completed" as const },
+    { id: "turn-live::reasoning", kind: "notice" as const, content: "thinking", status: "completed" as const },
+    { id: "turn-live::commentary", kind: "assistant" as const, content: "progress", status: "completed" as const },
+    { id: "turn-live::command", kind: "command" as const, content: "command", status: "completed" as const },
+    { id: "turn-live::answer", kind: "assistant" as const, content: "partial answer", status: "running" as const },
+  ]) {
+    store.publish({ type: "timeline.upserted", item: { ...item, threadId, title: "", createdAt: new Date().toISOString() } });
+  }
+  runtime.agent.request = async (method, params) => {
+    assert.equal(method, "thread/read", "viewing an executing task must not resume it");
+    assert.deepEqual(params, { threadId, includeTurns: true });
+    return { thread: { id: threadId, turns: [{ id: "turn-live", items: [
+      { id: "user", type: "userMessage", content: [{type:"text",text:"question"}] },
+      { id: "commentary", type: "agentMessage", text: "progress" },
+      { id: "answer", type: "agentMessage", text: "partial" },
+    ] }] } } as never;
+  };
+  const opened = await runtime.remoteCommandHandlers().openThread(threadId, remoteContext());
+  const body = opened.timeline.filter(item => item.kind === "user" || item.kind === "assistant");
+  assert.deepEqual(body.map(item => [item.id, item.orderKey, item.status]), [
+    ["turn-live::user", 1, "completed"],
+    ["turn-live::commentary", 3, "completed"],
+    ["turn-live::answer", 5, "running"],
+  ]);
+  assert.equal(body[2]?.content, "partial answer");
+});
+
+test("desktop sends persist distinct message identities for repeated prompts", async () => {
+  const { runtime, internals, store } = createRuntimeHarness();
+  let turn = 0;
+  runtime.agent.request = async () => ({ turn: { id: `turn-${++turn}` } }) as never;
+  for (let i = 0; i < 2; i++) {
+    await runtime.startTurn({ threadId: "thread-1", text: "continue" });
+    internals.activeTurns.delete("thread-1");
+  }
+  const users = store.snapshot().timeline.filter(item => item.kind === "user");
+  assert.equal(users.length, 2);
+  assert.ok(users.every(item => item.clientMessageId && item.turnId));
+  assert.notEqual(users[0]?.clientMessageId, users[1]?.clientMessageId);
+  assert.equal(store.clientMessageIdForTurn("turn-1"), users[0]?.clientMessageId);
+  assert.equal(store.clientMessageIdForTurn("turn-2"), users[1]?.clientMessageId);
+});
+
+test("continues truncated text in the same thread with the original policies and a finite budget", async () => {
+  const { runtime, internals, store } = createRuntimeHarness();
+  const requests: Array<Record<string, unknown>> = [];
+  const forwarded: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+  runtime.on("agent:message", (message) => forwarded.push(message));
+  runtime.agent.request = async (method, params) => {
+    assert.equal(method, "turn/start");
+    requests.push(params as Record<string, unknown>);
+    return { turn: { id: `turn-${requests.length}` } } as never;
+  };
+  await runtime.startTurn({
+    threadId: "thread-1", text: "Complete a long answer", model: "test/model",
+    approvalPolicy: "on-request", sandboxMode: "read-only", reasoningEffort: "low",
+  });
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    emitOutputOutcome(runtime, `turn-${attempt}`);
+    internals.handleAgentMessage({ method: "error", params: {
+      threadId: "thread-1", turnId: `turn-${attempt}`, willRetry: false,
+      error: { message: "Incomplete response returned, reason: max_output_tokens" },
+    } });
+    assert.equal(internals.threads.get("thread-1")?.status, "running");
+    internals.handleAgentMessage({ method: "turn/completed", params: {
+      threadId: "thread-1", turn: { id: `turn-${attempt}`, status: "failed" },
+    } });
+    assert.equal(internals.threads.get("thread-1")?.status, "running");
+    await waitFor(() => requests.length === attempt + 1, "automatic continuation");
+    assert.equal(requests[attempt]?.threadId, "thread-1");
+    assert.equal(requests[attempt]?.model, "test/model");
+    assert.equal(requests[attempt]?.approvalPolicy, "on-request");
+    assert.equal(requests[attempt]?.effort, "low");
+    assert.deepEqual(requests[attempt]?.sandboxPolicy, requests[0]?.sandboxPolicy);
+  }
+  assert.ok(!forwarded.some((message) => message.method === "turn/completed"));
+  assert.ok(forwarded.filter((message) => message.method === "error").every((message) => message.params?.willRetry === true));
+  emitOutputOutcome(runtime, "turn-3");
+  internals.handleAgentMessage({ method: "turn/completed", params: {
+    threadId: "thread-1", turn: { id: "turn-3", status: "completed" },
+  } });
+  await delay(300);
+  assert.equal(requests.length, 3);
+  assert.equal(internals.threads.get("thread-1")?.status, "failed");
+  assert.ok(store.snapshot().timeline.some((item) => item.title === "输出未完成"));
+});
+
+test("stopping between output continuations cancels the scheduled turn", async () => {
+  const { runtime, internals } = createRuntimeHarness();
+  let calls = 0;
+  runtime.agent.request = async () => { calls += 1; return { turn: { id: "turn-1" } } as never; };
+  await runtime.startTurn({ threadId: "thread-1", text: "Long answer" });
+  emitOutputOutcome(runtime, "turn-1");
+  internals.handleAgentMessage({ method: "turn/completed", params: {
+    threadId: "thread-1", turn: { id: "turn-1", status: "failed" },
+  } });
+  await runtime.interruptTurn("thread-1");
+  await delay(300);
+  assert.equal(calls, 1);
+  assert.equal(internals.threads.get("thread-1")?.status, "interrupted");
+});
+
+test("does not continue normal stops, filtered output, partial tools, empty output or interrupted turns", async () => {
+  for (const fields of [
+    { finish_reason: "stop", response_status: "completed" },
+    { finish_reason: "content_filter" }, { tool_call_count: 1 }, { output_text_chars: 0 },
+    { terminalStatus: "interrupted" },
+  ]) {
+    const { runtime, internals } = createRuntimeHarness();
+    let calls = 0;
+    runtime.agent.request = async () => { calls += 1; return { turn: { id: "turn-1" } } as never; };
+    await runtime.startTurn({ threadId: "thread-1", text: "Answer" });
+    emitOutputOutcome(runtime, "turn-1", fields);
+    internals.handleAgentMessage({ method: "turn/completed", params: {
+      threadId: "thread-1", turn: { id: "turn-1", status: fields.terminalStatus || "completed" },
+    } });
+    await delay(280);
+    assert.equal(calls, 1, JSON.stringify(fields));
+  }
+});
+
+test("a successful App Server retry replaces an earlier truncated response", async () => {
+  const { runtime, internals } = createRuntimeHarness();
+  let calls = 0;
+  runtime.agent.request = async () => { calls += 1; return { turn: { id: "turn-1" } } as never; };
+  await runtime.startTurn({ threadId: "thread-1", text: "Answer" });
+  emitOutputOutcome(runtime, "turn-1");
+  runtime.gateway.emit("request", { event: "request_started", turn_id: "turn-1" });
+  emitOutputOutcome(runtime, "turn-1", { finish_reason: "stop", response_status: "completed" });
+  internals.handleAgentMessage({ method: "turn/completed", params: {
+    threadId: "thread-1", turn: { id: "turn-1", status: "completed" },
+  } });
+  await delay(280);
+  assert.equal(calls, 1);
+  assert.equal(internals.threads.get("thread-1")?.status, "completed");
+});
+
+test("a new user turn cancels an older pending continuation", async () => {
+  const { runtime, internals } = createRuntimeHarness();
+  let calls = 0;
+  runtime.agent.request = async () => { calls += 1; return { turn: { id: `turn-${calls}` } } as never; };
+  await runtime.startTurn({ threadId: "thread-1", text: "Answer" });
+  emitOutputOutcome(runtime, "turn-1");
+  internals.handleAgentMessage({ method: "turn/completed", params: {
+    threadId: "thread-1", turn: { id: "turn-1", status: "failed" },
+  } });
+  await runtime.startTurn({ threadId: "thread-1", text: "Changed request" });
+  await delay(280);
+  assert.equal(calls, 2);
+  assert.equal(internals.activeTurns.get("thread-1"), "turn-2");
+});
+
+test("switching models cancels a pending continuation and leaves the conversation stopped", async () => {
+  const { runtime, internals } = createRuntimeHarness();
+  let calls = 0;
+  runtime.agent.request = async () => { calls += 1; return { turn: { id: "turn-1" } } as never; };
+  await runtime.startTurn({ threadId: "thread-1", text: "Answer" });
+  emitOutputOutcome(runtime, "turn-1");
+  internals.handleAgentMessage({ method: "turn/completed", params: {
+    threadId: "thread-1", turn: { id: "turn-1", status: "failed" },
+  } });
+  runtime.setThreadModel("thread-1", "other/model");
+  await delay(280);
+  assert.equal(calls, 1);
+  assert.equal(internals.threads.get("thread-1")?.status, "interrupted");
+  assert.equal(internals.activeTurns.has("thread-1"), false);
+});
+
+test("an expired continuation budget and a pending user question prevent automatic execution", async () => {
+  for (const waiting of [true, false]) {
+    const { runtime, internals } = createRuntimeHarness();
+    let calls = 0;
+    runtime.agent.request = async () => { calls += 1; return { turn: { id: "turn-1" } } as never; };
+    await runtime.startTurn({ threadId: "thread-1", text: "Answer" });
+    if (waiting) internals.handleAgentMessage({ id: 999, method: "item/tool/requestUserInput", params: {
+      threadId: "thread-1", turnId: "turn-1", itemId: "question", questions: [{ id: "q", header: "Input", question: "Choose" }],
+    } });
+    else internals.outputRecoveries.get("thread-1")!.startedAt = Date.now() - 31 * 60_000;
+    emitOutputOutcome(runtime, "turn-1");
+    internals.handleAgentMessage({ method: "turn/completed", params: {
+      threadId: "thread-1", turn: { id: "turn-1", status: "failed" },
+    } });
+    await delay(280);
+    assert.equal(calls, 1);
+  }
+});
+
+test("duplicate completion notifications do not cancel a scheduled recovery", async () => {
+  const { runtime, internals } = createRuntimeHarness();
+  let calls = 0;
+  runtime.agent.request = async () => { calls += 1; return { turn: { id: `turn-${calls}` } } as never; };
+  await runtime.startTurn({ threadId: "thread-1", text: "Answer" });
+  emitOutputOutcome(runtime, "turn-1");
+  const completed = { method: "turn/completed", params: {
+    threadId: "thread-1", turn: { id: "turn-1", status: "failed" },
+  } };
+  internals.handleAgentMessage(completed);
+  internals.handleAgentMessage(completed);
+  await waitFor(() => calls === 2, "recovery after duplicate completion");
+  internals.handleAgentMessage({ method: "turn/completed", params: {
+    threadId: "thread-1", turn: { id: "turn-2", status: "completed" },
+  } });
+  assert.equal(internals.threads.get("thread-1")?.status, "completed");
+});
+
+function publishSuccessfulWork(internals: RuntimeInternals, turnId: string, command = "write module"): void {
+  internals.handleAgentMessage({ method: "item/completed", params: {
+    threadId: "thread-1", turnId, item: { id: `work-${turnId}`, type: "commandExecution", command,
+      exitCode: 0, status: "completed", aggregatedOutput: "done" },
+  } });
+}
+
+test("checks a premature normal stop and continues the original task with the same policies", async () => {
+  const { runtime, internals } = createRuntimeHarness();
+  const requests: Array<Record<string, unknown>> = [];
+  const forwarded: Array<{ method?: string }> = [];
+  runtime.on("agent:message", (message) => forwarded.push(message));
+  runtime.agent.request = async (_method, params) => {
+    requests.push(params as Record<string, unknown>); return { turn: { id: `turn-${requests.length}` } } as never;
+  };
+  let checks = 0;
+  runtime.gateway.canCheckTurnCompletion = () => true;
+  runtime.gateway.checkTurnCompletion = async () => (++checks === 1
+    ? { status: "continue", nextStep: "Write the missing tests." } : { status: "complete" });
+  await runtime.startTurn({ threadId: "thread-1", text: "Implement and test", approvalPolicy: "on-request", sandboxMode: "read-only" });
+  publishSuccessfulWork(internals, "turn-1");
+  internals.handleAgentMessage({ method: "turn/completed", params: {
+    threadId: "thread-1", turn: { id: "turn-1", status: "completed" },
+  } });
+  await waitFor(() => requests.length === 2, "continuation after semantic completion check");
+  assert.ok(!forwarded.some((event) => event.method === "turn/completed"));
+  assert.equal(requests[1]?.approvalPolicy, "on-request");
+  assert.deepEqual(requests[1]?.sandboxPolicy, requests[0]?.sandboxPolicy);
+  publishSuccessfulWork(internals, "turn-2", "write tests");
+  internals.handleAgentMessage({ method: "turn/completed", params: {
+    threadId: "thread-1", turn: { id: "turn-2", status: "completed" },
+  } });
+  await waitFor(() => internals.threads.get("thread-1")?.status === "completed", "confirmed completion");
+  assert.equal(checks, 2);
+  assert.equal(forwarded.filter((event) => event.method === "turn/completed").length, 1);
+});
+
+test("completion checks respect user-input and blocker verdicts without continuing", async () => {
+  for (const verdict of ["needs_input", "blocked", "complete"] as const) {
+    const { runtime, internals } = createRuntimeHarness(); let calls = 0;
+    runtime.agent.request = async () => { calls++; return { turn: { id: "turn-1" } } as never; };
+    runtime.gateway.canCheckTurnCompletion = () => true;
+    runtime.gateway.checkTurnCompletion = async () => ({ status: verdict });
+    await runtime.startTurn({ threadId: "thread-1", text: "Work" });
+    publishSuccessfulWork(internals, "turn-1");
+    internals.handleAgentMessage({ method: "turn/completed", params: {
+      threadId: "thread-1", turn: { id: "turn-1", status: "completed" },
+    } });
+    await waitFor(() => internals.threads.get("thread-1")?.status === (verdict === "blocked" ? "failed" : "completed"), verdict);
+    assert.equal(calls, 1);
+  }
+});
+
+test("does not keep continuing when the model makes no new execution progress", async () => {
+  const { runtime, internals } = createRuntimeHarness(); let calls = 0;
+  runtime.agent.request = async () => { calls++; return { turn: { id: `turn-${calls}` } } as never; };
+  runtime.gateway.canCheckTurnCompletion = () => true;
+  runtime.gateway.checkTurnCompletion = async () => ({ status: "continue", nextStep: "Write tests" });
+  await runtime.startTurn({ threadId: "thread-1", text: "Work" });
+  publishSuccessfulWork(internals, "turn-1");
+  internals.handleAgentMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+  await waitFor(() => calls === 2, "first continuation");
+  internals.handleAgentMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-2", status: "completed" } } });
+  await waitFor(() => calls === 3, "one correction for a progress-only reply");
+  internals.handleAgentMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-3", status: "completed" } } });
+  await waitFor(() => internals.threads.get("thread-1")?.status === "failed", "no-progress stop");
+  assert.equal(calls, 3);
+});
+
+test("stopping during a completion check prevents its delayed verdict from restarting work", async () => {
+  const { runtime, internals } = createRuntimeHarness(); let calls = 0;
+  let resolveCheck!: (result: { status: "continue" }) => void;
+  runtime.agent.request = async () => { calls++; return { turn: { id: "turn-1" } } as never; };
+  runtime.gateway.canCheckTurnCompletion = () => true;
+  runtime.gateway.checkTurnCompletion = () => new Promise((resolve) => { resolveCheck = resolve; });
+  await runtime.startTurn({ threadId: "thread-1", text: "Work" });
+  publishSuccessfulWork(internals, "turn-1");
+  internals.handleAgentMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+  await runtime.interruptTurn("thread-1"); resolveCheck({ status: "continue" });
+  await delay(280); assert.equal(calls, 1); assert.equal(internals.threads.get("thread-1")?.status, "interrupted");
+});
+
+test("completion recovery stops after eight continuations even when tools keep reporting new progress", async () => {
+  const { runtime, internals, store } = createRuntimeHarness(); let calls = 0;
+  runtime.agent.request = async () => { calls++; return { turn: { id: `turn-${calls}` } } as never; };
+  runtime.gateway.canCheckTurnCompletion = () => true;
+  runtime.gateway.checkTurnCompletion = async () => ({ status: "continue", nextStep: "Finish tests" });
+  await runtime.startTurn({ threadId: "thread-1", text: "Work" });
+  for (let turn = 1; turn <= 9; turn++) {
+    publishSuccessfulWork(internals, `turn-${turn}`, `write module ${turn}`);
+    internals.handleAgentMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: `turn-${turn}`, status: "completed" } } });
+    if (turn < 9) await waitFor(() => calls === turn + 1, "bounded continuation");
+  }
+  await waitFor(() => internals.threads.get("thread-1")?.status === "failed", "continuation limit");
+  assert.equal(calls, 9);
+  assert.ok(store.snapshot().timeline.some((item) => item.title === "任务未完成"));
+});
+
+test("a malformed or failed completion review cannot authorize another turn", async () => {
+  const { runtime, internals } = createRuntimeHarness(); let calls = 0;
+  runtime.agent.request = async () => { calls++; return { turn: { id: "turn-1" } } as never; };
+  runtime.gateway.canCheckTurnCompletion = () => true;
+  runtime.gateway.checkTurnCompletion = async () => { throw new Error("Review unavailable"); };
+  await runtime.startTurn({ threadId: "thread-1", text: "Work" }); publishSuccessfulWork(internals, "turn-1");
+  internals.handleAgentMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+  await waitFor(() => internals.threads.get("thread-1")?.status === "failed", "failed review");
+  assert.equal(calls, 1);
+});
 
 test("restores desktop threads without reviving active RPC states", () => {
   const store = new ControlStore();
@@ -2163,6 +2513,82 @@ test("keeps the remote model list available while the agent host restarts or a m
   const repeated = await commands.listModels?.(remoteContext());
   assert.deepEqual(repeated, result);
   assert.equal(agentStarts, 1);
+});
+
+test("filters removed providers and unqualified model IDs from the desktop model list", async () => {
+  const { runtime } = createRuntimeHarness();
+  useGatewayModels(runtime, ["provider-5/gpt-6.1-sol"]);
+  const diagnostics: string[] = [];
+  runtime.on("agent:diagnostic", (message: string) => diagnostics.push(message));
+  const available = {
+    id: "provider-5/gpt-6.1-sol",
+    model: "provider-5/gpt-6.1-sol",
+    displayName: "codex-xj - GPT 6.1 Sol",
+    description: "Current provider",
+    defaultReasoningEffort: "high",
+    supportedReasoningEfforts: [{ reasoningEffort: "high", description: "High" }],
+    isDefault: false,
+  };
+  runtime.agent.request = async (method) => {
+    assert.equal(method, "model/list");
+    return { data: [
+      { ...available, id: "provider-4/gpt-6.1-sol", model: "provider-4/gpt-6.1-sol", isDefault: true },
+      { ...available, model: "gpt-6.1-sol" },
+      available,
+    ] } as never;
+  };
+
+  assert.deepEqual((await runtime.listModels()).data, [available]);
+  assert.equal(diagnostics.length, 2);
+  assert.match(diagnostics[0]!, /provider-4\/gpt-6\.1-sol/);
+
+  useGatewayModels(runtime, []);
+  assert.deepEqual((await runtime.listModels()).data, []);
+});
+
+test("rejects removed models before selecting, starting or resuming a conversation", async () => {
+  const { runtime, internals, store } = createRuntimeHarness();
+  useGatewayModels(runtime, ["provider-5/gpt-6.1-sol"]);
+  const original = internals.threads.get("thread-1")!;
+  let agentRequests = 0;
+  runtime.agent.request = async () => {
+    agentRequests += 1;
+    return {} as never;
+  };
+  const unavailable = /provider-4\/gpt-6\.1-sol.*no longer available/;
+
+  assert.throws(() => runtime.setThreadModel("thread-1", "provider-4/gpt-6.1-sol"), unavailable);
+  assert.strictEqual(internals.threads.get("thread-1"), original);
+  await assert.rejects(runtime.startThread({ cwd: ".", model: "provider-4/gpt-6.1-sol" }), unavailable);
+  await assert.rejects(runtime.startTurn({
+    threadId: "thread-1", text: "Continue", model: "provider-4/gpt-6.1-sol",
+  }), unavailable);
+
+  internals.threads.set("thread-1", { ...original, model: "provider-4/gpt-6.1-sol" });
+  internals.loadedThreadIds.delete("thread-1");
+  await assert.rejects(runtime.startTurn({ threadId: "thread-1", text: "Continue" }), unavailable);
+  assert.equal(agentRequests, 0);
+  assert.equal(store.snapshot().timeline.length, 0);
+});
+
+test("submits the selected current provider model when a thread used a removed provider", async () => {
+  const { runtime, internals } = createRuntimeHarness();
+  useGatewayModels(runtime, ["provider-5/gpt-6.1-sol"]);
+  internals.threads.set("thread-1", {
+    ...internals.threads.get("thread-1")!, model: "provider-4/gpt-6.1-sol",
+  });
+  let submittedModel: unknown;
+  runtime.agent.request = async (method, params) => {
+    assert.equal(method, "turn/start");
+    submittedModel = (params as { model?: string }).model;
+    return { turn: { id: "turn-current-provider" } } as never;
+  };
+
+  await runtime.startTurn({
+    threadId: "thread-1", text: "Continue", model: "provider-5/gpt-6.1-sol",
+  });
+  assert.equal(submittedModel, "provider-5/gpt-6.1-sol");
+  assert.equal(internals.threads.get("thread-1")?.model, "provider-5/gpt-6.1-sol");
 });
 
 test("keeps manually configured gateway models selectable when the agent catalog omits them", async () => {

@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDotEnv, loadGatewayConfig } from "../src/config.js";
 import { applyModelContextConfig, loadModelContextConfig } from "../src/model-context-config.js";
+import { applyQwen27bCatalogPolicy } from "../src/qwen-27b-policy.js";
 
 const gatewayRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const desktopRoot = path.resolve(gatewayRoot, "..");
@@ -77,6 +78,9 @@ const models = [...config.models.values()].map((model, index) => {
   entry.context_window = model.contextWindow || Number(entry.context_window) || 131072;
   entry.max_context_window = model.maxContextWindow || entry.context_window;
   entry.effective_context_window_percent = model.effectiveContextWindowPercent || 90;
+  if (route.protocol === "chat_completions" && model.capabilities.reasoning !== false) {
+    applyQwen27bCatalogPolicy(entry, route.upstreamModel);
+  }
 
   return entry;
 });

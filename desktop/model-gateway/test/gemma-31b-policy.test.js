@@ -42,7 +42,7 @@ test("keeps the isolated Gemma request policy in the embedded gateway", async (c
   const upstream = http.createServer(async (request, response) => {
     receivedBody = await readJson(request);
     writeJson(response, 200, {
-      choices: [{ message: { role: "assistant", content: "OK" } }],
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "OK" } }],
     });
   });
   await new Promise((resolve, reject) => {

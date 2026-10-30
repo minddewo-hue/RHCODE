@@ -49,8 +49,15 @@ export interface EmbeddedGatewayHandle {
   refreshModels(): Promise<{ changed: boolean; models: EmbeddedGatewayModel[] }>;
   probeProviders(options?: { timeoutMs?: number }): Promise<EmbeddedGatewayProvider[]>;
   interruptTurn(turnId: string): number;
+  canCheckTurnCompletion(turnId: string): boolean;
+  checkTurnCompletion(turnId: string): Promise<TaskCompletionCheckResult>;
   setThreadModel(threadId: string, modelId: string): boolean;
   stop(): Promise<void>;
+}
+
+export interface TaskCompletionCheckResult {
+  status: "complete" | "continue" | "needs_input" | "blocked" | "unknown";
+  nextStep?: string;
 }
 
 export function startEmbeddedGateway(options: {

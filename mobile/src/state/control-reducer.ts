@@ -142,7 +142,7 @@ function upsertTimeline(items: TimelineItem[], value: TimelineItem): TimelineIte
     ? items.map((item) => (
       timelineIdentity(item) === identity ? mergeDuplicateTimelineItems(item, value) : item
     ))
-    : [...items, value];
+    : dedupeTimelineItems([...items, value]);
 }
 
 function upsertById<T extends { id: string }>(items: T[], value: T): T[] {

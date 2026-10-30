@@ -8,7 +8,9 @@ import {
   type EmbeddedGatewayLogEvent,
   type EmbeddedGatewayModel,
   type EmbeddedGatewayProvider,
+  type TaskCompletionCheckResult,
 } from "../../model-gateway/src/embedded.js";
+import { applyQwen27bCatalogPolicy } from "../../model-gateway/src/qwen-27b-policy.js";
 
 export type GatewayRequestEvent = EmbeddedGatewayLogEvent;
 
@@ -186,6 +188,9 @@ export class GatewayModule extends EventEmitter {
         entry.max_context_window = model.maxContextWindow || model.contextWindow;
         entry.effective_context_window_percent = model.effectiveContextWindowPercent || 90;
       }
+      if (model.protocol === "chat_completions" && model.capabilities.reasoning !== false) {
+        applyQwen27bCatalogPolicy(entry, model.upstreamModel);
+      }
       entries.set(model.id, entry);
     }
     catalog.models = models
@@ -212,6 +217,14 @@ export class GatewayModule extends EventEmitter {
 
   interruptTurn(turnId: string): number {
     return this.handle?.interruptTurn(turnId) || 0;
+  }
+
+  canCheckTurnCompletion(turnId: string): boolean {
+    return this.handle?.canCheckTurnCompletion(turnId) || false;
+  }
+
+  checkTurnCompletion(turnId: string): Promise<TaskCompletionCheckResult> {
+    return this.handle?.checkTurnCompletion(turnId) || Promise.resolve({ status: "unknown" });
   }
 
   setThreadModel(threadId: string, modelId: string): boolean {

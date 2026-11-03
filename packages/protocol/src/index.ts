@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { isAutomaticContinuationInput } from "./conversation-visibility.js";
+export { automaticContinuationInput, isAutomaticContinuationInput, isVisibleConversationMessage } from "./conversation-visibility.js";
 
 export const hostStatusSchema = z.enum(["online", "offline", "busy"]);
 export type HostStatus = z.infer<typeof hostStatusSchema>;
@@ -212,6 +214,7 @@ export function mergeDuplicateTimelineItems(current: TimelineItem, incoming: Tim
 }
 
 export function dedupeTimelineItems(items: TimelineItem[]): TimelineItem[] {
+  items = items.filter((item) => item.kind !== "user" || !isAutomaticContinuationInput(item.content));
   if (items.length < 2) return items.slice();
 
   // A row can acquire logical/turn metadata after its first live event. Its

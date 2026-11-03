@@ -1,4 +1,5 @@
 import type { ApprovalRequest, ConversationMessage, ThreadSummary, TimelineItem } from "@rhzycode/protocol";
+import { isVisibleConversationMessage } from "@rhzycode/protocol";
 import type { CredentialStatus, ModelOption, ReasoningEffort, UpdateStatus } from "../../shared/desktop-api";
 
 export interface ActivityEntry {
@@ -10,6 +11,30 @@ export interface ActivityEntry {
 
 export interface ChatMessage extends ConversationMessage {
   streaming?: boolean;
+  optimistic?: boolean;
+  localId?: string;
+}
+
+export function isImageFile(file: NonNullable<ChatMessage["files"]>[number]): boolean {
+  return Boolean(file.path) && file.mimeType?.startsWith("image/") === true;
+}
+
+/** Only a pending local send may be claimed by text; confirmed turns use ids. */
+export function mergeUserMessage(messages: ChatMessage[], incoming: ChatMessage): ChatMessage[] {
+  if (!isVisibleConversationMessage(incoming)) return messages;
+  let index = messages.findIndex((message) => message.id === incoming.id);
+  if (index < 0) index = messages.findIndex((message) => message.optimistic
+    && message.role === "user" && message.content.trim() === incoming.content.trim());
+  if (index < 0) return [...messages, incoming];
+  return messages.map((current, currentIndex) => {
+    if (currentIndex !== index) return current;
+    const files = incoming.files || current.files;
+    return {
+      ...current, ...incoming, optimistic: false,
+      images: files?.some(isImageFile) ? undefined : incoming.images || current.images,
+      files,
+    };
+  });
 }
 
 export interface ActivityDelta {

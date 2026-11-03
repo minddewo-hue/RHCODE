@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ConversationFile, ConversationMessage, ThreadDetail, ThreadSummary } from "@rhzycode/protocol";
+import { isAutomaticContinuationInput } from "@rhzycode/protocol";
 import type { ManagedFileRecord } from "./managed-file-store";
 import { turnScopedItemId } from "../shared/item-identity";
 import { findRolloutPath, loadRolloutGeneratedImages } from "./generated-image-rollout";
@@ -83,6 +84,22 @@ export async function loadLocalRolloutThread(
   ));
   const displayManagedFiles = reconcileRolloutUploadedImages(managedFiles, rolloutUploadedImages);
   const hiddenCompactionMessages = compactionMessageOrders(records);
+  const canonicalUsers = new Map<string, string[]>();
+  const seenUsers = new Set<string>();
+  for (const record of records) {
+    const item = asRecord(record.payload.item);
+    const turnId = stringValue(record.payload.turn_id);
+    const id = stringValue(item.id);
+    if (record.type !== "event_msg" || record.payload.type !== "item_completed"
+      || !["UserMessage", "userMessage"].includes(String(item.type)) || !turnId || !id) continue;
+    const identity = turnScopedItemId(turnId, id);
+    if (seenUsers.has(identity)) continue;
+    seenUsers.add(identity);
+    const key = JSON.stringify([turnId, extractResponseMessageText(item)]);
+    const ids = canonicalUsers.get(key) || [];
+    ids.push(id);
+    canonicalUsers.set(key, ids);
+  }
   const responseMessages: TimedMessage[] = [];
   const materializedArtifacts: ManagedFileRecord[] = [];
   for (const record of records) {
@@ -100,9 +117,15 @@ export async function loadLocalRolloutThread(
       if (role === "assistant" && options.materializeArtifacts) {
         materializedArtifacts.push(...options.materializeArtifacts(turnId, content));
       }
+      // Response-message ids and native UserMessage ids differ. Pair the
+      // persisted completion events one-to-one within a turn, so reopen uses
+      // the same identity as live events without merging repeated questions.
+      const canonicalId = role === "user" && turnId
+        ? canonicalUsers.get(JSON.stringify([turnId, content]))?.shift()
+        : undefined;
       responseMessages.push({
         message: {
-          id: turnScopedItemId(turnId, stringValue(payload.id) || `offline-message-${record.order}`),
+          id: turnScopedItemId(turnId, canonicalId || stringValue(payload.id) || `offline-message-${record.order}`),
           role,
           content: role === "user" ? stripUserAttachmentMarkup(content) : content,
           ...(role === "user" && !uploadedFiles.some((file) => file.kind === "image")
@@ -417,6 +440,7 @@ function messageTurnId(payload: Record<string, unknown>): string | null {
 function isInjectedContext(value: string): boolean {
   const normalized = value.trimStart();
   return normalized.startsWith("<environment_context>")
+    || isAutomaticContinuationInput(normalized)
     || normalized.startsWith("<permissions instructions>")
     || normalized.startsWith("<collaboration_mode>")
     || normalized.startsWith("<skills_instructions>")

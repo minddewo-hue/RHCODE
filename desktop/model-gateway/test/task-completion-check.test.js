@@ -4,6 +4,16 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { startEmbeddedGateway } from "../src/embedded.js";
+import { taskCompletionContext } from "../src/task-completion-check.js";
+
+test("automatic continuation inputs do not replace the actual user goal in completion review", () => {
+  const input = [{ role: "user", content: [{ type: "input_text", text: "已发送，请检查日志。" }] }];
+  for (let turn = 0; turn < 6; turn++) input.push({ role: "user", content: [{
+    type: "input_text", text: "<rhzycode_automatic_continuation>\nRead callback logs\n</rhzycode_automatic_continuation>",
+  }] });
+  const context = taskCompletionContext({ input }, { output: [] }, { upstreamModel: "test/model" });
+  assert.equal(context.goal, "已发送，请检查日志。");
+});
 
 async function fixture(context, reviewer) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-task-check-"));

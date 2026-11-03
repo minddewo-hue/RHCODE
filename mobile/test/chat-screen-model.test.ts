@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   codexComposerCommandPrompt,
+  automaticContinuationInput,
   parseCodexComposerCommand,
   type TimelineItem,
 } from "@rhzycode/protocol";
@@ -48,6 +49,18 @@ function timeline(id: string, threadId: string, kind: TimelineItem["kind"], cont
 }
 
 const emptyRequests = { approvals: [], userInputs: [] };
+
+test("cached automatic continuation rows do not become user bubbles or question-directory entries", () => {
+  const entries = buildChatEntries({
+    selectedThreadId: "thread", ...emptyRequests, pendingMessages: [], timeline: [
+      timeline("human", "thread", "user", "已发送。"),
+      timeline("automatic", "thread", "user", automaticContinuationInput("Continue reading logs")),
+      timeline("answer", "thread", "assistant", "收到，读日志验证。"),
+    ],
+  }, false);
+  assert.deepEqual(entries.map((entry) => entry.id), ["timeline:human", "timeline:answer"]);
+  assert.equal(entries.filter((entry) => entry.type === "timeline" && entry.item.kind === "user").length, 1);
+});
 
 test("parses Codex composer commands without intercepting escaped or multiline prompts", () => {
   assert.deepEqual(parseCodexComposerCommand(" /resume thread-1 "), {

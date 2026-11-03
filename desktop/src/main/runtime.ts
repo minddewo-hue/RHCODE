@@ -36,7 +36,7 @@ import type {
   RemoteUserInputSubmitRequest,
   RemoteUserInputSubmitResult,
 } from "@rhzycode/protocol";
-import { dedupeTimelineItems, preferTimelineItem } from "@rhzycode/protocol";
+import { automaticContinuationInput, dedupeTimelineItems, isAutomaticContinuationInput, preferTimelineItem } from "@rhzycode/protocol";
 import { TimelinePublishCoalescer } from "./timeline-publish-coalesce";
 import {
   summarizeTaskActivity,
@@ -1542,7 +1542,7 @@ export class DesktopRuntime extends EventEmitter {
         ...recovery.request,
         input: [{
           type: "text",
-          text: prompt,
+          text: automaticContinuationInput(prompt),
           text_elements: [],
         }],
       }).then((response) => {
@@ -1656,6 +1656,13 @@ export class DesktopRuntime extends EventEmitter {
       || (unresolvedCandidates.size === 0 ? this.activeThreadId : null);
     if (threadId) this.threadDetailCache.delete(threadId);
     const effectiveTurnId = turnId || (threadId ? this.activeTurns.get(threadId) || null : null);
+    if ((method === "item/started" || method === "item/completed")
+      && (params.item as Record<string, unknown> | undefined)?.type === "userMessage"
+      && isAutomaticContinuationInput(describeUserContent((params.item as Record<string, unknown>).content))) {
+      // This is model input created by our recovery controller, not a human
+      // message. The existing recovery notice reports the automatic action.
+      return;
+    }
     if (method === "turn/completed" && threadId && effectiveTurnId) {
       if (this.outputRecoveries.get(threadId)?.completedTurnId === effectiveTurnId) return;
       if (this.outputRecoveries.get(threadId)?.checkingTurnId === effectiveTurnId) return;
@@ -2777,6 +2784,7 @@ function toThreadDetail(
       const itemId = turnScopedItemId(turn.id, rawItemId);
       const itemType = String(item.type || "notice");
       if (itemType === "userMessage") {
+        if (isAutomaticContinuationInput(describeUserContent(item.content))) continue;
         const images = uploadedFiles.some((file) => file.kind === "image")
           ? []
           : describeUserImages(item.content);
@@ -2883,6 +2891,7 @@ function isVisibleHistoryMessage(message: ConversationMessage): boolean {
   const normalized = message.content.trimStart();
   return !(
     normalized.startsWith("<environment_context>")
+    || isAutomaticContinuationInput(normalized)
     || normalized.startsWith("<permissions instructions>")
     || normalized.startsWith("<collaboration_mode>")
     || normalized.startsWith("<skills_instructions>")

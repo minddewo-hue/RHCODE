@@ -6,6 +6,7 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { ControlStore, type RemoteCommandContext } from "../src/main/control-plane/app";
 import type { ThreadSummary } from "@rhzycode/protocol";
+import { automaticContinuationInput, isAutomaticContinuationInput } from "@rhzycode/protocol";
 import { DesktopRuntime } from "../src/main/runtime.js";
 
 const TEST_GENERATED_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nKsAAAAASUVORK5CYII=";
@@ -96,6 +97,36 @@ function emitOutputOutcome(runtime: DesktopRuntime, turnId: string, fields: Reco
   });
 }
 
+test("internal continuation items are not forwarded as human messages and stay hidden on desktop and mobile reopen", async () => {
+  const { runtime, internals } = createRuntimeHarness();
+  const automatic = automaticContinuationInput("Continue the original task and read logs.");
+  const forwarded: Array<{ params?: { item?: { type?: string } } }> = [];
+  runtime.on("agent:message", (message) => forwarded.push(message));
+  for (const method of ["item/started", "item/completed"]) internals.handleAgentMessage({
+    method, params: { threadId: "thread-1", turnId: "auto-turn", item: {
+      id: "internal-input", type: "userMessage", content: [{ type: "text", text: automatic }],
+    } },
+  });
+  assert.deepEqual(forwarded, []);
+  runtime.agent.request = async () => ({ thread: {
+    id: "thread-1", cwd: ".", turns: [
+      { id: "human-turn", items: [{ id: "human", type: "userMessage", content: [{ type: "text", text: "已发送。" }] }] },
+      { id: "auto-turn", items: [
+        { id: "internal-input", type: "userMessage", content: [{ type: "text", text: automatic }] },
+        { id: "answer", type: "agentMessage", text: "收到，读日志验证。" },
+      ] },
+    ],
+  } }) as never;
+  const desktop = await runtime.openThread("thread-1", true);
+  assert.deepEqual(desktop.messages.map((message) => [message.role, message.content]), [
+    ["user", "已发送。"], ["assistant", "收到，读日志验证。"],
+  ]);
+  const mobile = await runtime.remoteCommandHandlers().openThread("thread-1", remoteContext());
+  assert.deepEqual(mobile.timeline.map((item) => [item.kind, item.content]), [
+    ["user", "已发送。"], ["assistant", "收到，读日志验证。"],
+  ]);
+});
+
 test("opening a running mobile timeline reads history without resuming and retains live order and status", async () => {
   const { runtime, internals, store } = createRuntimeHarness();
   const threadId = "thread-1";
@@ -175,6 +206,7 @@ test("continues truncated text in the same thread with the original policies and
     assert.equal(requests[attempt]?.approvalPolicy, "on-request");
     assert.equal(requests[attempt]?.effort, "low");
     assert.deepEqual(requests[attempt]?.sandboxPolicy, requests[0]?.sandboxPolicy);
+    assert.ok(isAutomaticContinuationInput(String((requests[attempt]?.input as Array<{ text: string }>)[0]?.text)));
   }
   assert.ok(!forwarded.some((message) => message.method === "turn/completed"));
   assert.ok(forwarded.filter((message) => message.method === "error").every((message) => message.params?.willRetry === true));

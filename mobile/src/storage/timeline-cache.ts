@@ -29,9 +29,9 @@ const cachedThreadSchema = z.object({
   updatedAt: z.string().datetime(),
 });
 
-// Earlier caches may contain aliases and positions from competing live/history
-// scales. Refill them from the corrected desktop timeline on upgrade.
-const timelineCacheVersion = 3;
+// Earlier caches may contain response-message aliases for canonical user ids,
+// as well as positions from competing live/history scales. Refill on upgrade.
+const timelineCacheVersion = 4;
 const cacheSchema = z.object({
   version: z.literal(timelineCacheVersion),
   threads: z.record(z.string().min(1).max(500), cachedThreadSchema),

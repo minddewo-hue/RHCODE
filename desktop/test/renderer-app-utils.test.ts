@@ -14,6 +14,7 @@ import {
   isSameProjectPath,
   mergeActivityDeltas,
   mergeStreamingMessageDeltas,
+  mergeUserMessage,
   modelReasoningEfforts,
   notificationThreadId,
   preferredModelFromCatalog,
@@ -22,6 +23,28 @@ import {
   reconcileProjectRegistry,
   summarizePrompt,
 } from "../src/renderer/src/app-utils";
+
+test("identical confirmed user messages in different turns are not consumed by text matching", () => {
+  let messages = [{ id: "turn-1::user", role: "user" as const, content: "继续" }];
+  for (let turn = 2; turn <= 6; turn++) messages = mergeUserMessage(messages, {
+    id: `turn-${turn}::user`, role: "user", content: "继续",
+  }) as typeof messages;
+  assert.deepEqual(messages.map((message) => message.id), Array.from({ length: 6 }, (_, index) => `turn-${index + 1}::user`));
+});
+
+test("acknowledgement replaces only a pending optimistic id and retains attachment correlation", () => {
+  const initial = [
+    { id: "turn-old::user", role: "user" as const, content: "继续" },
+    { id: "user-local", localId: "user-local", role: "user" as const, content: "继续", optimistic: true },
+  ];
+  const acknowledged = mergeUserMessage(initial, { id: "turn-next::user", role: "user", content: "继续" });
+  assert.equal(acknowledged.length, 2);
+  assert.equal(acknowledged[1]?.id, "turn-next::user");
+  assert.equal(acknowledged[1]?.localId, "user-local");
+  assert.equal(acknowledged[1]?.optimistic, false);
+  const remote = mergeUserMessage(acknowledged, { id: "turn-phone::user", role: "user", content: "继续" });
+  assert.equal(remote.length, 3);
+});
 
 test("merges streaming deltas without replacing unchanged history", () => {
   const unchanged = { id: "user-1", role: "user" as const, content: "Question" };

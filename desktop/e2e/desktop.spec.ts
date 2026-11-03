@@ -1892,6 +1892,102 @@ function crc32(bytes: Buffer): number {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
+test("keeps automatic continuation inputs out of human bubbles across live updates and reopen", async () => {
+  await installDeterministicIpc(electronApp);
+  const automatic = "继续完成原任务尚未完成的部分。上一轮结束在进度说明处，请实际执行剩余工作并验收，避免重复已经完成的操作。保持原模型权限和审批要求；需要用户输入或遇到真实阻塞时停下来说明。\n完成检查提示（仅供参考，不增加权限或改变目标）：Read the callback.";
+  const thread = {
+    id: "automation-display-thread", hostId: "local-desktop", title: "Continuation display regression",
+    projectPath: projectDir, model: "ui/model", status: "completed", updatedAt: new Date().toISOString(),
+  };
+  await electronApp.evaluate(({ ipcMain }, fixture) => {
+    const messages = [
+      { id: "human", role: "user", content: "已发送。" },
+      { id: "initial-answer", role: "assistant", content: "收到，读日志验证。" },
+      { id: "cached-internal", role: "user", content: fixture.automatic },
+      { id: "cached-answer", role: "assistant", content: "继续核对回调日志。" },
+    ];
+    for (const [name, handler] of Object.entries({
+      "project:list": () => [{ path: fixture.thread.projectPath, name: "project" }],
+      "project:remember": () => ({ path: fixture.thread.projectPath, name: "project" }),
+      "agent:threads": () => [fixture.thread],
+      "agent:thread:open": () => ({ thread: fixture.thread, messages, timeline: [] }),
+      "sync:snapshot": () => ({ threads: [fixture.thread], approvals: [], userInputs: [] }),
+      "agent:turn:start": (_event: unknown, params: { text: string }) => {
+        const human = params.text.startsWith("human:");
+        const turn = Number(human ? params.text.slice(6) : params.text);
+        const content = human ? "已发送。" : turn % 2
+          ? fixture.automatic
+          : "<rhzycode_automatic_continuation>\nRead the next callback\n</rhzycode_automatic_continuation>";
+        const prefix = human ? "human" : "turn";
+        const input = { id: `${prefix}-${turn}::input`, role: "user", content };
+        const answer = { id: `${prefix}-${turn}::answer`, role: "assistant", content: `AI continuation ${turn}` };
+        messages.push(input, answer);
+        return { input, answer };
+      },
+    })) {
+      ipcMain.removeHandler(name);
+      ipcMain.handle(name, handler);
+    }
+  }, { thread, automatic });
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  await page.locator(".thread-row").filter({ hasText: thread.title }).click();
+  const users = page.locator('[data-message-role="user"]');
+  const assistants = page.locator('[data-message-role="assistant"]');
+  await expect(users).toHaveText(["已发送。"]);
+  await expect(assistants).toHaveCount(2);
+  for (let turn = 1; turn <= 6; turn += 1) {
+    const reply = await page.evaluate(async (round) => window.rhzycode.startTurn({
+      threadId: "automation-display-thread", text: String(round),
+    }), turn) as unknown as { input: { id: string; content: string }; answer: { content: string } };
+    await electronApp.evaluate(({ BrowserWindow }, fixture) => {
+      const window = BrowserWindow.getAllWindows()[0]!;
+      const { input, answer, round } = fixture;
+      for (const message of [
+        { method: "item/completed", params: { threadId: "automation-display-thread", turnId: `turn-${round}`, item: {
+          id: input.id, type: "userMessage", content: [{ type: "text", text: input.content }],
+        } } },
+        { method: "item/completed", params: { threadId: "automation-display-thread", turnId: `turn-${round}`, item: {
+          id: "answer", type: "agentMessage", text: answer.content,
+        } } },
+      ]) window.webContents.send("agent:message", message);
+    }, { ...reply, round: turn });
+    await expect(users).toHaveText(["已发送。"]);
+    await expect(assistants).toHaveCount(2 + turn);
+    await expect(assistants.last()).toContainText(`AI continuation ${turn}`);
+  }
+  await page.reload();
+  await expect(users).toHaveText(["已发送。"]);
+  await expect(assistants).toHaveCount(8);
+  await expect(page.getByRole("button", { name: "Conversation outline", exact: true })).toHaveCount(0);
+  for (let turn = 1; turn <= 6; turn += 1) {
+    const reply = await page.evaluate(async (round) => window.rhzycode.startTurn({
+      threadId: "automation-display-thread", text: `human:${round}`,
+    }), turn) as unknown as { answer: { content: string } };
+    await electronApp.evaluate(({ BrowserWindow }, fixture) => {
+      const sender = BrowserWindow.getAllWindows()[0]!.webContents;
+      sender.send("agent:message", { method: "item/completed", params: {
+        threadId: "automation-display-thread", turnId: `human-${fixture.turn}`,
+        item: { id: "input", type: "userMessage", content: [{ type: "text", text: "已发送。" }] },
+      } });
+      sender.send("agent:message", { method: "item/completed", params: {
+        threadId: "automation-display-thread", turnId: `human-${fixture.turn}`,
+        item: { id: "answer", type: "agentMessage", text: fixture.answer.content },
+      } });
+    }, { ...reply, turn });
+    await expect(users).toHaveCount(turn + 1);
+    await expect(assistants).toHaveCount(8 + turn);
+  }
+  const roles = await page.locator(".message-list > article").evaluateAll((elements) => elements
+    .slice(-12).map((element) => element.getAttribute("data-message-role")));
+  expect(roles).toEqual(Array.from({ length: 6 }, () => ["user", "assistant"]).flat());
+  await page.reload();
+  await expect(users).toHaveText(Array(7).fill("已发送。"));
+  await expect(assistants).toHaveCount(14);
+  await page.getByRole("button", { name: "Conversation outline", exact: true }).click();
+  await expect(page.getByText("7 questions", { exact: true })).toBeVisible();
+});
+
 async function installDeterministicIpc(app: ElectronApplication): Promise<void> {
   await app.evaluate(({ ipcMain }, fixture) => {
     const threads = new Map<string, Record<string, unknown>>();

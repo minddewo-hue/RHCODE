@@ -45,7 +45,7 @@ test("treats a corrupt cache file as empty", async () => {
   assert.deepEqual(await store.load(), {});
 });
 
-for (const version of [1, 2]) test(`discards v${version} caches with obsolete message merging or ordering`, async () => {
+for (const version of [1, 2, 3]) test(`discards v${version} caches with obsolete message merging or ordering`, async () => {
   const values = new Map<string, string>([[
     "timeline-cache",
     JSON.stringify({
@@ -57,7 +57,7 @@ for (const version of [1, 2]) test(`discards v${version} caches with obsolete me
   assert.deepEqual(await store.load(), {});
   const fresh = upsertCachedThread({}, "thread-1", 6, [item("assistant-6", 6)]);
   await store.save(fresh);
-  assert.equal(JSON.parse(values.get("timeline-cache")!).version, 3);
+  assert.equal(JSON.parse(values.get("timeline-cache")!).version, 4);
   assert.deepEqual(await store.load(), fresh);
 });
 

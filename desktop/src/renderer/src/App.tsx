@@ -40,7 +40,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { codexComposerCommandPrompt, parseCodexComposerCommand, type ParsedCodexComposerCommand } from "@rhzycode/protocol";
+import { codexComposerCommandPrompt, isVisibleConversationMessage, parseCodexComposerCommand, type ParsedCodexComposerCommand } from "@rhzycode/protocol";
 import type {
   AgentEvent,
   ApprovalRequest,
@@ -95,10 +95,12 @@ import {
   groupThreadsByProject,
   isActiveThreadStatus,
   isComposerRunning,
+  isImageFile,
   isSameProjectPath,
   isUsableThreadModel,
   mergeActivityDeltas,
   mergeStreamingMessageDeltas,
+  mergeUserMessage,
   modelReasoningEfforts,
   notificationThreadId,
   preferredModelFromCatalog,
@@ -271,6 +273,7 @@ export function App() {
   const [renameValue, setRenameValue] = useState("");
   const [openingThreadId, setOpeningThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const visibleMessages = useMemo(() => messages.filter(isVisibleConversationMessage), [messages]);
   const [conversationNearBottom, setConversationNearBottom] = useState(true);
   const [unreadConversationUpdates, setUnreadConversationUpdates] = useState(0);
   const [currentConversationTurn, setCurrentConversationTurn] = useState(0);
@@ -479,19 +482,19 @@ export function App() {
 
   useEffect(() => {
     if (!followConversationRef.current) {
-      if (messages.length > previousConversationMessageCountRef.current) {
-        setUnreadConversationUpdates((count) => Math.min(99, count + messages.length - previousConversationMessageCountRef.current));
+      if (visibleMessages.length > previousConversationMessageCountRef.current) {
+        setUnreadConversationUpdates((count) => Math.min(99, count + visibleMessages.length - previousConversationMessageCountRef.current));
       }
-      previousConversationMessageCountRef.current = messages.length;
+      previousConversationMessageCountRef.current = visibleMessages.length;
       return;
     }
-    previousConversationMessageCountRef.current = messages.length;
+    previousConversationMessageCountRef.current = visibleMessages.length;
     const frame = requestAnimationFrame(() => {
       const conversation = conversationRef.current;
       if (conversation) conversation.scrollTop = conversation.scrollHeight;
     });
     return () => cancelAnimationFrame(frame);
-  }, [messages]);
+  }, [visibleMessages]);
 
   function conversationTurnElements(): HTMLElement[] {
     return Array.from(conversationRef.current?.querySelectorAll<HTMLElement>('[data-message-role="user"]') || []);
@@ -548,7 +551,7 @@ export function App() {
     followConversationRef.current = true;
     setConversationNearBottom(true);
     setUnreadConversationUpdates(0);
-    setCurrentConversationTurn(Math.max(0, messages.filter((message) => message.role === "user").length - 1));
+    setCurrentConversationTurn(Math.max(0, visibleMessages.filter((message) => message.role === "user").length - 1));
     conversation.scrollTo({ top: conversation.scrollHeight, behavior: "smooth" });
   }
 
@@ -564,13 +567,13 @@ export function App() {
     return () => window.removeEventListener("keydown", navigateConversation);
   }, [currentConversationTurn, messages]);
 
-  const conversationOutline = useMemo(() => messages
+  const conversationOutline = useMemo(() => visibleMessages
     .filter((message) => message.role === "user")
     .map((message, index) => ({
       id: message.id,
       index,
       summary: conversationOutlineSummary(message.content, message.files?.map((file) => file.name)),
-    })), [messages]);
+    })), [visibleMessages]);
   const filteredConversationOutline = useMemo(() => {
     const query = conversationOutlineSearch.trim().toLocaleLowerCase();
     return query
@@ -892,6 +895,7 @@ export function App() {
   }
 
   function applyThreadDetail(detail: ThreadDetail): void {
+    detail = { ...detail, messages: detail.messages.filter(isVisibleConversationMessage) };
     discardPendingStreamingUpdates();
     const changedThread = selectedThreadIdRef.current !== detail.thread.id
       || !isSameProjectPath(selectedProjectPathRef.current, detail.thread.projectPath);
@@ -1677,6 +1681,8 @@ export function App() {
       ...current,
       {
         id: optimisticMessageId,
+        localId: optimisticMessageId,
+        optimistic: true,
         role: "user",
         content: text,
         images: selectedAttachments
@@ -1750,7 +1756,7 @@ export function App() {
         attachments: selectedAttachments,
       });
       if (result.files?.length) {
-        setMessages((current) => current.map((message) => message.id === optimisticMessageId
+        setMessages((current) => current.map((message) => (message.id === optimisticMessageId || message.localId === optimisticMessageId)
           ? {
               ...message,
               ...(result.files?.some(isImageFile) ? { images: undefined } : {}),
@@ -2060,34 +2066,8 @@ export function App() {
       }
       if (method === "item/completed" && itemType === "userMessage") {
         const incoming = userMessageFromNotification(itemId, item);
-        setMessages((current) => {
-          const exactIndex = current.findIndex((message) => message.id === itemId);
-          if (exactIndex !== -1) {
-            return current.map((message, index) => index === exactIndex
-              ? {
-                  ...incoming,
-                  images: (incoming.files || message.files)?.some(isImageFile)
-                    ? undefined
-                    : incoming.images || message.images,
-                  files: incoming.files || message.files,
-                }
-              : message);
-          }
-          const reversedIndex = [...current].reverse().findIndex((message) => (
-            message.role === "user" && message.content.trim() === incoming.content.trim()
-          ));
-          const optimisticIndex = reversedIndex === -1 ? -1 : current.length - reversedIndex - 1;
-          if (optimisticIndex !== -1) {
-            return current.map((message, index) => index === optimisticIndex
-              ? {
-                  ...message,
-                  images: message.files?.some(isImageFile) ? undefined : incoming.images,
-                  files: incoming.files || message.files,
-                }
-              : message);
-          }
-          return [...current, incoming];
-        });
+        if (!isVisibleConversationMessage(incoming)) return;
+        setMessages((current) => mergeUserMessage(current, incoming));
         return;
       }
       upsertActivity(
@@ -2100,6 +2080,12 @@ export function App() {
   }
 
   function handleSyncEvent(event: AgentEvent) {
+    if (event.type === "timeline.upserted" && event.item.kind === "notice"
+      && /^(output-recovery-|completion-check-)/.test(event.item.id)
+      && event.item.threadId === selectedThreadIdRef.current) {
+      upsertActivity(event.item.id, event.item.title, event.item.content,
+        event.item.status === "failed" ? "error" : event.item.status === "running" ? "running" : "done");
+    }
     if (event.type === "thread.updated") {
       const active = isActiveThreadStatus(event.thread.status);
       markThreadActive(event.thread.id, active);
@@ -2414,17 +2400,17 @@ export function App() {
               updateCurrentConversationTurn(element);
             }}
           >
-          {isOpeningSelectedThread && messages.length > 0 && (
+          {isOpeningSelectedThread && visibleMessages.length > 0 && (
             <div className="conversation-refresh" role="progressbar" aria-label="Refreshing conversation" />
           )}
-          {messages.length === 0 && isOpeningSelectedThread ? (
+          {visibleMessages.length === 0 && isOpeningSelectedThread ? (
             <div className="conversation-loading" role="status" aria-label="Loading conversation">
               <span className="conversation-loading-line wide" />
               <span className="conversation-loading-line medium" />
               <span className="conversation-loading-line short" />
               <span className="conversation-loading-line assistant" />
             </div>
-          ) : messages.length === 0 ? (
+          ) : visibleMessages.length === 0 ? (
             <div className="empty-thread">
               <div className="empty-icon"><Bot size={28} /></div>
               <h1>{threadId ? "No messages yet" : projectPath ? "Start a new task" : "Select a project"}</h1>
@@ -2432,14 +2418,14 @@ export function App() {
             </div>
           ) : (
             <div className="message-list">
-              {messages.map((message) => (
+              {visibleMessages.map((message) => (
                 <ChatMessageRow key={message.id} message={message} onOpenImage={setPreviewImage} />
               ))}
             </div>
           )}
           </section>
 
-          {!conversationNearBottom && messages.length > 0 && (
+          {!conversationNearBottom && visibleMessages.length > 0 && (
             <button type="button" className="conversation-latest" title="Back to latest" aria-label="Back to latest" onClick={scrollToConversationLatest}>
               <ChevronDown size={19} />
               {unreadConversationUpdates > 0 && <span>{Math.min(unreadConversationUpdates, 99)}</span>}
@@ -2894,12 +2880,6 @@ function MessageFile({ file }: {
       )}
     </div>
   );
-}
-
-function isImageFile(
-  file: NonNullable<ChatMessage["files"]>[number],
-): boolean {
-  return Boolean(file.path) && file.mimeType?.startsWith("image/") === true;
 }
 
 function userMessageFromNotification(id: string, item: Record<string, unknown>): ChatMessage {

@@ -8,7 +8,6 @@ import {
 } from "./control-plane/app";
 import fs from "node:fs";
 import os from "node:os";
-import { spawnSync } from "node:child_process";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { DesktopRuntime } from "./runtime";
 import {
@@ -32,6 +31,7 @@ import {
   type EnvironmentMigrationSource,
 } from "./environment-migration";
 import { selectGatewayRoot } from "./gateway-module";
+import { readCodexVersion, resolveSystemCodexPath } from "./platform/codex-path";
 import { SkillsManager } from "./skills-manager";
 import { showStartupDialog } from "./startup-dialog";
 import { sendToRenderer, shouldRecoverRenderer } from "./renderer-ipc";
@@ -798,28 +798,6 @@ function useBundledCodexBinary(): void {
   const configuredPath = process.env.RHZYCODE_CODEX_PATH?.trim();
   const selectedPath = configuredPath || preferredCodexPath(bundledPath, bundledVersion, systemPath, systemVersion);
   if (selectedPath) process.env.RHZYCODE_CODEX_PATH = selectedPath;
-}
-
-function resolveSystemCodexPath(): string | undefined {
-  const lookup = process.platform === "win32" ? "where.exe" : "which";
-  try {
-    const result = spawnSync(lookup, [bundledCodexExecutable()], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
-    if (result.status !== 0) return undefined;
-    return result.stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function readCodexVersion(executablePath: string): string | undefined {
-  if (!fs.existsSync(executablePath)) return undefined;
-  try {
-    const result = spawnSync(executablePath, ["--version"], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
-    if (result.status !== 0) return undefined;
-    return /(\d+\.\d+\.\d+)/.exec(result.stdout)?.[1];
-  } catch {
-    return undefined;
-  }
 }
 
 function traceStartup(stage: string): void {

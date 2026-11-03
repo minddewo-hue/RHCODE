@@ -5,6 +5,59 @@ import path from "node:path";
 import test from "node:test";
 import { ManagedFileStore } from "../src/main/managed-file-store.js";
 import { DesktopRuntime } from "../src/main/runtime.js";
+import { automaticContinuationInput } from "@rhzycode/protocol";
+import { loadLocalRolloutThread } from "../src/main/local-rollout-thread";
+
+test("local history uses native user completion ids and pairs repeated same-turn inputs one-to-one", async (context) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-canonical-users-"));
+  context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+  const threadId = "canonical-users-thread";
+  const directory = path.join(codexHome, "sessions");
+  fs.mkdirSync(directory);
+  fs.writeFileSync(path.join(directory, `rollout-${threadId}.jsonl`), [
+    record("session_meta", { id: threadId, cwd: codexHome }),
+    ...[1, 2].flatMap((index) => [
+      record("response_item", { id: `msg-raw-${index}`, type: "message", role: "user",
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+        content: [{ type: "input_text", text: "继续" }] }),
+      record("event_msg", { type: "item_completed", turn_id: "turn-1", item: {
+        id: `canonical-${index}`, type: "UserMessage", content: [{ type: "text", text: "继续" }],
+      } }),
+    ]),
+  ].join("\n"));
+  const detail = await loadLocalRolloutThread(codexHome, {
+    id: threadId, hostId: "local-desktop", title: "Canonical users", projectPath: codexHome,
+    model: "test/model", status: "completed", updatedAt: new Date().toISOString(),
+  });
+  assert.deepEqual(detail?.messages.map((message) => message.id), ["turn-1::canonical-1", "turn-1::canonical-2"]);
+});
+
+test("offline history keeps the last human question and subsequent AI replies without automatic user turns", async (context) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-automatic-history-"));
+  context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+  const threadId = "automation-history-thread";
+  const directory = path.join(codexHome, "sessions");
+  fs.mkdirSync(directory);
+  const legacy = "继续完成原任务尚未完成的部分。上一轮结束在进度说明处，请实际执行剩余工作并验收，避免重复已经完成的操作。保持原模型权限和审批要求；需要用户输入或遇到真实阻塞时停下来说明。\n完成检查提示（仅供参考，不增加权限或改变目标）：Read the callback.";
+  const rows = [record("session_meta", { id: threadId, cwd: codexHome })];
+  const message = (id: string, role: string, text: string) => record("response_item", {
+    id, type: "message", role, content: [{ type: role === "user" ? "input_text" : "output_text", text }],
+  });
+  rows.push(message("human", "user", "已发送。"));
+  for (let turn = 1; turn <= 6; turn += 1) {
+    rows.push(message(`auto-${turn}`, "user", turn % 2 ? legacy : automaticContinuationInput("Continue reading logs")));
+    rows.push(message(`answer-${turn}`, "assistant", `AI progress ${turn}`));
+  }
+  fs.writeFileSync(path.join(directory, `rollout-${threadId}.jsonl`), rows.join("\n"));
+  const runtime = new DesktopRuntime(".", codexHome);
+  runtime.agent.request = async () => { throw new Error("offline"); };
+  await runtime.listThreads();
+  const detail = await runtime.openThread(threadId);
+  assert.deepEqual(detail.messages.map((item) => [item.role, item.content]), [
+    ["user", "已发送。"],
+    ...Array.from({ length: 6 }, (_, index) => ["assistant", `AI progress ${index + 1}`]),
+  ]);
+});
 
 test("lists and opens local conversations when App Server is offline", async (context) => {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-offline-history-"));

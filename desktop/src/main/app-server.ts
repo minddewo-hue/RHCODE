@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdirSync } from "node:fs";
 import { createInterface } from "node:readline";
+import { resolveSystemCodexPath } from "./platform/codex-path";
 
 type AppServerState = "disconnected" | "connecting" | "connected" | "error";
 
@@ -79,7 +80,7 @@ export class AppServerClient extends EventEmitter {
   private async connect(options: AppServerStartOptions): Promise<void> {
     this.setState("connecting");
     if (options.codexHome) mkdirSync(options.codexHome, { recursive: true });
-    const executable = process.env.RHZYCODE_CODEX_PATH || "codex";
+    const executable = process.env.RHZYCODE_CODEX_PATH?.trim() || resolveSystemCodexPath() || "codex";
     const configArgs = Object.entries(appServerConfigOverrides(options.configOverrides)).flatMap(([key, value]) => [
       "-c",
       `${key}=${toTomlValue(value)}`,

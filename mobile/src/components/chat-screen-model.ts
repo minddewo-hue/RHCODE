@@ -3,6 +3,7 @@ import type {
   TimelineItem,
   UserInputRequest,
 } from "@rhzycode/protocol";
+import { isAutomaticContinuationInput } from "@rhzycode/protocol";
 
 export interface PendingMessage {
   id: string;
@@ -404,7 +405,8 @@ function compareChatEntries(left: ChatEntry, right: ChatEntry): number {
 
 export function buildChatEntries(source: ChatEntrySource, includeActivity: boolean): ChatEntry[] {
   if (!source.selectedThreadId) return [];
-  const timeline = source.timeline.filter((item) => item.threadId === source.selectedThreadId);
+  const timeline = source.timeline.filter((item) => item.threadId === source.selectedThreadId
+    && (item.kind !== "user" || !isAutomaticContinuationInput(item.content)));
   const threadPending = source.pendingMessages.filter((message) => message.threadId === source.selectedThreadId);
   const matchedPendingIds = new Set(claimPendingTimelineMatches(threadPending, timeline).keys());
   const visiblePending = threadPending.filter((message) => !matchedPendingIds.has(message.id));

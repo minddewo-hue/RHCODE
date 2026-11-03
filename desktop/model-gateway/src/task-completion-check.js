@@ -3,7 +3,8 @@ import { responsesToChatRequest } from "./chat-adapter.js";
 export function taskCompletionContext(request, response, route) {
   const messages = responsesToChatRequest(request, route.upstreamModel).messages;
   const userMessages = messages.filter((message) => message.role === "user")
-    .filter((message) => !String(message.content).startsWith("上一次输出因长度上限")
+    .filter((message) => !String(message.content).trimStart().startsWith("<rhzycode_automatic_continuation>")
+      && !String(message.content).startsWith("上一次输出因长度上限")
       && !String(message.content).startsWith("继续完成原任务尚未完成的部分"));
   const goal = userMessages.slice(-3).map((message) => String(message.content).slice(0, 12000)).join("\n\n");
   const history = messages.filter((message) => message.role !== "system").slice(-24).map((message) => ({

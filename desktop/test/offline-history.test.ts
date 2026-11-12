@@ -426,7 +426,7 @@ test("does not cache sparse local fallback as agent-loaded history", async (cont
   };
 
   await runtime.listThreads();
-  const first = await runtime.openThread(threadId, true);
+  const first = await runtime.openThread(threadId);
   assert.deepEqual(first.messages.map((message) => message.role), ["user", "user", "assistant"]);
   assert.equal(resumeCalls, 1);
 

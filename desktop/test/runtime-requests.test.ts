@@ -1968,6 +1968,129 @@ test("resumes an unloaded existing thread through the internal gateway before st
   assert.equal(requests[1]?.method, "turn/start");
 });
 
+for (const missingMethod of ["thread/settings/update", "turn/start"]) {
+  test(`resumes a missing thread and retries ${missingMethod} once when switching models`, async (context) => {
+    const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-switch-resume-"));
+    context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+    const { runtime, internals, store } = createRuntimeHarness(codexHome);
+    const sessions = path.join(codexHome, "sessions");
+    fs.mkdirSync(sessions, { recursive: true });
+    fs.writeFileSync(path.join(sessions, "rollout-thread-1.jsonl"), [
+      { type: "turn_context", payload: { turn_id: "old-turn", model: "test/model" } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "old-turn" } },
+    ].map((record) => JSON.stringify(record)).join("\n"));
+    const requests: Array<{ method: string; params: unknown }> = [];
+    let rejected = false;
+    runtime.agent.request = async (method, params) => {
+      requests.push({ method, params });
+      if (method === missingMethod && !rejected) {
+        rejected = true;
+        throw new Error("thread not found: thread-1");
+      }
+      if (method === "thread/resume") {
+        return { thread: { id: "thread-1", cwd: path.resolve("."), turns: [] } } as never;
+      }
+      return { turn: { id: "next-turn" } } as never;
+    };
+
+    await runtime.startTurn({
+      threadId: "thread-1", text: "Continue the task", model: "test/other-model",
+    });
+
+    assert.deepEqual(requests.map((request) => request.method), missingMethod === "turn/start"
+      ? ["thread/settings/update", "turn/start", "thread/resume", "turn/start"]
+      : ["thread/settings/update", "thread/resume", "thread/settings/update", "turn/start"]);
+    const attempts = requests.filter((request) => request.method === missingMethod);
+    assert.deepEqual(attempts[0]?.params, attempts[1]?.params);
+    assert.equal(internals.activeTurns.get("thread-1"), "next-turn");
+    assert.equal(internals.threads.get("thread-1")?.model, "test/other-model");
+    assert.equal(store.snapshot().timeline.filter((item) => item.kind === "user").length, 1);
+  });
+}
+
+for (const failure of ["thread not found: thread-1", "turn/start timed out."]) {
+  test(`bounds missing thread recovery and does not replay ambiguous errors: ${failure}`, async () => {
+    const { runtime } = createRuntimeHarness();
+    const requests: string[] = [];
+    runtime.agent.request = async (method) => {
+      requests.push(method);
+      if (method === "thread/resume") {
+        return { thread: { id: "thread-1", cwd: path.resolve("."), turns: [] } } as never;
+      }
+      throw new Error(failure);
+    };
+
+    await assert.rejects(runtime.startTurn({ threadId: "thread-1", text: "Continue" }),
+      (error: Error) => error.message === failure);
+    assert.deepEqual(requests, failure.startsWith("thread not found")
+      ? ["turn/start", "thread/resume", "turn/start"]
+      : ["turn/start"]);
+  });
+}
+
+test("complete mobile history after a failed resume stays display-only until a real resume succeeds", async (context) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-runtime-display-only-"));
+  context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+  const { runtime, internals } = createRuntimeHarness(codexHome);
+  const sessions = path.join(codexHome, "sessions");
+  fs.mkdirSync(sessions, { recursive: true });
+  fs.writeFileSync(path.join(sessions, "rollout-thread-1.jsonl"), [
+    { type: "session_meta", payload: { id: "thread-1", cwd: path.resolve(".") } },
+    { type: "response_item", payload: {
+      type: "message", role: "user", content: [{ type: "input_text", text: "Old question" }],
+    } },
+    { type: "response_item", payload: {
+      type: "message", role: "assistant", content: [{ type: "output_text", text: "Old answer" }],
+    } },
+  ].map((record) => JSON.stringify(record)).join("\n"));
+  internals.loadedThreadIds.delete("thread-1");
+  const requests: string[] = [];
+  let resumeAvailable = false;
+  runtime.agent.request = async (method) => {
+    requests.push(method);
+    if (method === "thread/resume") {
+      if (!resumeAvailable) throw new Error("thread not found: thread-1");
+      return { thread: { id: "thread-1", cwd: path.resolve("."), turns: [] } } as never;
+    }
+    return { turn: { id: "next-turn" } } as never;
+  };
+
+  const mobile = await runtime.remoteCommandHandlers().openThread("thread-1", remoteContext());
+  assert.equal(mobile.timeline.some((item) => item.content === "Old answer"), true);
+  assert.equal(internals.loadedThreadIds.has("thread-1"), false);
+  await assert.rejects(runtime.startTurn({
+    threadId: "thread-1", text: "Continue", model: "test/other-model",
+  }), /thread not found/);
+  assert.deepEqual(requests, ["thread/resume", "thread/resume"]);
+  assert.equal(internals.loadedThreadIds.has("thread-1"), false);
+
+  resumeAvailable = true;
+  await runtime.startTurn({ threadId: "thread-1", text: "Continue", model: "test/other-model" });
+  assert.deepEqual(requests, ["thread/resume", "thread/resume", "thread/resume", "turn/start"]);
+  assert.equal(internals.loadedThreadIds.has("thread-1"), true);
+});
+
+for (const state of ["disconnected", "error"]) {
+  test(`invalidates loaded threads when the Agent Host becomes ${state}`, async () => {
+    const { runtime, internals } = createRuntimeHarness();
+    const requests: string[] = [];
+    runtime.agent.request = async (method) => {
+      requests.push(method);
+      if (method === "thread/resume") {
+        return { thread: { id: "thread-1", cwd: path.resolve("."), turns: [] } } as never;
+      }
+      return { turn: { id: "next-turn" } } as never;
+    };
+    await runtime.openThread("thread-1", true);
+    requests.length = 0;
+
+    runtime.agent.emit("status", { state, error: null });
+    assert.equal(internals.loadedThreadIds.has("thread-1"), false);
+    await runtime.startTurn({ threadId: "thread-1", text: "Continue" });
+    assert.deepEqual(requests, ["thread/resume", "turn/start"]);
+  });
+}
+
 test("routes concurrent turn events to the matching thread", () => {
   const { runtime, internals, store } = createRuntimeHarness();
   const now = new Date().toISOString();
@@ -2570,7 +2693,7 @@ test("filters removed providers and unqualified model IDs from the desktop model
     ] } as never;
   };
 
-  assert.deepEqual((await runtime.listModels()).data, [available]);
+  assert.deepEqual((await runtime.listModels()).data, [{ ...available, defaultReasoningEffort: "ultra" }]);
   assert.equal(diagnostics.length, 2);
   assert.match(diagnostics[0]!, /provider-4\/gpt-6\.1-sol/);
 
@@ -2661,6 +2784,50 @@ test("keeps manually configured gateway models selectable when the agent catalog
     supportedReasoningEfforts: [],
     isDefault: false,
   }]);
+});
+
+test("restores all Sol reasoning levels in desktop and remote model lists when agent metadata is missing", async () => {
+  const { runtime } = createRuntimeHarness();
+  useGatewayModels(runtime, ["provider-5/gpt-6.1-sol"]);
+  runtime.agent.getStatus = () => ({ state: "connected", error: null });
+  const efforts = ["low", "medium", "high", "xhigh", "max", "ultra"];
+  for (const metadata of ["omitted", "empty", "missing"] as const) {
+    runtime.agent.request = async (method) => {
+      assert.equal(method, "model/list");
+      return { data: metadata === "omitted" ? [] : [{
+        id: "provider-5/gpt-6.1-sol",
+        model: "provider-5/gpt-6.1-sol",
+        displayName: "Sol",
+        description: "Test",
+        defaultReasoningEffort: "none",
+        ...(metadata === "empty" ? { supportedReasoningEfforts: [] } : {}),
+      }] } as never;
+    };
+    const model = (await runtime.listModels()).data?.[0];
+    assert.equal(model?.defaultReasoningEffort, "ultra");
+    assert.deepEqual(model?.supportedReasoningEfforts.map((option) => option.reasoningEffort), efforts);
+    const remote = await runtime.remoteCommandHandlers().listModels?.(remoteContext());
+    assert.equal(remote?.models[0]?.defaultReasoningEffort, "ultra");
+    assert.deepEqual(remote?.models[0]?.reasoningEfforts, efforts);
+  }
+});
+
+test("forwards every Sol reasoning effort unchanged to turn/start", async () => {
+  for (const effort of ["low", "medium", "high", "xhigh", "max", "ultra"] as const) {
+    const { runtime } = createRuntimeHarness();
+    useGatewayModels(runtime, ["provider-5/gpt-6.1-sol"]);
+    runtime.agent.request = async (method, params) => {
+      assert.equal(method, "turn/start");
+      assert.equal((params as { effort?: string }).effort, effort);
+      return { turn: { id: `turn-sol-${effort}` } } as never;
+    };
+    await runtime.startTurn({
+      threadId: "thread-1",
+      text: "Continue",
+      model: "provider-5/gpt-6.1-sol",
+      reasoningEffort: effort,
+    });
+  }
 });
 
 test("executes remote thread lifecycle commands and rehydrates restored state", async () => {

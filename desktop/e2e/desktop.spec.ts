@@ -1498,6 +1498,49 @@ test("creates the first conversation after returning to an empty project", async
   await expect(getThreadRow(page, "First task in the empty project").locator("..")).not.toHaveClass(/active/);
 });
 
+test("opens assistant local file links by title and reports missing files", async () => {
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  const threadId = await page.evaluate(async (cwd) => {
+    const result = await window.rhzycode.startThread({ cwd });
+    await window.rhzycode.renameThread(result.thread.id, "Local file links");
+    return result.thread.id;
+  }, projectDir);
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  await getThreadRow(page, "Local file links").click();
+  await expect(getThreadRow(page, "Local file links").locator("..")).toHaveClass(/active/);
+
+  const normalizedPath = attachmentPath.replace(/\\/g, "/");
+  const destination = process.platform === "win32" ? `/${normalizedPath}` : normalizedPath;
+  await sendAgentMessage(electronApp, {
+    method: "item/completed",
+    params: {
+      threadId,
+      turnId: "local-file-links-turn",
+      item: {
+        id: "local-file-links-message",
+        type: "agentMessage",
+        text: `Written: [Processing plan](${destination}:12). [Missing file](${destination}.missing)\n\`[Example](${destination})\``,
+      },
+    },
+  });
+  const link = page.getByRole("link", { name: "Processing plan", exact: true });
+  await expect(link).toBeVisible();
+  await expect(link).toHaveAttribute("title", normalizedPath);
+  await expect(page.getByRole("link", { name: "Example", exact: true })).toHaveCount(0);
+  await expect(page.getByText(`[Example](${destination})`, { exact: false })).toBeVisible();
+
+  const callsBefore = await ipcCalls(electronApp, "project:open-local-file").then((calls) => calls.length);
+  await link.click();
+  await expect.poll(() => ipcCalls(electronApp, "project:open-local-file").then((calls) => calls.at(-1)?.args))
+    .toEqual([normalizedPath]);
+  await link.focus();
+  await page.keyboard.press("Enter");
+  await expect.poll(() => ipcCalls(electronApp, "project:open-local-file").then((calls) => calls.length))
+    .toBe(callsBefore + 2);
+  await page.getByRole("link", { name: "Missing file", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Could not open file:");
+});
+
 test("shows an assistant reply delivered only as a completed item", async () => {
   const threadId = await page.evaluate((cwd) => window.rhzycode.startThread({ cwd })
     .then((result) => result.thread.id), emptyProjectDir);
@@ -2248,6 +2291,7 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
     });
     replace("project:open-local-file", (_event, filePath) => {
       record("project:open-local-file", filePath);
+      if (String(filePath).endsWith(".missing")) throw new Error("File is no longer available.");
     });
     replace("project:reveal-local-file", (_event, filePath) => {
       record("project:reveal-local-file", filePath);

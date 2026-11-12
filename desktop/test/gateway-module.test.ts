@@ -121,6 +121,15 @@ test("writes configured runtime and maximum contexts to the Codex catalog", asyn
         provider: "provider-2",
         upstream_model: "gpt-5.4",
       },
+      "provider-2/gpt-6.1-sol": {
+        provider: "provider-2",
+        upstream_model: "gpt-6.1-sol",
+      },
+      "provider-2/gpt-6.1-sol-no-reasoning": {
+        provider: "provider-2",
+        upstream_model: "gpt-6.1-sol",
+        capabilities: { reasoning: false },
+      },
       "provider-2/gpt-5.5-chat": {
         provider: "provider-2",
         upstream_model: "gpt-5.5",
@@ -160,6 +169,15 @@ test("writes configured runtime and maximum contexts to the Codex catalog", asyn
     ["low", "medium", "high", "xhigh"],
   );
   const chatGpt = catalog.models.find((model) => model.slug === "provider-2/gpt-5.5-chat");
+  const sol = catalog.models.find((model) => model.slug === "provider-2/gpt-6.1-sol");
+  assert.equal(sol?.default_reasoning_level, "ultra");
+  assert.deepEqual(
+    (sol?.supported_reasoning_levels as Array<{ effort: string }>).map((option) => option.effort),
+    ["low", "medium", "high", "xhigh", "max", "ultra"],
+  );
+  const solWithoutReasoning = catalog.models.find((model) => model.slug === "provider-2/gpt-6.1-sol-no-reasoning");
+  assert.equal(solWithoutReasoning?.default_reasoning_level, null);
+  assert.deepEqual(solWithoutReasoning?.supported_reasoning_levels, []);
   assert.equal(chatGpt?.default_reasoning_level, "medium");
   assert.deepEqual(
     (chatGpt?.supported_reasoning_levels as Array<{ effort: string }>).map((option) => option.effort),

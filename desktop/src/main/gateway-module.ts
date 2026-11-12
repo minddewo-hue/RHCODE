@@ -11,6 +11,7 @@ import {
   type TaskCompletionCheckResult,
 } from "../../model-gateway/src/embedded.js";
 import { applyQwen27bCatalogPolicy } from "../../model-gateway/src/qwen-27b-policy.js";
+import { modelReasoningFallback } from "./model-reasoning";
 
 export type GatewayRequestEvent = EmbeddedGatewayLogEvent;
 
@@ -153,9 +154,23 @@ export class GatewayModule extends EventEmitter {
           entry.base_instructions = `${instructions}\n\n# Model Runtime Rules\n${model.runtimeInstructions}`;
         }
       }
+      const reasoningFallback = modelReasoningFallback(model.upstreamModel, model.capabilities);
+      if (reasoningFallback) {
+        entry.default_reasoning_level = reasoningFallback.defaultReasoningEffort;
+      }
+      if (reasoningFallback && (
+        (!existing && !upstreamTemplate)
+        || !Array.isArray(entry.supported_reasoning_levels)
+        || entry.supported_reasoning_levels.length === 0
+      )) {
+        entry.supported_reasoning_levels = reasoningFallback.supportedReasoningEfforts.map(
+          ({ reasoningEffort, description }) => ({ effort: reasoningEffort, description }),
+        );
+      }
       const hasDeclaredReasoning = Boolean(
         existing
         || upstreamTemplate
+        || reasoningFallback
         || model.capabilities.reasoning === true,
       );
       if (!hasDeclaredReasoning || model.capabilities.reasoning === false) {

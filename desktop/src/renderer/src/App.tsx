@@ -77,6 +77,7 @@ import { Terminal as XtermTerminal } from "@xterm/xterm";
 import { memo, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import "@xterm/xterm/css/xterm.css";
 import { AppModal } from "./components/AppModal";
+import { AssistantContent } from "./components/AssistantContent";
 import { DeleteConfirmationDialog } from "./components/DeleteConfirmationDialog";
 import { useInteractionTrace } from "./hooks/useInteractionTrace";
 import {
@@ -683,6 +684,10 @@ export function App() {
     });
   }, [exportItems, recentProjects]);
   const reasoningEfforts = useMemo(() => modelReasoningEfforts(activeModel), [activeModel]);
+  const defaultUltraModel = activeModel?.model.endsWith("/gpt-6.1-sol")
+    && activeModel.defaultReasoningEffort === "ultra"
+    ? activeModel.model
+    : null;
 
   useEffect(() => {
     const next = reasoningEfforts.includes(reasoningEffort)
@@ -691,6 +696,10 @@ export function App() {
     if (next !== reasoningEffort) setReasoningEffort(next);
     storeReasoningEffort(next);
   }, [reasoningEffort, reasoningEfforts]);
+
+  useEffect(() => {
+    if (defaultUltraModel) setReasoningEffort("ultra");
+  }, [defaultUltraModel]);
 
   useEffect(() => {
     if (!taskToast) return;
@@ -2775,7 +2784,9 @@ const ChatMessageRow = memo(function ChatMessageRow({
       <div className="message-body">
         {message.streaming && <div className="message-author"><span className="streaming-label">Streaming</span></div>}
         <div className="message-content">
-          {!!message.content && <div>{message.content}</div>}
+          {!!message.content && (message.role === "assistant"
+            ? <AssistantContent content={message.content} />
+            : <div>{message.content}</div>)}
           {!!(message.images?.length || message.files?.some(isImageFile)) && (
             <div className="message-images">
               {message.images?.map((image) => (
@@ -3516,7 +3527,7 @@ function SettingsView({
     setProviderEditor({
       providerId,
       name: "",
-      baseUrl: "",
+      baseUrl: "https://model.rhzy.ai/v1",
       apiKey: "",
       protocol: "auto",
       models: [],

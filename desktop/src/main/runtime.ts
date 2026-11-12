@@ -54,6 +54,7 @@ import {
 } from "./control-plane/app";
 import { AppServerClient } from "./app-server";
 import { GatewayModule, type GatewayRequestEvent } from "./gateway-module";
+import { modelReasoningFallback } from "./model-reasoning";
 import { GatewayDiagnostics } from "./gateway-diagnostics";
 import {
   ProjectDirectoryError,
@@ -361,7 +362,11 @@ export class DesktopRuntime extends EventEmitter {
     this.gateway.on("status", (status) => this.emit("gateway:status", status));
     this.gateway.on("request", (event: GatewayRequestEvent) => this.handleGatewayRequest(event));
     this.agent.on("status", (status) => {
-      if (status.state === "disconnected" || status.state === "error") this.clearOutputRecoveries();
+      if (status.state === "disconnected" || status.state === "error") {
+        this.clearOutputRecoveries();
+        this.loadedThreadIds.clear();
+        this.threadDetailCache.clear();
+      }
       this.emit("agent:status", status);
     });
     this.agent.on("diagnostic", (message) => this.emit("agent:diagnostic", message));
@@ -631,18 +636,22 @@ export class DesktopRuntime extends EventEmitter {
       if (!cursor || !(response.data || []).length) break;
     }
     const gatewayModels = this.gateway.getStatus().models;
-    const availableModelIds = new Set(gatewayModels.map((model) => model.id));
+    const gatewayModelsById = new Map(gatewayModels.map((model) => [model.id, model]));
     const models = rawModels.flatMap((model) => {
-      if (!availableModelIds.has(model.model)) {
+      const gatewayModel = gatewayModelsById.get(model.model);
+      if (!gatewayModel) {
         this.emit(
           "agent:diagnostic",
           `Model ${model.model} is missing from the current gateway catalog; hiding it from the model list.`,
         );
         return [];
       }
+      const fallback = modelReasoningFallback(gatewayModel.upstreamModel, gatewayModel.capabilities);
+      const reasoning = model.supportedReasoningEfforts?.length ? undefined : fallback;
       return [{
         ...model,
-        supportedReasoningEfforts: model.supportedReasoningEfforts || [],
+        defaultReasoningEffort: fallback?.defaultReasoningEffort ?? model.defaultReasoningEffort,
+        supportedReasoningEfforts: reasoning?.supportedReasoningEfforts ?? model.supportedReasoningEfforts ?? [],
         isDefault: model.isDefault === true,
       }];
     });
@@ -654,8 +663,10 @@ export class DesktopRuntime extends EventEmitter {
         model: gatewayModel.id,
         displayName: `${gatewayModel.ownedBy} - ${gatewayModel.upstreamModel}`,
         description: `${gatewayModel.upstreamModel} through the local RHZY gateway.`,
-        defaultReasoningEffort: "none",
-        supportedReasoningEfforts: [],
+        ...(modelReasoningFallback(gatewayModel.upstreamModel, gatewayModel.capabilities) || {
+          defaultReasoningEffort: "none",
+          supportedReasoningEfforts: [],
+        }),
         isDefault: false,
       });
     }
@@ -929,7 +940,7 @@ export class DesktopRuntime extends EventEmitter {
     }
 
     const operation = requireAgent
-      ? this.resumeThread(threadId)
+      ? this.resumeThread(threadId, false)
       : this.loadThreadForDisplay(threadId);
     this.threadLoadPromises.set(threadId, operation);
     try {
@@ -1005,7 +1016,7 @@ export class DesktopRuntime extends EventEmitter {
     return reconcileRolloutUploadedImages(this.managedFiles.listThread(threadId), rolloutImages);
   }
 
-  private async resumeThread(threadId: string): Promise<ThreadDetail> {
+  private async resumeThread(threadId: string, allowLocalFallback = true): Promise<ThreadDetail> {
     let response: {
       thread?: ServerThread;
       model?: string;
@@ -1020,27 +1031,20 @@ export class DesktopRuntime extends EventEmitter {
         });
         break;
       } catch (error) {
+        this.loadedThreadIds.delete(threadId);
+        this.threadDetailCache.delete(threadId);
         const localThread = this.threads.get(threadId);
         const message = error instanceof Error ? error.message : String(error);
-        if (localThread) {
+        if (localThread && allowLocalFallback) {
           const localDetail = await this.loadLocalThreadDetail(localThread);
           if (localDetail) {
             this.activeThreadId = threadId;
-            // Incomplete rollouts are display fallbacks only. Marking them loaded
-            // poisons later requireAgent opens so AI replies stay missing.
-            if (isIncompleteRolloutHistory(localDetail)) {
-              this.loadedThreadIds.delete(threadId);
-              this.threadDetailCache.delete(threadId);
-            } else {
-              this.loadedThreadIds.add(threadId);
-            }
             return localDetail;
           }
         }
         if (!localThread || !isRolloutNotReadyMessage(message)) throw error;
-        if (this.isEmptyLocalThread(threadId)) {
+        if (allowLocalFallback && this.isEmptyLocalThread(threadId)) {
           this.activeThreadId = threadId;
-          this.loadedThreadIds.add(threadId);
           return { thread: localThread, messages: [], timeline: [] };
         }
         if (!/rollout\b.*\bis empty/i.test(message) || rolloutRetry >= ROLLOUT_WRITE_RETRY_DELAYS_MS.length) {
@@ -1226,7 +1230,7 @@ export class DesktopRuntime extends EventEmitter {
       noProgressChecks: 0,
     });
     try {
-      const response = await this.agent.request<{ turn?: { id?: string } }>("turn/start", {
+      const response = await this.requestWithThreadRecovery<{ turn?: { id?: string } }>("turn/start", {
         ...turnRequest,
         input,
       });
@@ -2225,7 +2229,6 @@ export class DesktopRuntime extends EventEmitter {
       // (stable mobile cursor) and lets openThread(true) skip resume when the
       // history is complete.
       this.rememberThreadDetail(threadId, detail);
-      if (!isIncompleteRolloutHistory(detail)) this.loadedThreadIds.add(threadId);
       return {
         thread: this.threads.get(threadId) || detail.thread,
         timeline: dedupeTimelineItems(items),
@@ -2612,7 +2615,7 @@ export class DesktopRuntime extends EventEmitter {
     const previousModel = loadRolloutThreadState(this.codexHome, threadId).lastSuccessfulModel;
     await this.compactBeforeSmallerModel(threadId, targetModel);
     if (previousModel && previousModel !== targetModel) {
-      await this.agent.request("thread/settings/update", {
+      await this.requestWithThreadRecovery("thread/settings/update", {
         threadId,
         model: targetModel,
       });
@@ -2636,11 +2639,29 @@ export class DesktopRuntime extends EventEmitter {
       "agent:diagnostic",
       `Compacting a ${rollout.currentTokens}-token conversation before switching to ${targetModel}.`,
     );
-    await this.agent.request("thread/settings/update", {
+    await this.requestWithThreadRecovery("thread/settings/update", {
       threadId,
       model: rollout.lastSuccessfulModel,
     });
     await this.compactThread(threadId);
+  }
+
+  private async requestWithThreadRecovery<T>(
+    method: string,
+    params: { threadId: string; [key: string]: unknown },
+  ): Promise<T> {
+    try {
+      return await this.agent.request<T>(method, params);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // A missing thread was rejected before execution, so resuming and retrying
+      // is safe. Other errors may follow execution and must not be replayed.
+      if (!/^thread not found\b/i.test(message)) throw error;
+      this.loadedThreadIds.delete(params.threadId);
+      this.threadDetailCache.delete(params.threadId);
+      await this.openThread(params.threadId, true);
+      return this.agent.request<T>(method, params);
+    }
   }
 
   async compactThread(threadId: string): Promise<void> {

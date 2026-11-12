@@ -790,10 +790,18 @@ function AppContent() {
     () => remoteModelReasoningEfforts(selectedModelOption),
     [selectedModelOption],
   );
+  const defaultUltraModel = selectedModelOption?.model.endsWith("/gpt-6.1-sol")
+    && selectedModelOption.defaultReasoningEffort === "ultra"
+    ? selectedModelOption.model
+    : null;
 
   useEffect(() => {
     setReasoningEffort((current) => reasoningEfforts.includes(current) ? current : reasoningEfforts[0] || "high");
   }, [reasoningEfforts]);
+
+  useEffect(() => {
+    if (defaultUltraModel) setReasoningEffort("ultra");
+  }, [defaultUltraModel]);
 
   const openProjectDirectory = useCallback(async (projectPath: string, create = false): Promise<string | null> => {
     if (!taskClient || newThreadBusy) return null;

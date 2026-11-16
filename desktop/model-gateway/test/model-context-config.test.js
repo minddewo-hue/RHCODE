@@ -15,7 +15,7 @@ const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 test("bundles a validated context entry for every current upstream model", () => {
   const config = loadModelContextConfig(desktopRoot);
   assert.ok(config);
-  assert.equal(config.models.size, 56);
+  assert.equal(config.models.size, 60);
   assert.deepEqual(contextPair(config, "gemma-4-31b-it-uncensored-bf16"), [131_072, 131_072]);
   assert.deepEqual(contextPair(config, "gemma4-31b-uncensored-bf16-256k"), [262_144, 262_144]);
   assert.deepEqual(contextPair(config, "gemma4-31b-uncensored-bf16-256k-seq4"), [262_144, 262_144]);
@@ -24,6 +24,13 @@ test("bundles a validated context entry for every current upstream model", () =>
   assert.deepEqual(contextPair(config, "k3"), [262_144, 1_048_576]);
   assert.deepEqual(contextPair(config, "kimi-for-coding"), [262_144, 262_144]);
   assert.deepEqual(contextPair(config, "grok-latest"), [131_072, 1_000_000]);
+  assert.deepEqual(contextPair(config, "gpt-5.4"), [1_000_000, 1_050_000]);
+  assert.deepEqual(contextPair(config, "gpt-5.4-mini"), [272_000, 400_000]);
+  assert.deepEqual(contextPair(config, "gpt-5.6"), [1_000_000, 1_050_000]);
+  assert.deepEqual(contextPair(config, "gpt-6-astra"), [1_000_000, 1_050_000]);
+  assert.deepEqual(contextPair(config, "gpt-6-luna"), [1_000_000, 1_050_000]);
+  assert.deepEqual(contextPair(config, "gpt-6-sol"), [1_000_000, 1_050_000]);
+  assert.deepEqual(contextPair(config, "gpt-6.1-sol"), [1_000_000, 1_050_000]);
 });
 
 test("matches the upstream id before using provider discovery metadata", () => {
@@ -64,19 +71,21 @@ test("uses the conservative default only when an unknown model has no explicit w
 
 test("preserves an explicit deployment context over the bundled upstream default", () => {
   const config = loadModelContextConfig(desktopRoot);
-  const model = {
-    id: "private/grok-latest",
-    contextWindow: 64_000,
-    maxContextWindow: 96_000,
-    contextWindowSource: "gateway_config",
-    routes: [{ upstreamModel: "grok-latest" }],
-  };
+  for (const upstreamModel of ["grok-latest", "gpt-5.4"]) {
+    const model = {
+      id: `private/${upstreamModel}`,
+      contextWindow: 64_000,
+      maxContextWindow: 96_000,
+      contextWindowSource: "gateway_config",
+      routes: [{ upstreamModel }],
+    };
 
-  applyModelContextConfig(model, config);
+    applyModelContextConfig(model, config);
 
-  assert.equal(model.contextWindow, 64_000);
-  assert.equal(model.maxContextWindow, 96_000);
-  assert.equal(model.contextWindowSource, "gateway_config");
+    assert.equal(model.contextWindow, 64_000);
+    assert.equal(model.maxContextWindow, 96_000);
+    assert.equal(model.contextWindowSource, "gateway_config");
+  }
 });
 
 test("supports a provider-specific entry before the shared upstream entry", () => {

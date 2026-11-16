@@ -403,6 +403,21 @@ button:focus-visible, [role="button"]:focus-visible, select:focus-visible {
 .app-modal-header > div > svg { flex: none; color: #52675a; }
 .app-modal-header h2 { margin: 0; overflow: hidden; color: #202521; font-size: 14px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .app-modal-body { min-height: 0; flex: 1; overflow: auto; }
+.archived-modal { width: min(720px, 100%); }
+.archived-toolbar { display: flex; align-items: center; gap: 12px; padding: 16px; }
+.archived-toolbar select { min-width: 0; flex: 1; padding: 7px; color: var(--text); border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); }
+.archived-modal .thread-search { margin: 0 16px 12px; }
+.archived-notice { margin: 12px 16px; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.archived-notice[role="alert"] { color: #c45145; }
+.archived-list { padding: 0 16px 16px; }
+.archived-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+.archived-details { flex: 1 1 220px; min-width: 0; display: grid; gap: 5px; }
+.archived-details strong { font-size: 13px; overflow-wrap: anywhere; }
+.archived-details small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 11px; }
+.archived-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.archived-actions button { display: inline-flex; align-items: center; gap: 5px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); font-size: 12px; cursor: pointer; }
+.archived-actions button:hover { background: var(--accent-soft); }
+.archived-actions button:disabled { opacity: .55; cursor: default; }
 .app-modal-body::-webkit-scrollbar { width: 8px; height: 8px; }
 .app-modal-body::-webkit-scrollbar-track,
 .app-modal-body::-webkit-scrollbar-corner { background: transparent; }

@@ -48,6 +48,8 @@ export const chatScreenStyles = createThemedStyles((colors) => ({
   outlineEmpty: { paddingVertical: 36, color: colors.inkMuted, fontSize: 12, lineHeight: 17, textAlign: "center", letterSpacing: 0 },
   listContent: { paddingHorizontal: 16, paddingTop: 22, paddingBottom: 28 },
   emptyListContent: { flexGrow: 1 },
+  historyButton: { minHeight: 40, alignItems: "center", justifyContent: "center", marginBottom: 12, borderRadius: 6 },
+  historyButtonText: { color: colors.inkMuted, fontSize: 12, lineHeight: 18 },
   emptyState: { flex: 1, alignItems: "center", justifyContent: "center", paddingBottom: 48 },
   codexMark: { width: 48, height: 48, alignItems: "center", justifyContent: "center", borderRadius: 8, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.subtle },
   emptyTitle: { color: colors.ink, fontSize: 18, lineHeight: 24, fontWeight: "600", letterSpacing: 0, marginTop: 15 },

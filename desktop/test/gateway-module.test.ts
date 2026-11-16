@@ -130,6 +130,18 @@ test("writes configured runtime and maximum contexts to the Codex catalog", asyn
         upstream_model: "gpt-6.1-sol",
         capabilities: { reasoning: false },
       },
+      "provider-2/gpt-6-astra": {
+        provider: "provider-2",
+        upstream_model: "gpt-6-astra",
+      },
+      "provider-2/gpt-6-luna": {
+        provider: "provider-2",
+        upstream_model: "gpt-6-luna",
+      },
+      "provider-2/gpt-6-sol": {
+        provider: "provider-2",
+        upstream_model: "gpt-6-sol",
+      },
       "provider-2/gpt-5.5-chat": {
         provider: "provider-2",
         upstream_model: "gpt-5.5",
@@ -163,13 +175,26 @@ test("writes configured runtime and maximum contexts to the Codex catalog", asyn
   assert.equal(minimax?.default_reasoning_level, null);
   assert.deepEqual(minimax?.supported_reasoning_levels, []);
   const gpt = catalog.models.find((model) => model.slug === "provider-2/gpt-5.4");
+  assert.equal(gpt?.context_window, 1_000_000);
+  assert.equal(gpt?.max_context_window, 1_050_000);
+  assert.equal(gpt?.effective_context_window_percent, 90);
   assert.equal(gpt?.default_reasoning_level, "medium");
   assert.deepEqual(
     (gpt?.supported_reasoning_levels as Array<{ effort: string }>).map((option) => option.effort),
     ["low", "medium", "high", "xhigh"],
   );
   const chatGpt = catalog.models.find((model) => model.slug === "provider-2/gpt-5.5-chat");
+  assert.equal(chatGpt?.context_window, 1_000_000);
+  assert.equal(chatGpt?.max_context_window, 1_050_000);
   const sol = catalog.models.find((model) => model.slug === "provider-2/gpt-6.1-sol");
+  assert.equal(sol?.context_window, 1_000_000);
+  assert.equal(sol?.max_context_window, 1_050_000);
+  for (const model of ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol"]) {
+    const entry = catalog.models.find((candidate) => candidate.slug === `provider-2/${model}`);
+    assert.equal(entry?.context_window, 1_000_000);
+    assert.equal(entry?.max_context_window, 1_050_000);
+    assert.equal(entry?.effective_context_window_percent, 90);
+  }
   assert.equal(sol?.default_reasoning_level, "ultra");
   assert.deepEqual(
     (sol?.supported_reasoning_levels as Array<{ effort: string }>).map((option) => option.effort),

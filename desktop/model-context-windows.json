@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-07-22",
+  "updated_at": "2026-11-13",
   "default": {
     "context_window": 131072,
     "max_context_window": 131072,
@@ -143,15 +143,15 @@
       "reference": "https://developers.openai.com/api/docs/models/gpt-5.3-codex"
     },
     "gpt-5.4": {
-      "context_window": 272000,
+      "context_window": 1000000,
       "max_context_window": 1050000,
-      "verification": "official_with_codex_runtime_limit",
+      "verification": "official_with_project_context_window",
       "reference": "https://developers.openai.com/api/docs/models/gpt-5.4"
     },
     "gpt-5.4-2026-03-05": {
-      "context_window": 272000,
+      "context_window": 1000000,
       "max_context_window": 1050000,
-      "verification": "official_with_codex_runtime_limit",
+      "verification": "official_with_project_context_window",
       "reference": "https://developers.openai.com/api/docs/models/gpt-5.4"
     },
     "gpt-5.4-mini": {
@@ -161,34 +161,58 @@
       "reference": "https://developers.openai.com/api/docs/models/gpt-5.4-mini"
     },
     "gpt-5.5": {
-      "context_window": 272000,
+      "context_window": 1000000,
       "max_context_window": 1050000,
-      "verification": "official_with_codex_runtime_limit",
+      "verification": "official_with_project_context_window",
       "reference": "https://developers.openai.com/api/docs/models/gpt-5.5"
     },
     "gpt-5.6": {
-      "context_window": 272000,
+      "context_window": 1000000,
       "max_context_window": 1050000,
-      "verification": "official_with_codex_runtime_limit",
+      "verification": "official_with_project_context_window",
       "reference": "https://developers.openai.com/api/docs/models/gpt-5.6-sol"
     },
     "gpt-5.6-luna": {
-      "context_window": 272000,
+      "context_window": 1000000,
       "max_context_window": 1050000,
-      "verification": "official_with_codex_runtime_limit",
+      "verification": "official_with_project_context_window",
       "reference": "https://developers.openai.com/api/docs/models/gpt-5.6-luna"
     },
     "gpt-5.6-sol": {
-      "context_window": 272000,
+      "context_window": 1000000,
       "max_context_window": 1050000,
-      "verification": "official_with_codex_runtime_limit",
+      "verification": "official_with_project_context_window",
       "reference": "https://developers.openai.com/api/docs/models/gpt-5.6-sol"
     },
     "gpt-5.6-terra": {
-      "context_window": 272000,
+      "context_window": 1000000,
       "max_context_window": 1050000,
-      "verification": "official_with_codex_runtime_limit",
+      "verification": "official_with_project_context_window",
       "reference": "https://developers.openai.com/api/docs/models/gpt-5.6-terra"
+    },
+    "gpt-6-astra": {
+      "context_window": 1000000,
+      "max_context_window": 1050000,
+      "verification": "official_with_project_context_window",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-6-astra"
+    },
+    "gpt-6-luna": {
+      "context_window": 1000000,
+      "max_context_window": 1050000,
+      "verification": "official_with_project_context_window",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-6-luna"
+    },
+    "gpt-6-sol": {
+      "context_window": 1000000,
+      "max_context_window": 1050000,
+      "verification": "official_with_project_context_window",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-6-sol"
+    },
+    "gpt-6.1-sol": {
+      "context_window": 1000000,
+      "max_context_window": 1050000,
+      "verification": "project_override",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-6.1-sol"
     },
     "gpt-image-1": {
       "context_window": 32768,

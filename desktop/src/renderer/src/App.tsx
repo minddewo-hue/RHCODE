@@ -77,6 +77,7 @@ import { Terminal as XtermTerminal } from "@xterm/xterm";
 import { memo, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import "@xterm/xterm/css/xterm.css";
 import { AppModal } from "./components/AppModal";
+import { ArchivedThreads } from "./components/ArchivedThreads";
 import { AssistantContent } from "./components/AssistantContent";
 import { DeleteConfirmationDialog } from "./components/DeleteConfirmationDialog";
 import { useInteractionTrace } from "./hooks/useInteractionTrace";
@@ -165,7 +166,7 @@ interface ThreadViewSnapshot {
 
 const MAX_CACHED_THREAD_VIEWS = 10;
 
-type AppDialogView = "settings" | "skills" | "transfer" | "export";
+type AppDialogView = "settings" | "skills" | "transfer" | "export" | "archived";
 type DeleteConfirmation =
   | { type: "conversation"; threadId: string; title: string }
   | { type: "project"; path: string; name: string };
@@ -1542,14 +1543,14 @@ export function App() {
     setThreadActionsId(selectedThreadId);
   }
 
-  async function openThread(selectedThreadId: string) {
+  async function openThread(selectedThreadId: string, restoredThread?: ThreadSummary) {
     if (
       selectedThreadIdRef.current === selectedThreadId
       && (loadedThreadIdRef.current === selectedThreadId || openingThreadIdRef.current === selectedThreadId)
     ) return;
     tracePerformance("thread-switch-started", { threadId: selectedThreadId });
     const revision = ++navigationRevisionRef.current;
-    const selectedThread = threads.find((thread) => thread.id === selectedThreadId);
+    const selectedThread = restoredThread || threads.find((thread) => thread.id === selectedThreadId);
     const targetProjectPath = selectedThread?.projectPath || selectedProjectPathRef.current;
     if (selectedThreadIdRef.current !== selectedThreadId) {
       cacheCurrentThreadView();
@@ -2253,6 +2254,14 @@ export function App() {
           <div>
             <button
               className="icon-button compact"
+              title="Archived conversations"
+              aria-label="Show archived tasks"
+              onClick={() => { closeThreadActions(); setDialogView("archived"); }}
+            >
+              <Archive size={15} />
+            </button>
+            <button
+              className="icon-button compact"
               title="Open project folder"
               aria-label="Open project folder"
               onClick={() => void chooseProject()}
@@ -2612,6 +2621,23 @@ export function App() {
             />
           )}
         </aside>
+      )}
+      {dialogView === "archived" && (
+        <ArchivedThreads
+          projectPath={projectPath}
+          onClose={() => setDialogView(null)}
+          onRestored={(thread, open) => {
+            rememberProject(thread.projectPath);
+            setThreads((current) => [thread, ...current.filter((item) => item.id !== thread.id)]);
+            setCollapsedProjectPaths((current) => new Set([...current].filter((path) => !isSameProjectPath(path, thread.projectPath))));
+            setThreadSearch("");
+            if (open) {
+              setDialogView(null);
+              setPrimaryView("workspace");
+              void openThread(thread.id, thread);
+            }
+          }}
+        />
       )}
       {dialogView === "settings" && (
         <AppModal title="Settings" icon={<Settings size={18} />} className="settings-modal" onClose={() => setDialogView(null)}>

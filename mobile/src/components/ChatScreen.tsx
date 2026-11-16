@@ -40,6 +40,7 @@ import {
   assistantDisplayContent,
   buildChatEntries,
   composerInteractionState,
+  conversationHistoryPagePlan,
   conversationTurnScrollPlan,
   type ChatEntry,
   type PendingMessage,
@@ -401,7 +402,8 @@ function ConversationList({ entries, hasThread, listRef, onCloseOutline, outline
   const [unreadUpdates, setUnreadUpdates] = useState(0);
   const [currentUserTurn, setCurrentUserTurn] = useState(0);
   const didInitialScroll = useRef(false);
-  const loadingOlder = useRef(false);
+  const requestedHistoryStartId = useRef<string | null>(null);
+  const userHasScrolled = useRef(false);
   const nearBottom = useRef(true);
   const outlineScrollSequence = useRef(0);
   const activeOutlineScroll = useRef<{ entryId: string; sequence: number } | null>(null);
@@ -451,6 +453,8 @@ function ConversationList({ entries, hasThread, listRef, onCloseOutline, outline
       nextTurn,
     );
     if (!plan) return;
+    userHasScrolled.current = false;
+    requestedHistoryStartId.current = null;
     nearBottom.current = false;
     didInitialScroll.current = true;
     setIsNearBottom(false);
@@ -468,11 +472,26 @@ function ConversationList({ entries, hasThread, listRef, onCloseOutline, outline
 
   const returnToLatest = () => {
     cancelOutlineScroll();
+    userHasScrolled.current = false;
     nearBottom.current = true;
     setIsNearBottom(true);
     setUnreadUpdates(0);
     setCurrentUserTurn(Math.max(0, userEntryIds.length - 1));
     scrollToLatest(true);
+  };
+
+  const loadOlder = () => {
+    const plan = conversationHistoryPagePlan({
+      entryCount: entries.length,
+      visibleCount,
+      firstVisibleEntryId: visibleEntries[0]?.id,
+      requestedStartId: requestedHistoryStartId.current,
+    });
+    if (!plan) return;
+    requestedHistoryStartId.current = plan.requestedStartId;
+    nearBottom.current = false;
+    setIsNearBottom(false);
+    setVisibleCount(plan.visibleCount);
   };
 
   const refreshFromPull = async () => {
@@ -505,7 +524,8 @@ function ConversationList({ entries, hasThread, listRef, onCloseOutline, outline
     cancelOutlineScroll();
     setVisibleCount(10);
     didInitialScroll.current = false;
-    loadingOlder.current = false;
+    requestedHistoryStartId.current = null;
+    userHasScrolled.current = false;
     nearBottom.current = true;
     setOutlineScrollRequest(null);
     setIsNearBottom(true);
@@ -527,6 +547,15 @@ function ConversationList({ entries, hasThread, listRef, onCloseOutline, outline
       refreshControl={(
         <RefreshControl refreshing={pullRefreshing} onRefresh={refreshFromPull} tintColor={colors.ink} />
       )}
+      ListHeaderComponent={visibleCount < entries.length ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={loadOlder}
+          style={({ pressed }) => [styles.historyButton, pressed && styles.iconPressed]}
+        >
+          <Text style={styles.historyButtonText}>加载更早的消息</Text>
+        </Pressable>
+      ) : null}
       ListEmptyComponent={<EmptyConversation hasThread={hasThread} loading={props.historyLoading} />}
       onContentSizeChange={() => {
         if (!visibleEntries.length) return;
@@ -539,7 +568,6 @@ function ConversationList({ entries, hasThread, listRef, onCloseOutline, outline
           setUnreadUpdates((count) => Math.min(99, count + entries.length - previousEntryCount.current));
         }
         previousEntryCount.current = entries.length;
-        loadingOlder.current = false;
       }}
       onLayout={() => {
         if (visibleEntries.length && !didInitialScroll.current) {
@@ -552,11 +580,15 @@ function ConversationList({ entries, hasThread, listRef, onCloseOutline, outline
         nearBottom.current = contentSize.height - layoutMeasurement.height - contentOffset.y < 80;
         setIsNearBottom(nearBottom.current);
         if (nearBottom.current) setUnreadUpdates(0);
-        if (contentOffset.y <= 24 && visibleCount < entries.length && !loadingOlder.current) {
-          loadingOlder.current = true;
-          setVisibleCount((count) => Math.min(entries.length, count + 10));
+        if (userHasScrolled.current && contentOffset.y <= Math.max(160, layoutMeasurement.height * 0.5)) {
+          loadOlder();
         }
       }}
+      onScrollBeginDrag={() => { userHasScrolled.current = true; }}
+      onStartReached={() => {
+        if (userHasScrolled.current) loadOlder();
+      }}
+      onStartReachedThreshold={0.5}
       maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
       scrollEventThrottle={100}
       onViewableItemsChanged={onViewableItemsChanged}

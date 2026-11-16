@@ -512,11 +512,16 @@ test("supports core desktop workflows at the minimum window size", async () => {
   await page.getByRole("menuitem", { name: "Archive task" }).click();
   await expect(getThreadRow(page, "UI automation thread")).toBeHidden();
   await expect.poll(() => ipcCalls(electronApp, "agent:thread:archive").then((calls) => calls.at(-1)?.args)).toEqual([threadId]);
-  await expect(page.getByRole("button", { name: "Show archived tasks" })).toHaveCount(0);
-  await page.evaluate((id) => window.rhzycode.unarchiveThread(id), threadId);
+  await page.getByRole("button", { name: "Show archived tasks" }).click();
+  const archivedDialog = page.getByRole("dialog", { name: "Archived conversations" });
+  await expect(archivedDialog.getByText("UI automation thread", { exact: true })).toBeVisible();
+  await archivedDialog.getByRole("textbox", { name: "Search archived conversations" }).fill("no-such-archived-thread");
+  await expect(archivedDialog.getByText("No matching archived conversations")).toBeVisible();
+  await archivedDialog.getByRole("textbox", { name: "Search archived conversations" }).fill("");
+  await archivedDialog.getByRole("button", { name: "Restore", exact: true }).click();
+  await expect(archivedDialog.getByText("No archived conversations", { exact: true })).toBeVisible();
   await expect.poll(() => ipcCalls(electronApp, "agent:thread:unarchive").then((calls) => calls.at(-1)?.args)).toEqual([threadId]);
-  await page.reload();
-  await page.locator(".app-shell").waitFor();
+  await archivedDialog.getByRole("button", { name: "Close Archived conversations" }).click();
   await expect(getThreadRow(page, "UI automation thread")).toBeVisible();
   if (await page.getByRole("button", { name: "Activity", exact: true }).getAttribute("aria-pressed") === "true") {
     await page.getByRole("button", { name: "Activity", exact: true }).click();
@@ -2031,6 +2036,57 @@ test("keeps automatic continuation inputs out of human bubbles across live updat
   await expect(page.getByText("7 questions", { exact: true })).toBeVisible();
 });
 
+test("browses archived conversations and restores across projects", async () => {
+  await installDeterministicIpc(electronApp);
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  await page.locator(".app-shell").waitFor();
+  const ids = await page.evaluate(async ({ primary, secondary }) => {
+    const first = await window.rhzycode.startThread({ cwd: primary });
+    const second = await window.rhzycode.startThread({ cwd: secondary });
+    await window.rhzycode.renameThread(first.thread.id, "Archive primary fixture");
+    await window.rhzycode.renameThread(second.thread.id, "Archive secondary fixture");
+    await window.rhzycode.archiveThread(first.thread.id);
+    await window.rhzycode.archiveThread(second.thread.id);
+    return [first.thread.id, second.thread.id];
+  }, { primary: projectDir, secondary: emptyProjectDir });
+  await page.getByRole("button", { name: "Open project folder" }).click();
+  await page.getByRole("button", { name: "Show archived tasks" }).click();
+  const dialog = page.getByRole("dialog", { name: "Archived conversations" });
+  await expect(dialog.getByText("Archive primary fixture", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Archive secondary fixture", { exact: true })).toHaveCount(0);
+  await dialog.getByRole("combobox", { name: "Archived project" }).selectOption("");
+  await expect(dialog.getByText("Archive secondary fixture", { exact: true })).toBeVisible();
+  const search = dialog.getByRole("textbox", { name: "Search archived conversations" });
+  await search.fill("missing fixture");
+  await expect(dialog.getByText("No matching archived conversations")).toBeVisible();
+  await search.fill("primary");
+  await electronApp.evaluate(() => {
+    (globalThis as any).__rhzycodeUiTest.failNextUnarchive = true;
+  });
+  await dialog.getByRole("button", { name: "Restore", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Restore failed:");
+  await expect(dialog.getByText("Archive primary fixture", { exact: true })).toBeVisible();
+  await expect(getThreadRow(page, "Archive primary fixture")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Restore", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  await expect(getThreadRow(page, "Archive primary fixture")).toBeVisible();
+  await search.fill("secondary");
+  await dialog.getByRole("button", { name: "Restore and open", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(getThreadRow(page, "Archive secondary fixture").locator("..")).toHaveClass(/active/);
+  await expect(page.locator(".workspace-title")).toContainText("empty-project");
+  await expect(page.getByText("I will inspect the project structure, trace the main workflows, and report concrete findings.", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Show archived tasks" }).click();
+  await expect(dialog.getByText("No archived conversations", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Close Archived conversations" }).click();
+  await page.reload();
+  await expect(getThreadRow(page, "Archive secondary fixture")).toBeVisible();
+  await page.evaluate(async (threadIds) => {
+    for (const id of threadIds) await window.rhzycode.deleteThread(id);
+  }, ids);
+});
+
 async function installDeterministicIpc(app: ElectronApplication): Promise<void> {
   await app.evaluate(({ ipcMain }, fixture) => {
     const threads = new Map<string, Record<string, unknown>>();
@@ -2078,6 +2134,7 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
     const testState = {
       calls: [] as Array<{ channel: string; args: unknown[] }>,
       failNextTurn: false,
+      failNextUnarchive: false,
       agentConnectDelayMs: 0,
       threadDeleteDelayMs: 0,
       threadOpenDelayMs: 0,
@@ -2253,6 +2310,10 @@ async function installDeterministicIpc(app: ElectronApplication): Promise<void> 
     });
     replace("agent:thread:unarchive", (_event, threadId) => {
       record("agent:thread:unarchive", threadId);
+      if (testState.failNextUnarchive) {
+        testState.failNextUnarchive = false;
+        throw new Error("Temporary restore failure");
+      }
       const thread = threads.get(threadId);
       if (thread) threads.set(threadId, { ...thread, archived: false });
     });

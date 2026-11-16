@@ -274,6 +274,25 @@ export function conversationTurnScrollPlan(
   };
 }
 
+export function conversationHistoryPagePlan(options: {
+  entryCount: number;
+  visibleCount: number;
+  firstVisibleEntryId: string | undefined;
+  requestedStartId: string | null;
+}): { visibleCount: number; requestedStartId: string } | null {
+  if (
+    options.visibleCount >= options.entryCount
+    || !options.firstVisibleEntryId
+    || options.firstVisibleEntryId === options.requestedStartId
+  ) return null;
+  // Deduplicate events for the current page, without waiting for a native
+  // content-size event: virtualized lists can keep the same estimated height.
+  return {
+    visibleCount: Math.min(options.entryCount, options.visibleCount + 10),
+    requestedStartId: options.firstVisibleEntryId,
+  };
+}
+
 export function isResultEntry(entry: ChatEntry): boolean {
   if (entry.type === "pending") return true;
   if (entry.type !== "timeline") return false;

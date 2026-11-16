@@ -536,6 +536,42 @@ test("opens a mobile-created empty thread before its rollout exists", async () =
   });
 });
 
+test("mobile history opening preserves a newly created Astra thread for its first message", async () => {
+  for (const concurrent of [false, true]) {
+    const { runtime, internals } = createRuntimeHarness();
+    useGatewayModels(runtime, ["provider-5/gpt-6-astra"]);
+    const methods: string[] = [];
+    runtime.agent.request = async (method) => {
+      methods.push(method);
+      if (method === "thread/start") return { thread: { id: "thread-new-astra" } } as never;
+      if (method === "thread/read") throw new Error("thread has no persisted turns yet");
+      if (method === "thread/resume") throw new Error("no rollout found for thread id thread-new-astra");
+      if (method === "turn/start") return { turn: { id: "turn-first-astra" } } as never;
+      throw new Error(`Unexpected method ${method}`);
+    };
+    const commands = runtime.remoteCommandHandlers();
+    const context = remoteContext();
+    const created = await commands.startThread({
+      projectPath: path.resolve("."),
+      model: "provider-5/gpt-6-astra",
+    }, context);
+    const opening = commands.openThread(created.threadId, context);
+    if (!concurrent) {
+      const opened = await opening;
+      assert.deepEqual(opened.timeline, []);
+      assert.equal(internals.loadedThreadIds.has(created.threadId), true);
+    }
+    const accepted = await commands.startTurn(created.threadId, {
+      text: "First mobile question",
+      model: "provider-5/gpt-6-astra",
+    }, context);
+    await opening;
+    assert.equal(accepted.turnId, "turn-first-astra");
+    assert.equal(methods.includes("thread/resume"), false);
+    assert.equal(internals.loadedThreadIds.has(created.threadId), true);
+  }
+});
+
 test("opens an active thread after its new rollout metadata is written", async () => {
   const { runtime, internals } = createRuntimeHarness();
   const thread = internals.threads.get("thread-1")!;

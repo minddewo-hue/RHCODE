@@ -2158,17 +2158,19 @@ export class DesktopRuntime extends EventEmitter {
     try {
       const localThread = this.threads.get(threadId)!;
       const active = this.activeTurns.has(threadId) || this.pendingTurnStarts.has(threadId);
+      const loadedEmpty = this.loadedThreadIds.has(threadId) && this.isEmptyLocalThread(threadId);
       // Last known merged scale: anchors the stabilized orderKeys so the
       // mobile incremental cursor stays valid across opens.
       const previous = this.threadDetailCache.get(threadId) ?? null;
       const localDetail = await this.loadLocalThreadDetail(localThread);
-      // Read active turns without resuming them. Resume reconstructs positional
-      // history while the same turn is still publishing its live item ids.
+      // New threads exist in Agent Host before their first rollout is written.
+      // Read them without resuming so history loading cannot unload the thread.
+      // Active turns also keep their live item ids instead of resuming history.
       let detail: ThreadDetail;
       try {
         // Cap resume so a stuck App Server cannot starve mobile of the local
         // history. A later open can retry when the agent becomes responsive.
-        const history = active
+        const history = active || loadedEmpty
           ? this.agent.request<{ thread: ServerThread }>("thread/read", { threadId, includeTurns: true })
             .then(({ thread }) => toThreadDetail(
               thread, localThread, path.join(this.codexHome, "generated_images"),
@@ -2182,7 +2184,7 @@ export class DesktopRuntime extends EventEmitter {
         );
         detail = preferRicherThreadDetail(localDetail, resumed, previous);
       } catch (error) {
-        if (!localDetail && !active) throw error;
+        if (!localDetail && !active && !loadedEmpty) throw error;
         detail = localDetail || previous || { thread: localThread, messages: [], timeline: [] };
       }
       // A lagging resume can recover older replies while still omitting the

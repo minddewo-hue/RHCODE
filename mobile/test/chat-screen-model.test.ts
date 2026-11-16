@@ -11,6 +11,7 @@ import {
   buildChatEntries,
   claimPendingTimelineMatches,
   composerInteractionState,
+  conversationHistoryPagePlan,
   conversationPageSwipeDirection,
   conversationTurnScrollPlan,
   countActivityEntries,
@@ -191,6 +192,51 @@ test("expands the rendered history before jumping to a conversation outline turn
     visibleIndex: 0,
   });
   assert.equal(conversationTurnScrollPlan(entryIds, [], 0), null);
+});
+
+test("keeps expanding older pages without content-size callbacks", () => {
+  const entryIds = Array.from({ length: 45 }, (_, index) => `entry-${index}`);
+  let visibleCount = 10;
+  let requestedStartId: string | null = null;
+  const pageSizes: number[] = [];
+  while (visibleCount < entryIds.length) {
+    const options: Parameters<typeof conversationHistoryPagePlan>[0] = {
+      entryCount: entryIds.length,
+      visibleCount,
+      firstVisibleEntryId: entryIds.slice(-visibleCount)[0],
+      requestedStartId,
+    };
+    const plan = conversationHistoryPagePlan(options);
+    assert.ok(plan, "the next rendered page must unlock loading without a layout event");
+    // Native edge and scroll events can both arrive before React commits.
+    assert.equal(conversationHistoryPagePlan({
+      ...options, requestedStartId: plan.requestedStartId,
+    }), null);
+    visibleCount = plan.visibleCount;
+    requestedStartId = plan.requestedStartId;
+    pageSizes.push(visibleCount);
+  }
+  assert.deepEqual(pageSizes, [20, 30, 40, 45]);
+  assert.deepEqual(entryIds.slice(-visibleCount), entryIds);
+  assert.equal(conversationHistoryPagePlan({
+    entryCount: entryIds.length, visibleCount,
+    firstVisibleEntryId: entryIds[0], requestedStartId,
+  }), null);
+});
+
+test("handles empty and short history and can restart pagination after switching threads", () => {
+  assert.equal(conversationHistoryPagePlan({
+    entryCount: 0, visibleCount: 10, firstVisibleEntryId: undefined, requestedStartId: null,
+  }), null);
+  assert.equal(conversationHistoryPagePlan({
+    entryCount: 6, visibleCount: 10, firstVisibleEntryId: "short-0", requestedStartId: null,
+  }), null);
+  assert.equal(conversationHistoryPagePlan({
+    entryCount: 30, visibleCount: 10, firstVisibleEntryId: "entry-20", requestedStartId: "entry-20",
+  }), null);
+  assert.deepEqual(conversationHistoryPagePlan({
+    entryCount: 30, visibleCount: 10, firstVisibleEntryId: "entry-20", requestedStartId: null,
+  }), { visibleCount: 20, requestedStartId: "entry-20" });
 });
 
 test("builds result entries only for the selected thread", () => {

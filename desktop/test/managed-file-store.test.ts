@@ -84,6 +84,22 @@ test("deduplicates repeated uploaded image records when listing a turn", () => {
   }
 });
 
+test("preserves image MIME types for clipboard formats across restart", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-image-mime-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const directory = path.join(root, "managed");
+  const store = new ManagedFileStore(directory);
+  for (const extension of ["avif", "bmp"]) {
+    const source = path.join(root, `screen.${extension}`);
+    fs.writeFileSync(source, Buffer.from([1, 2, 3]));
+    const [record] = store.registerUploads("thread-1", [{
+      path: source, name: path.basename(source), kind: "image", size: 3,
+    }]);
+    assert.equal(record?.mimeType, `image/${extension}`);
+    assert.equal(new ManagedFileStore(directory).read(record!.id)?.mimeType, `image/${extension}`);
+  }
+});
+
 test("keeps every original image in a multi-image rollout turn", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-managed-multi-image-"));
   try {

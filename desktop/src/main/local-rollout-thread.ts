@@ -30,6 +30,7 @@ export interface LocalRolloutLoadOptions {
    * reopen can show the same inline previews as the live session.
    */
   materializeArtifacts?: (turnId: string | null, content: string) => ManagedFileRecord[];
+  materializeUploadedImage?: (image: RolloutUploadedImage) => ManagedFileRecord | null;
 }
 
 export interface RolloutUploadedImage {
@@ -82,7 +83,25 @@ export async function loadLocalRolloutThread(
   const rolloutUploadedImages = records.flatMap((record) => (
     record.type === "response_item" ? uploadedImagesFromMessage(record.payload) : []
   ));
-  const displayManagedFiles = reconcileRolloutUploadedImages(managedFiles, rolloutUploadedImages);
+  const existingUploadsByTurn = new Map<string | null, number>();
+  for (const file of managedFiles) {
+    if (file.source === "upload" && file.kind === "image") {
+      existingUploadsByTurn.set(file.turnId, (existingUploadsByTurn.get(file.turnId) || 0) + 1);
+    }
+  }
+  const materializeUploadedImage = options.materializeUploadedImage;
+  const recoveredUploads = materializeUploadedImage
+    ? rolloutUploadedImages.flatMap((image) => {
+      const remaining = existingUploadsByTurn.get(image.turnId) || 0;
+      if (remaining > 0) {
+        existingUploadsByTurn.set(image.turnId, remaining - 1);
+        return [];
+      }
+      const record = materializeUploadedImage(image);
+      return record ? [record] : [];
+    })
+    : [];
+  const displayManagedFiles = reconcileRolloutUploadedImages([...managedFiles, ...recoveredUploads], rolloutUploadedImages);
   const hiddenCompactionMessages = compactionMessageOrders(records);
   const canonicalUsers = new Map<string, string[]>();
   const seenUsers = new Set<string>();
@@ -110,7 +129,9 @@ export async function loadLocalRolloutThread(
       const role = payload.role === "user" || payload.role === "assistant" ? payload.role : null;
       if (!role) continue;
       const content = extractResponseMessageText(payload);
-      if (!content || hiddenCompactionMessages.has(record.order) || (role === "user" && isInjectedContext(content))) continue;
+      const hasImages = role === "user" && Array.isArray(payload.content)
+        && payload.content.some((entry) => asRecord(entry).type === "input_image");
+      if ((!content && !hasImages) || hiddenCompactionMessages.has(record.order) || (role === "user" && isInjectedContext(content))) continue;
       const uploadedFiles = role === "user"
         ? displayManagedFiles.filter((file) => file.source === "upload" && file.turnId === turnId)
         : [];

@@ -8,6 +8,7 @@ import { ControlStore, type RemoteCommandContext } from "../src/main/control-pla
 import type { ThreadSummary } from "@rhzycode/protocol";
 import { automaticContinuationInput, isAutomaticContinuationInput } from "@rhzycode/protocol";
 import { DesktopRuntime } from "../src/main/runtime.js";
+import { ManagedFileStore } from "../src/main/managed-file-store";
 
 const TEST_GENERATED_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nKsAAAAASUVORK5CYII=";
 
@@ -2385,8 +2386,62 @@ test("restores an existing local image link when opening an older thread", async
   assert.equal(detail.messages[0]?.images?.[0]?.name, "sample.png");
   assert.equal(detail.messages[0]?.images?.[0]?.generated, true);
   assert.deepEqual(fs.readFileSync(detail.messages[0]?.images?.[0]?.path || ""), fs.readFileSync(imagePath));
+  const mobile = await runtime.remoteCommandHandlers().openThread("thread-1", remoteContext());
+  const mobileImage = mobile.timeline.find((item) => item.id === "turn-history-image::assistant-history-image");
+  assert.equal(mobileImage?.files?.[0]?.name, "sample.png");
+  assert.equal(mobileImage?.files?.[0]?.mimeType, "image/png");
+  assert.equal(mobileImage?.files?.[0]?.path, undefined);
+  assert.equal(mobileImage?.images, undefined);
   fs.rmSync(codexHome, { recursive: true, force: true });
   fs.rmSync(project, { recursive: true, force: true });
+});
+
+test("mobile history materializes user local images and keeps their download ids stable", async (context) => {
+  const { runtime, codexHome } = createRuntimeHarness();
+  context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+  const imagePath = path.join(codexHome, "screen.png");
+  const bytes = Buffer.from(TEST_GENERATED_PNG, "base64");
+  fs.writeFileSync(imagePath, bytes);
+  runtime.agent.request = async () => ({ thread: {
+    id: "thread-1", cwd: ".", turns: [{
+      id: "turn-upload", status: "completed", items: [{
+        id: "user-upload", type: "userMessage",
+        content: [{ type: "text", text: "Look at this" }, { type: "localImage", path: imagePath }],
+      }],
+    }],
+  } }) as never;
+  const first = await runtime.remoteCommandHandlers().openThread("thread-1", remoteContext());
+  const file = first.timeline.find((item) => item.kind === "user")?.files?.[0];
+  assert.equal(file?.mimeType, "image/png");
+  assert.equal(file?.source, "upload");
+  assert.equal(file?.path, undefined);
+  const store = new ManagedFileStore(path.join(codexHome, "attachments"));
+  assert.deepEqual(store.read(file!.id)?.bytes, bytes);
+  const second = await runtime.remoteCommandHandlers().openThread("thread-1", remoteContext());
+  assert.equal(second.timeline.find((item) => item.kind === "user")?.files?.[0]?.id, file?.id);
+});
+
+test("mobile local fallback recovers image-only rollout messages without resuming", async (context) => {
+  const { runtime, codexHome } = createRuntimeHarness();
+  context.after(() => fs.rmSync(codexHome, { recursive: true, force: true }));
+  const sessionDirectory = path.join(codexHome, "sessions", "2026", "11", "18");
+  fs.mkdirSync(sessionDirectory, { recursive: true });
+  fs.writeFileSync(path.join(sessionDirectory, "rollout-thread-1.jsonl"), JSON.stringify({
+    timestamp: "2026-11-18T01:00:00.000Z",
+    type: "response_item",
+    payload: {
+      type: "message", id: "only-image", role: "user",
+      internal_chat_message_metadata_passthrough: { turn_id: "turn-image-only" },
+      content: [{ type: "input_image", image_url: `data:image/png;base64,${TEST_GENERATED_PNG}` }],
+    },
+  }) + "\n");
+  runtime.agent.request = async () => { throw new Error("Agent unavailable"); };
+  const result = await runtime.remoteCommandHandlers().openThread("thread-1", remoteContext());
+  const user = result.timeline.find((item) => item.kind === "user");
+  assert.equal(user?.content, "");
+  assert.equal(user?.files?.[0]?.mimeType, "image/png");
+  const store = new ManagedFileStore(path.join(codexHome, "attachments"));
+  assert.deepEqual(store.read(user!.files![0]!.id)?.bytes, Buffer.from(TEST_GENERATED_PNG, "base64"));
 });
 
 test("keeps repeated App Server item ids unique across restored turns", async () => {

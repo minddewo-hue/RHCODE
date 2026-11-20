@@ -103,6 +103,25 @@ export class ManagedFileStore {
     }
   }
 
+  storeUploadedImagePath(
+    threadId: string,
+    turnId: string | null,
+    filePath: string,
+    name: string,
+  ): ManagedFileRecord | null {
+    const resolved = path.resolve(filePath);
+    const existing = this.listThread(threadId).find((record) =>
+      record.turnId === turnId && record.source === "upload" && record.kind === "image"
+      && (comparablePath(record.originalPath) === comparablePath(resolved)
+        || comparablePath(record.path) === comparablePath(resolved)));
+    if (existing) return existing;
+    try {
+      return this.storeFile(threadId, turnId, resolved, name, "image", "upload");
+    } catch {
+      return null;
+    }
+  }
+
   storeGenerated(threadId: string, turnId: string | null, filePath: string): ManagedFileRecord | null {
     if (!isDocumentArtifact(filePath)) return null;
     const resolved = path.resolve(filePath);
@@ -371,6 +390,7 @@ function mimeTypeFor(fileName: string): string {
     [".xml", "application/xml"], [".zip", "application/zip"],
     [".png", "image/png"], [".jpg", "image/jpeg"], [".jpeg", "image/jpeg"],
     [".gif", "image/gif"], [".webp", "image/webp"],
+    [".avif", "image/avif"], [".bmp", "image/bmp"],
   ]).get(path.extname(fileName).toLowerCase()) || "application/octet-stream";
 }
 

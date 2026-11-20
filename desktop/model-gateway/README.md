@@ -20,6 +20,10 @@ npm run smoke:models:coding --workspace @rhzycode/desktop
 
 修改 Provider 或模型配置后重新生成模型目录，并确认桌面、移动和 `/v1/models` 的可见模型一致。
 
+## 上下文窗口
+
+网关把已确认支持至少 1,000,000 tokens 的模型设为 1M，保留原始最大容量和默认 10% 余量。启用模型发现的 Provider 发布新模型时，网关会读取 `/models` 的上下文容量；模型满足条件即自动启用 1M，无需维护型号名单。仅公布模型 ID 不代表支持 1M。套餐相关的理论上限、中转服务安全限制，以及 `gateway.config.json` 中按部署配置的窗口，都不会被自动放大。
+
 ## 凭据
 
 Provider Key 必须通过 `api_key_env` 指定的环境变量或桌面安全凭据存储提供。不要在 `gateway.config.json` 写入 `api_key`，不要在日志、健康状态或测试产物中输出密钥值。

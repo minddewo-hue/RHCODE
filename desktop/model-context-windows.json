@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-11-13",
+  "updated_at": "2026-11-18",
   "default": {
     "context_window": 131072,
     "max_context_window": 131072,
@@ -213,6 +213,23 @@
       "max_context_window": 1050000,
       "verification": "project_override",
       "reference": "https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+    },
+    "gpt-6.2": {
+      "context_window": 1000000,
+      "max_context_window": 1000000,
+      "verification": "project_override"
+    },
+    "gpt-6.2-sol": {
+      "context_window": 1000000,
+      "max_context_window": 1050000,
+      "verification": "project_override",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-6.2-sol"
+    },
+    "gpt-6.2-astra": {
+      "context_window": 1000000,
+      "max_context_window": 1050000,
+      "verification": "official_with_project_context_window",
+      "reference": "https://developers.openai.com/api/docs/models/gpt-6.2-astra"
     },
     "gpt-image-1": {
       "context_window": 32768,

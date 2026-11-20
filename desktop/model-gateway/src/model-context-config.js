@@ -3,6 +3,14 @@ import path from "node:path";
 
 export const MODEL_CONTEXT_CONFIG_NAME = "model-context-windows.json";
 
+const STANDARD_CONTEXT_WINDOW = 1_000_000;
+const VERIFIED_MAXIMUM_SOURCES = new Set([
+  "deployment_owner",
+  "official",
+  "official_alias",
+  "official_with_project_context_window",
+]);
+
 export function loadModelContextConfig(rootDir, configPath) {
   const candidate = configPath || MODEL_CONTEXT_CONFIG_NAME;
   const resolvedPath = path.isAbsolute(candidate)
@@ -39,11 +47,28 @@ export function applyModelContextConfig(model, config) {
   const entry = key ? config.models.get(key) : null;
 
   if (entry) {
-    model.contextWindow = entry.contextWindow;
+    // A plan-dependent or intermediary maximum is not a deployment guarantee.
+    const capacity = VERIFIED_MAXIMUM_SOURCES.has(entry.verification)
+      ? entry.maxContextWindow
+      : entry.contextWindow;
+    model.contextWindow = capacity >= STANDARD_CONTEXT_WINDOW
+      ? STANDARD_CONTEXT_WINDOW
+      : entry.contextWindow;
     model.maxContextWindow = entry.maxContextWindow;
     model.effectiveContextWindowPercent = entry.effectiveContextWindowPercent;
     model.contextWindowSource = entry.verification;
     return model;
+  }
+
+  if (model.contextWindowSource === "provider_discovery") {
+    const capacity = Math.max(model.contextWindow || 0, model.maxContextWindow || 0);
+    if (capacity > 0) {
+      model.maxContextWindow = capacity;
+      model.contextWindow = capacity >= STANDARD_CONTEXT_WINDOW
+        ? STANDARD_CONTEXT_WINDOW
+        : model.contextWindow || capacity;
+      return model;
+    }
   }
 
   if (!model.contextWindow) {

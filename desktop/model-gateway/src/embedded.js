@@ -73,9 +73,15 @@ export async function startEmbeddedGateway(options) {
       return summarizeModels(config);
     },
     async refreshModels() {
-      const previousCount = config.models.size;
+      const previous = summarizeModels(config);
       await refreshDiscoveredModels(config, contextConfig, discoveryTimeoutMs, fetchImpl);
-      return { changed: config.models.size !== previousCount, models: summarizeModels(config) };
+      const models = summarizeModels(config);
+      const changed = models.length !== previous.length || models.some((model, index) => {
+        const before = previous[index];
+        return model.contextWindow !== before.contextWindow
+          || model.maxContextWindow !== before.maxContextWindow;
+      });
+      return { changed, models };
     },
     async probeProviders(options = {}) {
       const timeoutMs = options.timeoutMs ?? 5000;
@@ -135,29 +141,36 @@ async function discoverProviderModels(config, timeoutMs, fetchImpl) {
       const body = await response.json();
       for (const item of Array.isArray(body?.data) ? body.data : []) {
         const upstreamModel = typeof item?.id === "string" ? item.id.trim() : "";
-        if (!upstreamModel || hasProviderRoute(config, provider.id, upstreamModel)) continue;
+        if (!upstreamModel) continue;
         const rule = provider.modelDiscovery.rules.find((candidate) => candidate.pattern.test(upstreamModel));
         const publicId = `${rule?.prefix || provider.modelDiscovery.prefix}${upstreamModel}`;
         if (config.disabledModels.has(publicId)) continue;
-        if (config.models.has(publicId)) continue;
+        const contextWindow = discoveredPositiveInteger(item, [
+          "context_window",
+          "context_length",
+          "max_context_length",
+          "max_model_len",
+        ]);
+        const maxContextWindow = discoveredPositiveInteger(item, ["max_context_window"]) ?? contextWindow;
+        const existing = config.models.get(publicId);
+        if (existing) {
+          const primary = existing.routes[0];
+          if (existing.discovered && primary.provider.id === provider.id
+            && primary.upstreamModel === upstreamModel && maxContextWindow) {
+            existing.contextWindow = contextWindow;
+            existing.maxContextWindow = maxContextWindow;
+            existing.contextWindowSource = "provider_discovery";
+          }
+          continue;
+        }
+        if (hasProviderRoute(config, provider.id, upstreamModel)) continue;
         config.models.set(publicId, {
           id: publicId,
           object: "model",
           created: Number.isInteger(item.created) ? item.created : 0,
           ownedBy: rule?.ownedBy || provider.modelDiscovery.ownedBy,
-          contextWindow: discoveredPositiveInteger(item, [
-            "context_window",
-            "context_length",
-            "max_context_length",
-            "max_model_len",
-          ]),
-          maxContextWindow: discoveredPositiveInteger(item, [
-            "max_context_window",
-            "context_window",
-            "context_length",
-            "max_context_length",
-            "max_model_len",
-          ]),
+          contextWindow,
+          maxContextWindow,
           effectiveContextWindowPercent: 90,
           contextWindowSource: "provider_discovery",
           maxOutputTokens: discoveredPositiveInteger(item, [

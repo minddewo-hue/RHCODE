@@ -777,7 +777,7 @@ async function runStartupEnvironmentMigrations(
         type: "error",
         title: `${migrationSourceLabel(source)} 对话迁移失败`,
         message: `${migrationSourceLabel(source)} 对话未能全部迁移`,
-        detail: `${error.message}\n\n原始数据没有修改，下次启动时会再次尝试。`,
+        detail: `${error.message}\n\n原始数据没有修改，已跳过迁移，下次启动时不会再次尝试。`,
         buttons: ["确定"],
         defaultId: 0,
         noLink: true,

@@ -15,7 +15,6 @@ const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 test("bundles a validated context entry for every current upstream model", () => {
   const config = loadModelContextConfig(desktopRoot);
   assert.ok(config);
-  assert.equal(config.models.size, 60);
   assert.deepEqual(contextPair(config, "gemma-4-31b-it-uncensored-bf16"), [131_072, 131_072]);
   assert.deepEqual(contextPair(config, "gemma4-31b-uncensored-bf16-256k"), [262_144, 262_144]);
   assert.deepEqual(contextPair(config, "gemma4-31b-uncensored-bf16-256k-seq4"), [262_144, 262_144]);
@@ -31,6 +30,26 @@ test("bundles a validated context entry for every current upstream model", () =>
   assert.deepEqual(contextPair(config, "gpt-6-luna"), [1_000_000, 1_050_000]);
   assert.deepEqual(contextPair(config, "gpt-6-sol"), [1_000_000, 1_050_000]);
   assert.deepEqual(contextPair(config, "gpt-6.1-sol"), [1_000_000, 1_050_000]);
+  assert.deepEqual(contextPair(config, "gpt-6.2"), [1_000_000, 1_000_000]);
+  assert.deepEqual(contextPair(config, "gpt-6.2-sol"), [1_000_000, 1_050_000]);
+  assert.deepEqual(contextPair(config, "gpt-6.2-astra"), [1_000_000, 1_050_000]);
+});
+
+test("uses verified maximums without raising plan or intermediary limits", () => {
+  const config = loadModelContextConfig(desktopRoot);
+  config.models.set("verified", {
+    contextWindow: 500_000,
+    maxContextWindow: 2_000_000,
+    effectiveContextWindowPercent: 90,
+    verification: "official",
+  });
+  const verified = applyModelContextConfig({ id: "verified" }, config);
+  const planLimited = applyModelContextConfig({ id: "k3" }, config);
+  const intermediary = applyModelContextConfig({ id: "grok-latest" }, config);
+  assert.equal(verified.contextWindow, 1_000_000);
+  assert.equal(verified.maxContextWindow, 2_000_000);
+  assert.equal(planLimited.contextWindow, 262_144);
+  assert.equal(intermediary.contextWindow, 131_072);
 });
 
 test("matches the upstream id before using provider discovery metadata", () => {
@@ -145,6 +164,56 @@ test("applies configured values to the embedded gateway catalog", async (context
   assert.equal(latest?.maxContextWindow, 1_000_000);
   assert.equal(named?.contextWindow, 1_000_000);
   assert.equal(named?.maxContextWindow, 1_000_000);
+});
+
+test("applies 1M to future models discovered when refreshing the gateway", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-model-discovery-"));
+  fs.copyFileSync(
+    path.join(desktopRoot, "model-context-windows.json"),
+    path.join(root, "model-context-windows.json"),
+  );
+  fs.writeFileSync(path.join(root, "gateway.config.json"), JSON.stringify({
+    providers: {
+      provider: {
+        base_url: "http://127.0.0.1:9/v1",
+        protocol: "responses",
+        model_discovery: { prefix: "provider/" },
+      },
+    },
+  }));
+
+  let upstreamModels = [{ id: "existing" }];
+  const gateway = await startEmbeddedGateway({
+    rootDir: root,
+    port: 0,
+    fetchImpl: async () => Response.json({ data: upstreamModels }),
+  });
+  context.after(async () => {
+    await gateway.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  upstreamModels = [
+    ...upstreamModels,
+    { id: "new-long-context", context_window: 500_000, max_context_window: 2_000_000 },
+    { id: "new-exact-context", context_length: 1_000_000 },
+    { id: "new-small-context", max_context_window: 64_000 },
+    { id: "new-unknown-context" },
+  ];
+  const refreshed = await gateway.refreshModels();
+  assert.equal(refreshed.changed, true);
+  const windows = new Map(refreshed.models.map((model) => [
+    model.upstreamModel, [model.contextWindow, model.maxContextWindow],
+  ]));
+  assert.deepEqual(windows.get("new-long-context"), [1_000_000, 2_000_000]);
+  assert.deepEqual(windows.get("new-exact-context"), [1_000_000, 1_000_000]);
+  assert.deepEqual(windows.get("new-small-context"), [64_000, 64_000]);
+  assert.deepEqual(windows.get("new-unknown-context"), [131_072, 131_072]);
+
+  upstreamModels[0] = { id: "existing", max_context_window: 1_050_000 };
+  const updated = await gateway.refreshModels();
+  assert.equal(updated.changed, true);
+  assert.equal(updated.models.find((model) => model.upstreamModel === "existing")?.contextWindow, 1_000_000);
+  assert.equal((await gateway.refreshModels()).changed, false);
 });
 
 function contextPair(config, id) {

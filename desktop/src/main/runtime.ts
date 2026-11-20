@@ -982,11 +982,13 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   private async loadLocalThreadDetail(thread: ThreadSummary): Promise<ThreadDetail | null> {
-    // Reopening a history should not scan the whole rollout twice before the
-    // renderer can regain keyboard focus. Existing managed files are enough
-    // for display; the full uploaded-image reconciliation runs on resume.
+    // Recover missing uploads during the existing rollout parse, avoiding a
+    // second scan before the renderer can regain keyboard focus.
     const managedFiles = this.managedFiles.listThread(thread.id);
     return loadLocalRolloutThread(this.codexHome, thread, managedFiles, {
+      materializeUploadedImage: (image) => this.managedFiles.storeUploadedImageData(
+        thread.id, image.turnId, image.dataUrl, image.name,
+      ),
       materializeArtifacts: (turnId, content) => resolveArtifactPaths(thread.projectPath, [content])
         .flatMap((filePath) => {
           const record = this.managedFiles.storeGenerated(thread.id, turnId, filePath);
@@ -2196,11 +2198,22 @@ export class DesktopRuntime extends EventEmitter {
       }
       const liveTimeline = (this.controlPlane?.store.snapshot().timeline || [])
         .filter((item) => item.threadId === threadId);
+      const managedImages = this.managedFiles.listThread(threadId);
       const timelineById = new Map<string, (typeof detail.timeline)[number]>();
       for (const item of [...detail.timeline, ...remoteMessageTimeline(
         detail,
         (turnId) => this.turnClientMessageIds.get(turnId)
           || this.controlPlane?.store.clientMessageIdForTurn(turnId),
+        (image, message) => {
+          const existing = managedImages.find((file) => file.path === image.path);
+          const record = existing || (message.role === "user"
+            ? this.managedFiles.storeUploadedImagePath(
+              threadId, timelineItemTurnId(message.id), image.path, image.name,
+            )
+            : null);
+          if (record && !existing) managedImages.push(record);
+          return record ? managedFileReference(record) : null;
+        },
       )]) {
         const current = timelineById.get(item.id);
         timelineById.set(item.id, current ? preferTimelineItem(current, item) : item);
@@ -3133,6 +3146,10 @@ function countVisibleRole(detail: ThreadDetail, role: ConversationMessage["role"
 function remoteMessageTimeline(
   detail: ThreadDetail,
   clientMessageIdForTurn: (turnId: string) => string | undefined = () => undefined,
+  resolveImageFile: (
+    image: NonNullable<ConversationMessage["images"]>[number],
+    message: ConversationMessage,
+  ) => ConversationFile | null = () => null,
 ): TimelineItem[] {
   const finalTimestamp = Date.parse(detail.thread.updatedAt);
   const messages = detail.messages.filter(isVisibleHistoryMessage);
@@ -3144,10 +3161,15 @@ function remoteMessageTimeline(
     const clientMessageId = message.role === "user" && turnId
       ? clientMessageIdForTurn(turnId)
       : undefined;
-    const files = message.files?.map(({ path: _path, ...file }) => file);
-    const images = message.images
-      ?.filter((image) => image.generated)
-      .map((image) => ({ id: image.name, name: image.name, generated: true as const }));
+    const files = message.files?.map(({ path: _path, ...file }) => file) || [];
+    const images = (message.images || []).flatMap((image) => {
+      const file = resolveImageFile(image, message);
+      if (file) {
+        if (!files.some((entry) => entry.id === file.id)) files.push(file);
+        return [];
+      }
+      return image.generated ? [{ id: image.name, name: image.name, generated: true as const }] : [];
+    });
     return {
       id: message.id,
       logicalId: clientMessageId ? `client-message:${clientMessageId}` : message.id,

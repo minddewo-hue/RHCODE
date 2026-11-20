@@ -356,6 +356,7 @@ async function runCodexMigration(
     rememberProjects(options.rememberProject, migration.projectPaths);
     if (migration.failedCount > 0) {
       const error = new Error(`${migration.failedCount} Codex conversation(s) could not be copied.`);
+      state.complete("codex", "skipped", migration.importedCount);
       await options.onError?.("codex", error);
       return {
         source: "codex",
@@ -373,6 +374,7 @@ async function runCodexMigration(
     };
   } catch (error) {
     const normalized = toError(error);
+    state.complete("codex", "skipped");
     await options.onError?.("codex", normalized);
     return { source: "codex", status: "failed", discoveredCount: 0, importedCount: 0 };
   }
@@ -382,8 +384,9 @@ async function runClaudeMigration(
   state: EnvironmentMigrationStateStore,
   options: FirstLaunchMigrationOptions,
 ): Promise<MigrationRunResult> {
-  const client = options.createClaudeClient();
+  let client: ExternalMigrationClient | undefined;
   try {
+    client = options.createClaudeClient();
     await client.start({ codexHome: options.codexDestinationHome });
     const plan = await detectClaudeMigration(client);
     if (!plan) {
@@ -410,6 +413,7 @@ async function runClaudeMigration(
     rememberProjects(options.rememberProject, migration.projectPaths);
     if (migration.failedCount > 0) {
       const error = new Error(`${migration.failedCount} Claude conversation(s) could not be imported.`);
+      state.complete("claude", "skipped", migration.importedCount);
       await options.onError?.("claude", error);
       return {
         source: "claude",
@@ -427,10 +431,11 @@ async function runClaudeMigration(
     };
   } catch (error) {
     const normalized = toError(error);
+    state.complete("claude", "skipped");
     await options.onError?.("claude", normalized);
     return { source: "claude", status: "failed", discoveredCount: 0, importedCount: 0 };
   } finally {
-    client.stop();
+    client?.stop();
   }
 }
 

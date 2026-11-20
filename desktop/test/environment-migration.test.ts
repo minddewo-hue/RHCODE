@@ -289,6 +289,94 @@ test("prompts for Codex and Claude separately and records the first-launch decis
   assert.deepEqual(repeated, []);
 });
 
+for (const phase of ["create", "start", "detect", "import", "partial"] as const) {
+  test(`skips failed Claude migration on subsequent launches (${phase})`, async (context) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-migration-failure-"));
+    context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const statePath = path.join(root, "environment-migration.json");
+    const client = new FakeClaudeMigrationClient(root);
+    const failure = new Error("Agent Host exited with code 2.");
+    if (phase === "start") client.start = async () => { throw failure; };
+    const request = client.request.bind(client);
+    client.request = async <T>(method: string): Promise<T> => {
+      if (
+        (phase === "detect" && method === "externalAgentConfig/detect")
+        || (phase === "import" && method === "externalAgentConfig/import")
+      ) throw failure;
+      if (phase === "partial" && method === "externalAgentConfig/import") {
+        queueMicrotask(() => client.emit("message", {
+          method: "externalAgentConfig/import/completed",
+          params: {
+            importId: "partial",
+            itemTypeResults: [{
+              itemType: "SESSIONS",
+              successes: [{ itemType: "SESSIONS", cwd: root }],
+              failures: [{ itemType: "SESSIONS", message: "Could not import session." }],
+            }],
+          },
+        }));
+        return { importId: "partial" } as T;
+      }
+      return request<T>(method);
+    };
+    const errors: Error[] = [];
+    const options = {
+      statePath,
+      codexSourceHome: path.join(root, "source"),
+      codexDestinationHome: path.join(root, "destination"),
+      createClaudeClient: () => {
+        if (phase === "create") throw failure;
+        return client;
+      },
+      confirm: async () => true,
+      rememberProject: () => undefined,
+      onError: (_source: EnvironmentMigrationSource, error: Error) => { errors.push(error); },
+    };
+    const results = await runFirstLaunchEnvironmentMigrations(options);
+    assert.equal(results.find((result) => result.source === "claude")?.status, "failed");
+    assert.equal(errors.length, 1);
+    assert.equal(client.stopped, phase !== "create");
+    const stored = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(stored.sources.claude.status, "skipped");
+    assert.equal(stored.sources.claude.importedCount, phase === "partial" ? 1 : 0);
+    assert.deepEqual(await runFirstLaunchEnvironmentMigrations({
+      ...options,
+      createClaudeClient: () => { throw new Error("Should not retry Claude migration."); },
+      confirm: async () => { throw new Error("Should not prompt again."); },
+    }), []);
+    assert.equal(errors.length, 1);
+  });
+}
+
+test("skips partially failed Codex migration on subsequent launches", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rhzycode-codex-migration-failure-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const sourceHome = path.join(root, "source");
+  const failedSession = path.join(sourceHome, "sessions", "failed.jsonl");
+  writeSession(failedSession, "failed-id", root);
+  writeSession(path.join(sourceHome, "sessions", "success.jsonl"), "success-id", root);
+  fs.appendFileSync(failedSession, "invalid model_provider\n");
+  const statePath = path.join(root, "environment-migration.json");
+  const errors: EnvironmentMigrationSource[] = [];
+  const options = {
+    statePath,
+    codexSourceHome: sourceHome,
+    codexDestinationHome: path.join(root, "destination"),
+    createClaudeClient: () => new FakeClaudeMigrationClient(root),
+    confirm: async (source: EnvironmentMigrationSource) => source === "codex",
+    rememberProject: () => undefined,
+    onError: (source: EnvironmentMigrationSource) => { errors.push(source); },
+  };
+  const results = await runFirstLaunchEnvironmentMigrations(options);
+  assert.equal(results[0]?.status, "failed");
+  assert.equal(results[0]?.importedCount, 1);
+  const stored = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(stored.sources.codex.status, "skipped");
+  assert.equal(stored.sources.codex.importedCount, 1);
+  assert.deepEqual(await runFirstLaunchEnvironmentMigrations(options), []);
+  assert.deepEqual(errors, ["codex"]);
+});
+
 class FakeClaudeMigrationClient extends EventEmitter {
   stopped = false;
 

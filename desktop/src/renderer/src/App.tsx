@@ -263,6 +263,8 @@ export function App() {
   const [mobileAccessStatus, setMobileAccessStatus] = useState<MobileAccessStatus>(emptyMobileAccess);
   const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatus>(emptyPersistence);
   const [models, setModels] = useState<ModelOption[]>([]);
+  const [modelLoadState, setModelLoadState] = useState<"loading" | "ready" | "error">("loading");
+  const modelLoadRevision = useRef(0);
   const [selectedModel, setSelectedModel] = useState(() => storedSelectedModel());
   const [projectPath, setProjectPath] = useState(() => storedLastProject());
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -462,11 +464,22 @@ export function App() {
   }, []);
 
   async function refreshModels(): Promise<void> {
-    const response = await window.rhzycode.listModels().catch(() => null);
-    if (!response) return;
-    const available = response.data || [];
+    const revision = ++modelLoadRevision.current;
+    setModelLoadState("loading");
+    let available: ModelOption[];
+    try {
+      const response = await window.rhzycode.listModels();
+      available = response.data || [];
+    } catch (error) {
+      if (revision !== modelLoadRevision.current) return;
+      setModelLoadState("error");
+      upsertActivity(`model-list-error-${Date.now()}`, "Could not load models", getErrorMessage(error), "error");
+      return;
+    }
+    if (revision !== modelLoadRevision.current) return;
     modelsRef.current = available;
     setModels(available);
+    setModelLoadState("ready");
     const preferredModel = ensurePreferredModel(available);
     setSelectedModel((current) => {
       if (available.some((model) => model.model === current)) return current;
@@ -964,7 +977,7 @@ export function App() {
     const connection = window.rhzycode.connectAgent().then(
       (status) => {
         setAgentStatus(status);
-        return { ok: true as const, status };
+        return { ok: true as const };
       },
       (error: unknown) => ({ ok: false as const, error }),
     );
@@ -1021,7 +1034,7 @@ export function App() {
       ));
       const connectionResult = await connection;
       if (!connectionResult.ok) throw connectionResult.error;
-      const status = connectionResult.status;
+      const modelRefresh = refreshModels();
       const refreshedProjects = await window.rhzycode.listProjects();
       const connectedProjects = [
         ...refreshedProjects.map((project) => project.path).filter((path) => !isForgottenProject(path)),
@@ -1038,23 +1051,15 @@ export function App() {
         ? ++navigationRevisionRef.current
         : navigationRevisionRef.current;
       if (shouldRestoreWorkspace) setWorkspaceProject(restoredProject);
-      const [response, availableThreads] = await Promise.all([
-        status.state === "connected"
-          ? window.rhzycode.listModels().catch(() => ({ data: [] }))
-          : Promise.resolve({ data: [] }),
+      const [, availableThreads] = await Promise.all([
+        modelRefresh,
         window.rhzycode.listThreads(),
       ]);
-      const available = response.data || [];
-      setModels(available);
       setThreads(availableThreads);
       setActiveThreadIds((current) => new Set([
         ...current,
         ...availableThreads.filter((thread) => isActiveThreadStatus(thread.status)).map((thread) => thread.id),
       ]));
-      const initialModel = ensurePreferredModel(available);
-      selectedModelRef.current = initialModel;
-      setSelectedModel(initialModel);
-
       if (!shouldRestoreWorkspace || revision !== navigationRevisionRef.current) return;
 
       const preferredThreadId = restoredProject ? storedLastThread(restoredProject) : null;
@@ -1071,6 +1076,7 @@ export function App() {
       }
     } catch (error) {
       setAgentStatus({ state: "error", error: getErrorMessage(error) });
+      setModelLoadState((current) => current === "loading" ? "error" : current);
     } finally {
       if (initialBootstrap) bootstrapCompleteRef.current = true;
     }
@@ -2374,7 +2380,10 @@ export function App() {
             <label className="model-select" title="Model for the next turn">
               <Bot size={15} />
               <select value={selectedModel} onChange={(event) => changeSelectedModel(event.target.value)} disabled={!models.length} aria-label="Model for next turn">
-                {!models.length && <option value="">Loading models</option>}
+                {!models.length && <option value="">{
+                  modelLoadState === "loading" ? "Loading models"
+                    : modelLoadState === "error" ? "Could not load models" : "No models available"
+                }</option>}
                 {modelGroups.map((group) => (
                   <optgroup key={group.key} label={group.source}>
                     {group.models.map((model) => <option key={model.id} value={model.model}>{model.sourceModelName}</option>)}

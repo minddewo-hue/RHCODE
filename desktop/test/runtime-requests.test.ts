@@ -2877,6 +2877,42 @@ test("keeps manually configured gateway models selectable when the agent catalog
   }]);
 });
 
+test("returns configured gateway models when Agent Host cannot serve the model list", async () => {
+  const { runtime } = createRuntimeHarness();
+  const ids = ["provider-1/gpt-6.2-sol", "provider-1/gpt-6.2-astra"];
+  useGatewayModels(runtime, ids);
+  const diagnostics: string[] = [];
+  runtime.on("agent:diagnostic", (message: string) => diagnostics.push(message));
+  runtime.agent.request = async () => { throw new Error("Agent Host is not running."); };
+
+  const result = await runtime.listModels();
+  assert.deepEqual(result.data?.map(({ model }) => model), ids);
+  assert.match(diagnostics[0]!, /using the gateway catalog/);
+
+  useGatewayModels(runtime, []);
+  await assert.rejects(() => runtime.listModels(), /Agent Host is not running/);
+});
+
+test("reads subsequent model pages using the Agent Host cursor", async () => {
+  const { runtime } = createRuntimeHarness();
+  const ids = ["provider-1/gpt-6.2-sol", "provider-1/gpt-6.2-astra"];
+  useGatewayModels(runtime, ids);
+  const cursors: unknown[] = [];
+  runtime.agent.request = async (_method, params) => {
+    const cursor = (params as { cursor: unknown }).cursor;
+    cursors.push(cursor);
+    const model = ids[cursor === null ? 0 : 1];
+    return {
+      data: [{ id: model, model, displayName: `Agent ${model}` }],
+      nextCursor: cursor === null ? "second-page" : null,
+    } as never;
+  };
+
+  const result = await runtime.listModels();
+  assert.deepEqual(cursors, [null, "second-page"]);
+  assert.deepEqual(result.data?.map(({ displayName }) => displayName), ids.map((id) => `Agent ${id}`));
+});
+
 test("restores all Sol reasoning levels in desktop and remote model lists when agent metadata is missing", async () => {
   const { runtime } = createRuntimeHarness();
   useGatewayModels(runtime, ["provider-5/gpt-6.1-sol"]);

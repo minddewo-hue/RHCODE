@@ -616,24 +616,33 @@ export class DesktopRuntime extends EventEmitter {
   }
 
   async listModels(): Promise<ModelListResponse> {
-    await this.refreshGatewayModelsForCatalog();
     type RawModel = Omit<ModelOption, "supportedReasoningEfforts" | "isDefault"> & {
       supportedReasoningEfforts?: ModelOption["supportedReasoningEfforts"];
       isDefault?: boolean;
     };
-    type ModelListPage = { data?: RawModel[]; next_cursor?: string | null };
+    type ModelListPage = { data?: RawModel[]; nextCursor?: string | null; next_cursor?: string | null };
     const rawModels: RawModel[] = [];
-    let cursor: string | null = null;
-    for (let page = 0; page < 10; page += 1) {
-      const response: ModelListPage = await this.agent.request<ModelListPage>(
-        "model/list",
-        { cursor, includeHidden: false, limit: 200 },
-      );
-      rawModels.push(...(response.data || []));
-      cursor = typeof response.next_cursor === "string" && response.next_cursor
-        ? response.next_cursor
-        : null;
-      if (!cursor || !(response.data || []).length) break;
+    try {
+      await this.refreshGatewayModelsForCatalog();
+      let cursor: string | null = null;
+      for (let page = 0; page < 10; page += 1) {
+        const response: ModelListPage = await this.agent.request<ModelListPage>(
+          "model/list",
+          { cursor, includeHidden: false, limit: 200 },
+        );
+        rawModels.push(...(response.data || []));
+        const nextCursor = response.nextCursor ?? response.next_cursor;
+        cursor = typeof nextCursor === "string" ? nextCursor : null;
+        if (!cursor || !(response.data || []).length) break;
+      }
+    } catch (error) {
+      const gateway = this.gateway.getStatus();
+      if (gateway.error) throw new Error(gateway.error);
+      if (gateway.models.length === 0 && gateway.state === "running") throw error;
+      if (gateway.models.length > 0) {
+        const detail = error instanceof Error ? error.message : String(error);
+        this.emit("agent:diagnostic", `Agent model list failed; using the gateway catalog: ${detail}`);
+      }
     }
     const gatewayModels = this.gateway.getStatus().models;
     const gatewayModelsById = new Map(gatewayModels.map((model) => [model.id, model]));

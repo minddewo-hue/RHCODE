@@ -85,7 +85,7 @@ export class AppServerClient extends EventEmitter {
       "-c",
       `${key}=${toTomlValue(value)}`,
     ]);
-    const child = spawn(executable, [...configArgs, "app-server", "--stdio"], {
+    const child = spawn(executable, [...configArgs, "app-server"], {
       env: options.codexHome
         ? { ...process.env, CODEX_HOME: options.codexHome }
         : process.env,
